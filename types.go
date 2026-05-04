@@ -151,6 +151,13 @@ type ProcessorConfig struct {
 	ResponseTimeoutMs    int64  `json:"responseTimeoutMs,omitempty"`
 	RetryPolicy          string `json:"retryPolicy,omitempty"`
 	Context              string `json:"context,omitempty"`
+	// StartNewTxOnDispatch, when true and ExecutionMode is COMMIT_BEFORE_DISPATCH,
+	// causes the cascade engine to open a fresh transaction before dispatching
+	// the processor (so the processor may perform transactional work via that
+	// tx's token). When false (default) the processor runs with no transaction
+	// context and the connection is released entirely during dispatch.
+	// Ignored for any other ExecutionMode.
+	StartNewTxOnDispatch *bool `json:"startNewTxOnDispatch,omitempty"`
 }
 
 // --- State machine event types ---

@@ -1,6 +1,10 @@
 package spi
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestValidateChangeLevel(t *testing.T) {
 	for _, tc := range []struct {
@@ -24,5 +28,31 @@ func TestValidateChangeLevel(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestProcessorConfig_StartNewTxOnDispatch_RoundTrips(t *testing.T) {
+	tt := true
+	cfg := ProcessorConfig{StartNewTxOnDispatch: &tt}
+	bs, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bs), `"startNewTxOnDispatch":true`) {
+		t.Errorf("missing field in marshalled JSON: %s", bs)
+	}
+	var back ProcessorConfig
+	if err := json.Unmarshal(bs, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.StartNewTxOnDispatch == nil || !*back.StartNewTxOnDispatch {
+		t.Errorf("round-trip dropped the field: %+v", back)
+	}
+
+	// Default (nil) does NOT marshal because of omitempty.
+	defaultCfg := ProcessorConfig{}
+	bs2, _ := json.Marshal(defaultCfg)
+	if strings.Contains(string(bs2), "startNewTxOnDispatch") {
+		t.Errorf("nil pointer should be omitted, got %s", bs2)
 	}
 }

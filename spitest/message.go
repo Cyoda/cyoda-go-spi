@@ -31,7 +31,7 @@ func testMsgSaveAndGet(t *testing.T, h Harness) {
 	require.NoError(t, ms.Save(ctx, "msg-1", header, meta, bytes.NewReader(payload)))
 	gotHeader, _, rc, err := ms.Get(ctx, "msg-1")
 	require.NoError(t, err)
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	require.Equal(t, "type-a", gotHeader.Subject)
 	gotPayload, err := io.ReadAll(rc)
 	require.NoError(t, err)
@@ -67,7 +67,7 @@ func testMsgDeleteBatch(t *testing.T, h Harness) {
 	require.ErrorIs(t, err, spi.ErrNotFound)
 	_, _, rc, err := ms.Get(ctx, "m2")
 	require.NoError(t, err)
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 }
 
 func testMsgPayloadLarge(t *testing.T, h Harness) {
@@ -77,7 +77,7 @@ func testMsgPayloadLarge(t *testing.T, h Harness) {
 	require.NoError(t, ms.Save(ctx, "big", spi.MessageHeader{Subject: "big", ContentType: "application/octet-stream"}, spi.MessageMetaData{}, bytes.NewReader(payload)))
 	_, _, rc, err := ms.Get(ctx, "big")
 	require.NoError(t, err)
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
 	require.Equal(t, len(payload), len(got))

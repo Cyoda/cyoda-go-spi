@@ -2,7 +2,6 @@ package spi
 
 import (
 	"context"
-	"errors"
 	"time"
 )
 
@@ -15,12 +14,20 @@ import (
 //   - A zero-value Filter means "yield all entities for the model"
 //     (subject to opts).
 //   - Implementations MUST NOT hold a global write-blocking lock for the
-//     lifetime of the iterator (snapshot-then-iterate or cursor-based).
+//     lifetime of the iterator (e.g. by holding only short-lived row locks,
+//     or by paging through a cursor).
 //   - The iterator MUST observe ctx cancellation: the underlying driver
 //     surfaces an error; the iterator reports it via Err() and Next()
 //     returns false.
-//   - No retry on transient driver errors. First error is sticky.
+//   - No retry on transient driver errors — the plugin surfaces the first
+//     error and ends iteration.
+//   - Err() returns that error stickily; subsequent Next() calls return
+//     false.
 //   - Close() is idempotent.
+//
+// (ModelRef is hoisted as a first-class argument because iteration is
+// always scoped to exactly one model; IterateOptions carries only knobs
+// that vary across calls against the same model.)
 type Iterable interface {
 	Iterate(
 		ctx context.Context,
@@ -44,20 +51,12 @@ type Iterator interface {
 }
 
 // IterateOptions narrows or shifts the iteration window.
+//
+// Currently single-field; reserved as the extension point for future
+// iteration knobs (e.g. ordering hints).
 type IterateOptions struct {
 	// PointInTime, when non-nil, requests a historical snapshot at the
 	// given instant. Semantics match the rest of the SPI (read-committed
 	// snapshot).
 	PointInTime *time.Time
 }
-
-// ErrGroupCardinalityExceeded is returned by GroupedAggregator
-// implementations (or surfaced by the service-layer streaming tally)
-// when the result group count would exceed the configured ceiling.
-var ErrGroupCardinalityExceeded = errors.New("group cardinality exceeded ceiling")
-
-// ErrAggregationNotPushdownable signals that a GroupedAggregator
-// implementation cannot safely push down a specific request shape; the
-// caller (typically the service layer) should fall through to the
-// streaming-tally path via Iterable.
-var ErrAggregationNotPushdownable = errors.New("aggregation not pushdownable on this backend")

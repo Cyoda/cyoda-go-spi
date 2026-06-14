@@ -18,7 +18,6 @@ func TestIterableContract(t *testing.T) {
 	var opts spi.IterateOptions
 	now := time.Now()
 	opts.PointInTime = &now
-	_ = opts
 
 	// Verify Iterate signature
 	var iter spi.Iterable

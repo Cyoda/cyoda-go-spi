@@ -96,3 +96,14 @@ var ErrTxCommitInProgress = errors.New("transaction commit in progress")
 // UserContext whose tenant does not match the transaction's tenant.
 // Tenant-isolation invariant — distinct from data-op tenant checks.
 var ErrTxTenantMismatch = errors.New("transaction tenant mismatch")
+
+// ErrGroupCardinalityExceeded is returned by GroupedAggregator
+// implementations (or surfaced by the service-layer streaming tally)
+// when the result group count would exceed the configured ceiling.
+var ErrGroupCardinalityExceeded = errors.New("group cardinality exceeded ceiling")
+
+// ErrAggregationNotPushdownable signals that a GroupedAggregator
+// implementation cannot safely push down a specific request shape; the
+// caller (typically the service layer) should fall through to the
+// streaming-tally path via Iterable.
+var ErrAggregationNotPushdownable = errors.New("aggregation request shape not pushdownable")

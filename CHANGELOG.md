@@ -12,22 +12,19 @@ MAINTAINING.md.
 
 ## [Unreleased]
 
-> **v0.8.0 retraction note (2026-06-14):** the v0.8.0 tag was created
-> prematurely on 2026-06-13 at the tx-state-sentinels merge commit
-> `c301c0e`, before the remaining v0.8.0-milestone SPI changes were
-> merged. The tag has been deleted from the remote and the entries below
-> moved back to `[Unreleased]`. The v0.8.0 tag will be re-cut at
-> end-of-milestone once all v0.8.0-targeted SPI changes are in,
-> preserving lock-step with the cyoda-go v0.8.0 release.
->
-> This is a one-time controlled exception to the immutability rule in
-> MAINTAINING.md, motivated by (a) the premature tag was never consumed
-> by anyone outside the cyoda-platform org and (b) cyoda-go (the sole
-> consumer) is being moved to a pseudo-version pin during the
-> intervening period. Consumers should set
-> `GOPRIVATE=github.com/Cyoda-platform/*` (or otherwise bypass
-> sum.golang.org for cyoda-platform modules) to avoid the stale-SHA
-> cache when the v0.8.0 tag is later re-cut at a different commit.
+## [0.8.0] - 2026-06-23
+
+> **v0.8.0 re-cut note:** an earlier v0.8.0 tag was created prematurely on
+> 2026-06-13 at the tx-state-sentinels merge commit `c301c0e`, before the
+> remaining v0.8.0-milestone SPI changes were merged. That tag was deleted
+> from the remote and re-cut here at the completed milestone, preserving
+> lock-step with the cyoda-go v0.8.0 release. This was a one-time controlled
+> exception to the immutability rule in MAINTAINING.md, safe because the
+> premature tag was never consumed outside the cyoda-platform org and the sole
+> consumer (cyoda-go) tracked a pseudo-version during the interval. Consumers
+> that fetched the premature tag should set
+> `GOPRIVATE=github.com/Cyoda-platform/*` (or otherwise bypass sum.golang.org
+> for cyoda-platform modules) and refresh.
 
 ### Added
 

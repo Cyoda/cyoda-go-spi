@@ -12,19 +12,19 @@ MAINTAINING.md.
 
 ## [Unreleased]
 
-## [0.8.0] - 2026-06-23
+## [0.8.1] - 2026-06-23
 
-> **v0.8.0 re-cut note:** an earlier v0.8.0 tag was created prematurely on
-> 2026-06-13 at the tx-state-sentinels merge commit `c301c0e`, before the
-> remaining v0.8.0-milestone SPI changes were merged. That tag was deleted
-> from the remote and re-cut here at the completed milestone, preserving
-> lock-step with the cyoda-go v0.8.0 release. This was a one-time controlled
-> exception to the immutability rule in MAINTAINING.md, safe because the
-> premature tag was never consumed outside the cyoda-platform org and the sole
-> consumer (cyoda-go) tracked a pseudo-version during the interval. Consumers
-> that fetched the premature tag should set
-> `GOPRIVATE=github.com/Cyoda-platform/*` (or otherwise bypass sum.golang.org
-> for cyoda-platform modules) and refresh.
+> **There is no v0.8.0 release.** A v0.8.0 tag was created prematurely on
+> 2026-06-13 at the tx-state-sentinels commit `c301c0e`, before the rest of the
+> v0.8.x SPI surface was merged. It was fetched through proxy.golang.org, which
+> permanently bound `v0.8.0` to that incomplete commit — a Go module version
+> cannot be re-cut once the proxy/checksum-database has served it. Rather than
+> ship a poisoned version behind a GOPRIVATE workaround, v0.8.0 is abandoned and
+> **v0.8.1 is the canonical, complete v0.8.x SPI release**. It resolves cleanly
+> through the public proxy with no special configuration. (See MAINTAINING.md:
+> a module version is tagged exactly once, at the final commit, never re-cut.)
+>
+> v0.8.1 contains the full v0.8.x surface below — nothing was dropped.
 
 ### Added
 

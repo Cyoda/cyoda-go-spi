@@ -8,11 +8,17 @@ import (
 	"strings"
 )
 
-// maxNumDigits is the maximum count of significant digits in a numeric literal
-// that ComputeClaims will materialize via math/big. Literals exceeding this
-// are rejected pre-materialization (DoS guard).
-// 64 significant digits covers all practical fixed-precision numerics.
-const maxNumDigits = 64
+// maxCoeffDigits is the maximum number of coefficient characters (integer digits
+// plus fractional digits, including any leading fractional zeros) in a numeric
+// literal that ComputeClaims will materialize via math/big. This is a
+// conservative DoS pre-filter: literals whose coefficient exceeds this bound are
+// rejected as ErrPartialUniqueKey without any big-number allocation.
+//
+// Note: this counts ALL coefficient characters, not true significant digits —
+// e.g. "0.000…1" with more than 64 coefficient chars is rejected while "1e-66"
+// (one coefficient char) passes. The filter fails closed: pathological
+// leading-zero-padded representations produce a 4xx ErrPartialUniqueKey.
+const maxCoeffDigits = 64
 
 // maxNumExp is the maximum absolute exponent magnitude accepted.
 // 6144 matches IEEE 754 decimal128 range; any real-world value fits within it.
@@ -38,7 +44,7 @@ func ComputeClaims(keys []UniqueKey, doc []byte) ([]UniqueClaim, error) {
 	dec := json.NewDecoder(bytes.NewReader(doc))
 	dec.UseNumber()
 	if err := dec.Decode(&root); err != nil {
-		return nil, fmt.Errorf("%w: document is not a JSON object: %v", ErrPartialUniqueKey, err)
+		return nil, fmt.Errorf("document is not a JSON object: %w", err)
 	}
 
 	var claims []UniqueClaim
@@ -152,8 +158,8 @@ func canonNum(n json.Number) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%w: malformed numeric literal %q: %v", ErrPartialUniqueKey, s, err)
 	}
-	if digits > maxNumDigits || exp > maxNumExp || exp < -maxNumExp {
-		return "", fmt.Errorf("%w: numeric literal out of bounds %q (digits=%d exp=%d)",
+	if digits > maxCoeffDigits || exp > maxNumExp || exp < -maxNumExp {
+		return "", fmt.Errorf("%w: numeric literal out of bounds %q (coeffDigits=%d exp=%d)",
 			ErrPartialUniqueKey, s, digits, exp)
 	}
 	r, ok := new(big.Rat).SetString(s)
@@ -163,14 +169,14 @@ func canonNum(n json.Number) (string, error) {
 	return "n:" + r.RatString(), nil
 }
 
-// countDigitsExp parses the significant-digit count and effective exponent
+// countDigitsExp parses the coefficient-character count and effective exponent
 // from a JSON numeric literal string WITHOUT materializing any big value.
 //
-// For "4.2e1": coefficient "4.2" has 2 significant digits; fractional digits = 1;
+// For "4.2e1": coefficient "4.2" has 2 coefficient chars; fractional digits = 1;
 // explicit exponent = 1; effective exponent = explicit - fractional = 0.
-// For "1e1000000000": digits = 1, exp = 1_000_000_000.
+// For "1e1000000000": coeffDigits = 1, exp = 1_000_000_000.
 //
-// Returns (significantDigits, effectiveExponent, error).
+// Returns (coeffDigits, effectiveExponent, error).
 func countDigitsExp(s string) (int, int, error) {
 	if s == "" {
 		return 0, 0, fmt.Errorf("empty string")
@@ -232,7 +238,7 @@ func countDigitsExp(s string) (int, int, error) {
 		return 0, 0, fmt.Errorf("unexpected character at position %d", i)
 	}
 
-	sigDigits := intDigits + fracDigits
+	coeffDigits := intDigits + fracDigits
 	effectiveExp := explicitExp - fracDigits
-	return sigDigits, effectiveExp, nil
+	return coeffDigits, effectiveExp, nil
 }

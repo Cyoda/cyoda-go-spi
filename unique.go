@@ -14,3 +14,10 @@ type UniqueClaim struct {
 	KeyID     string
 	Signature string
 }
+
+// CompositeUniqueKeyCapable is OPTIONAL on a StoreFactory: advertises composite
+// unique-key support. Absence (or false) = unsupported. Additive; NOT part of
+// the StoreFactory interface.
+type CompositeUniqueKeyCapable interface {
+	SupportsCompositeUniqueKeys() bool
+}

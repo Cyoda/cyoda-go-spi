@@ -107,3 +107,12 @@ var ErrGroupCardinalityExceeded = errors.New("group cardinality exceeded ceiling
 // caller (typically the service layer) should fall through to the
 // streaming-tally path via Iterable.
 var ErrAggregationNotPushdownable = errors.New("aggregation request shape not pushdownable")
+
+// ErrUniqueViolation: a write would duplicate a declared composite unique key.
+// Deterministic, NON-retryable (distinct from ErrConflict).
+var ErrUniqueViolation = errors.New("composite unique key violation")
+
+// ErrPartialUniqueKey is the umbrella for every ComputeClaims VALUE-invalid
+// error — a partially-filled key, an over-bound numeric literal, or a
+// non-scalar value at a key path. All map to 422 INVALID_UNIQUE_KEY.
+var ErrPartialUniqueKey = errors.New("invalid composite unique key value")

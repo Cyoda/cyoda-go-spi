@@ -86,6 +86,9 @@ type ModelDescriptor struct {
 	ChangeLevel ChangeLevel
 	UpdateDate  time.Time
 	Schema      []byte
+	// UniqueKeys are the model's composite unique-key definitions. Additive;
+	// persisted inside the descriptor by each model store. Empty = none.
+	UniqueKeys []UniqueKey
 }
 
 // MessageHeader holds the fixed AMQP-aligned headers for an edge message.

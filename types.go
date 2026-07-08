@@ -125,6 +125,11 @@ type WorkflowDefinition struct {
 	// Annotations is arbitrary client-owned metadata, stored and
 	// round-tripped verbatim and never interpreted by the engine.
 	Annotations json.RawMessage `json:"annotations,omitempty"`
+	// CriterionAnnotations is client-owned metadata describing the
+	// workflow-selection Criterion as a whole (a sibling to Criterion,
+	// because the criterion value is opaque and round-trips verbatim).
+	// Same bag shape as Annotations; engine-ignored.
+	CriterionAnnotations json.RawMessage `json:"criterionAnnotations,omitempty"`
 }
 
 // StateDefinition represents a state with its transitions.
@@ -147,6 +152,10 @@ type TransitionDefinition struct {
 	// Annotations is arbitrary client-owned metadata, stored and
 	// round-tripped verbatim and never interpreted by the engine.
 	Annotations json.RawMessage `json:"annotations,omitempty"`
+	// CriterionAnnotations is client-owned metadata describing this
+	// transition's guard Criterion as a whole. Sibling to Criterion;
+	// engine-ignored. See WorkflowDefinition.CriterionAnnotations.
+	CriterionAnnotations json.RawMessage `json:"criterionAnnotations,omitempty"`
 }
 
 // ProcessorDefinition represents a processor attached to a transition.
@@ -164,6 +173,12 @@ type ProcessorDefinition struct {
 	Name          string          `json:"name"`
 	ExecutionMode string          `json:"executionMode,omitempty"`
 	Config        ProcessorConfig `json:"config,omitempty"`
+	// Annotations is arbitrary client-owned metadata, stored and
+	// round-tripped verbatim and never interpreted by the engine.
+	// Well-known renderer keys (displayName, description) are a documented
+	// convention only — the engine validates object-shape and size, not
+	// the value types.
+	Annotations json.RawMessage `json:"annotations,omitempty"`
 }
 
 // ProcessorConfig holds configuration for a processor.

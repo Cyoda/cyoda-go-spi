@@ -318,6 +318,11 @@ const (
 	SMEventProcessCriterionNoMatch    StateMachineEventType = "PROCESS_NOT_MATCH_CRITERION"
 	SMEventProcessingPaused           StateMachineEventType = "PAUSE_FOR_PROCESSING"
 	SMEventStateProcessResult         StateMachineEventType = "STATE_PROCESS_RESULT"
+
+	SMEventScheduledTransitionArmed     StateMachineEventType = "SCHEDULED_TRANSITION_ARM"
+	SMEventScheduledTransitionFired     StateMachineEventType = "SCHEDULED_TRANSITION_FIRE"
+	SMEventScheduledTransitionExpired   StateMachineEventType = "SCHEDULED_TRANSITION_EXPIRE"
+	SMEventScheduledTransitionCancelled StateMachineEventType = "SCHEDULED_TRANSITION_CANCEL"
 )
 
 // StateMachineEvent represents a single event in a state machine execution.

@@ -346,3 +346,17 @@ func TestScheduledTask_RoundTrips(t *testing.T) {
 		t.Errorf("nil TimeoutMs must be omitted: %s", b2)
 	}
 }
+
+func TestScheduledTransitionEventTypes(t *testing.T) {
+	cases := map[StateMachineEventType]string{
+		SMEventScheduledTransitionArmed:     "SCHEDULED_TRANSITION_ARM",
+		SMEventScheduledTransitionFired:     "SCHEDULED_TRANSITION_FIRE",
+		SMEventScheduledTransitionExpired:   "SCHEDULED_TRANSITION_EXPIRE",
+		SMEventScheduledTransitionCancelled: "SCHEDULED_TRANSITION_CANCEL",
+	}
+	for got, want := range cases {
+		if string(got) != want {
+			t.Errorf("got %q want %q", got, want)
+		}
+	}
+}

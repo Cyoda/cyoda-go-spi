@@ -262,6 +262,43 @@ type TransitionSchedule struct {
 	TimeoutMs *int64 `json:"timeoutMs,omitempty"`
 }
 
+// ScheduledTaskType discriminates ScheduledTask variants. Only
+// fire-transition is implemented today; the runtime is generic so
+// future variants (delayed export, async-result crossover) reuse it.
+type ScheduledTaskType string
+
+const ScheduledTaskFireTransition ScheduledTaskType = "fire-transition"
+
+// ScheduledTask is a durable "do something at ScheduledTime, with
+// TimeoutMs lateness tolerance" record. For fire-transition, the
+// payload fields identify the entity+transition to fire. See the
+// cyoda-go scheduled-transition-runtime design for semantics.
+type ScheduledTask struct {
+	// ID is deterministic for fire-transition:
+	// hash(type, entityID, sourceState, transition) — so re-arm upserts
+	// in place and never collides across states.
+	ID       string            `json:"id"`
+	TenantID TenantID          `json:"tenantId"`
+	Type     ScheduledTaskType `json:"type"`
+	// ScheduledTime is unix-millis; due when <= now.
+	ScheduledTime int64 `json:"scheduledTime"`
+	// TimeoutMs is the lateness tolerance in ms; nil = never expires.
+	TimeoutMs *int64 `json:"timeoutMs,omitempty"`
+	// RedispatchAfter is a unix-millis best-effort throttle; the scan
+	// excludes rows still inside it. Not a lease, not conditional.
+	RedispatchAfter *int64 `json:"redispatchAfter,omitempty"`
+
+	// --- fire-transition payload ---
+	EntityID     string `json:"entityId,omitempty"`
+	ModelName    string `json:"modelName,omitempty"`
+	ModelVersion int    `json:"modelVersion,omitempty"`
+	Transition   string `json:"transition,omitempty"`
+	SourceState  string `json:"sourceState,omitempty"`
+
+	ArmedAt      int64 `json:"armedAt,omitempty"`
+	AttemptCount int   `json:"attemptCount,omitempty"`
+}
+
 // --- State machine event types ---
 
 // StateMachineEventType represents the type of state machine event.

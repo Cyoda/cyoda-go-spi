@@ -308,3 +308,41 @@ func TestProcessorConfig_AsyncResultAndCrossover_RoundTrips(t *testing.T) {
 		})
 	}
 }
+
+func TestScheduledTask_RoundTrips(t *testing.T) {
+	to := int64(5000)
+	rd := int64(1_700_000_030_000)
+	task := ScheduledTask{
+		ID:              "e1:S:T",
+		TenantID:        "t1",
+		Type:            ScheduledTaskFireTransition,
+		ScheduledTime:   1_700_000_000_000,
+		TimeoutMs:       &to,
+		RedispatchAfter: &rd,
+		EntityID:        "e1",
+		ModelName:       "order",
+		ModelVersion:    2,
+		Transition:      "AutoClose",
+		SourceState:     "OPEN",
+		ArmedAt:         1_699_999_999_000,
+		AttemptCount:    1,
+	}
+	b, err := json.Marshal(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back ScheduledTask
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Type != ScheduledTaskFireTransition || back.ScheduledTime != task.ScheduledTime ||
+		back.TimeoutMs == nil || *back.TimeoutMs != 5000 || back.SourceState != "OPEN" {
+		t.Fatalf("round-trip lost fields: %+v", back)
+	}
+	// nil TimeoutMs (no timeout) must round-trip as absent.
+	task.TimeoutMs = nil
+	b2, _ := json.Marshal(task)
+	if strings.Contains(string(b2), "timeoutMs") {
+		t.Errorf("nil TimeoutMs must be omitted: %s", b2)
+	}
+}

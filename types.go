@@ -274,9 +274,14 @@ const ScheduledTaskFireTransition ScheduledTaskType = "fire-transition"
 // payload fields identify the entity+transition to fire. See the
 // cyoda-go scheduled-transition-runtime design for semantics.
 type ScheduledTask struct {
-	// ID is deterministic for fire-transition:
-	// hash(type, entityID, sourceState, transition) — so re-arm upserts
-	// in place and never collides across states.
+	// ID is deterministic and engine-defined: the same
+	// (tenant, entity, source state, transition) always derives the same
+	// ID, so re-arming a still-scheduled transition upserts the existing
+	// row in place instead of creating a duplicate. Tenant and entity are
+	// incorporated so IDs can never collide across tenants or entities.
+	// The exact derivation (hash inputs, encoding) is an engine-internal
+	// detail, not part of this SPI's contract — stores must treat ID as
+	// an opaque, stable key.
 	ID       string            `json:"id"`
 	TenantID TenantID          `json:"tenantId"`
 	Type     ScheduledTaskType `json:"type"`

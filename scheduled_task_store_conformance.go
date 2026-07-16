@@ -37,6 +37,46 @@ func RunScheduledTaskStoreConformance(t *testing.T, newFactory func() StoreFacto
 		t.Fatalf("ScanDue: want [e1:S:T], got %+v", got)
 	}
 
+	// Upsert on an existing ID must fully re-arm the row — replace ALL
+	// non-ID columns, not merge a subset. Re-upsert the same ID with a
+	// changed ModelVersion, ScheduledTime, and TimeoutMs (first nil->non-nil,
+	// then non-nil->nil) and confirm Get reflects the latest upsert only.
+	rearmID := "e3:S:T"
+	if err := sts.Upsert(ctx, ScheduledTask{ID: rearmID, TenantID: "t1", Type: ScheduledTaskFireTransition,
+		ScheduledTime: 500, EntityID: "e3", ModelName: "m", ModelVersion: 2,
+		SourceState: "S", Transition: "T"}); err != nil {
+		t.Fatal(err)
+	}
+	timeout1 := int64(2000)
+	if err := sts.Upsert(ctx, ScheduledTask{ID: rearmID, TenantID: "t1", Type: ScheduledTaskFireTransition,
+		ScheduledTime: 600, EntityID: "e3", ModelName: "m", ModelVersion: 3,
+		SourceState: "S", Transition: "T", TimeoutMs: &timeout1}); err != nil {
+		t.Fatal(err)
+	}
+	rearmed, found, err := sts.Get(ctx, rearmID)
+	if err != nil || !found {
+		t.Fatalf("Get after re-arm: found=%v err=%v", found, err)
+	}
+	if rearmed.ModelVersion != 3 || rearmed.ScheduledTime != 600 ||
+		rearmed.TimeoutMs == nil || *rearmed.TimeoutMs != 2000 {
+		t.Fatalf("re-arm want ModelVersion=3 ScheduledTime=600 TimeoutMs=2000, got %+v", rearmed)
+	}
+	if err := sts.Upsert(ctx, ScheduledTask{ID: rearmID, TenantID: "t1", Type: ScheduledTaskFireTransition,
+		ScheduledTime: 700, EntityID: "e3", ModelName: "m", ModelVersion: 4,
+		SourceState: "S", Transition: "T"}); err != nil {
+		t.Fatal(err)
+	}
+	rearmed, found, err = sts.Get(ctx, rearmID)
+	if err != nil || !found {
+		t.Fatalf("Get after second re-arm: found=%v err=%v", found, err)
+	}
+	if rearmed.ModelVersion != 4 || rearmed.ScheduledTime != 700 || rearmed.TimeoutMs != nil {
+		t.Fatalf("re-arm want ModelVersion=4 ScheduledTime=700 TimeoutMs=nil, got %+v", rearmed)
+	}
+	if _, err := sts.Delete(ctx, rearmID); err != nil {
+		t.Fatal(err)
+	}
+
 	// MarkRedispatch hides it from a subsequent scan.
 	if err := sts.MarkRedispatch(ctx, "e1:S:T", 5000); err != nil {
 		t.Fatal(err)

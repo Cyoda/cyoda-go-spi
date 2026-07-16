@@ -16,8 +16,43 @@ type StoreFactory interface {
 	WorkflowStore(ctx context.Context) (WorkflowStore, error)
 	StateMachineAuditStore(ctx context.Context) (StateMachineAuditStore, error)
 	AsyncSearchStore(ctx context.Context) (AsyncSearchStore, error)
+	// ScheduledTaskStore accesses durable scheduled tasks. Unlike the
+	// per-tenant stores, its ScanDue is cross-tenant (obtain with a
+	// background/tenant-less context); Upsert/Delete/Reconcile carry the
+	// tenant on the task/request. Participates in the entity write's
+	// transaction so arm/cancel are atomic with the state change.
+	ScheduledTaskStore(ctx context.Context) (ScheduledTaskStore, error)
 	TransactionManager(ctx context.Context) (TransactionManager, error)
 	Close() error
+}
+
+// ReconcileForEntity input: arm the CurrentState's scheduled transitions,
+// cancel (delete) any pending task for this entity whose SourceState !=
+// CurrentState. Returns the cancelled tasks (for audit).
+type ReconcileRequest struct {
+	TenantID     TenantID
+	EntityID     string
+	CurrentState string
+	Arm          []ScheduledTask // tasks to Upsert (current state's schedules)
+}
+
+// ScheduledTaskStore persists ScheduledTasks. Arm/Delete/Reconcile MUST
+// participate in the caller's transaction (atomic with the entity write).
+// ScanDue is a read across all tenants and is called outside any tenant tx.
+type ScheduledTaskStore interface {
+	Upsert(ctx context.Context, task ScheduledTask) error
+	Get(ctx context.Context, id string) (task *ScheduledTask, found bool, err error)
+	// ScanDue returns up to limit tasks with ScheduledTime <= nowMs AND
+	// (RedispatchAfter is null OR <= nowMs), ordered by ScheduledTime, across tenants.
+	ScanDue(ctx context.Context, nowMs int64, limit int) ([]ScheduledTask, error)
+	// MarkRedispatch sets RedispatchAfter = redispatchAfterMs (plain write) and bumps AttemptCount.
+	MarkRedispatch(ctx context.Context, id string, redispatchAfterMs int64) error
+	// Delete removes the task, returning whether a row was actually removed
+	// (delete-gated terminal audit relies on this).
+	Delete(ctx context.Context, id string) (removed bool, err error)
+	// ReconcileForEntity upserts req.Arm and deletes the entity's other-state
+	// pending tasks; returns the deleted (cancelled) tasks.
+	ReconcileForEntity(ctx context.Context, req ReconcileRequest) (cancelled []ScheduledTask, err error)
 }
 
 type EntityStore interface {

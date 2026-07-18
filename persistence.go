@@ -28,12 +28,19 @@ type StoreFactory interface {
 
 // ReconcileForEntity input: arm the CurrentState's scheduled transitions,
 // cancel (delete) any pending task for this entity whose SourceState !=
-// CurrentState. Returns the cancelled tasks (for audit).
+// CurrentState, and additionally delete the tasks explicitly listed in
+// Cancel. Returns the cancelled tasks (for audit); the Cancel-driven
+// deletions are reported distinctly from the SourceState-mismatch cancels.
 type ReconcileRequest struct {
 	TenantID     TenantID
 	EntityID     string
 	CurrentState string
 	Arm          []ScheduledTask // tasks to Upsert (current state's schedules)
+	// Cancel lists task IDs to delete for this transaction regardless of
+	// SourceState, e.g. born-expired scheduled transitions computed by a
+	// ScheduleFunction whose result already lies in the past. Audited
+	// separately from the SourceState-mismatch cancels.
+	Cancel []string
 }
 
 // ScheduledTaskStore persists ScheduledTasks. Arm/Delete/Reconcile MUST
@@ -50,8 +57,10 @@ type ScheduledTaskStore interface {
 	// Delete removes the task, returning whether a row was actually removed
 	// (delete-gated terminal audit relies on this).
 	Delete(ctx context.Context, id string) (removed bool, err error)
-	// ReconcileForEntity upserts req.Arm and deletes the entity's other-state
-	// pending tasks; returns the deleted (cancelled) tasks.
+	// ReconcileForEntity upserts req.Arm, deletes the entity's other-state
+	// pending tasks, and additionally deletes the tasks listed in req.Cancel
+	// (audited distinctly from the SourceState-mismatch cancels); returns
+	// the deleted (cancelled) tasks.
 	ReconcileForEntity(ctx context.Context, req ReconcileRequest) (cancelled []ScheduledTask, err error)
 }
 

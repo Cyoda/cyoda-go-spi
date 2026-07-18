@@ -260,6 +260,23 @@ type TransitionSchedule struct {
 	// milliseconds after scheduledTime. Independent of DelayMs; the
 	// two measure different quantities.
 	TimeoutMs *int64 `json:"timeoutMs,omitempty"`
+
+	// Function configures a Function callout that computes the firing
+	// time (and optional expiry) per entity instead of a static DelayMs.
+	// Mutually exclusive with DelayMs (enforced by the engine at import).
+	Function *ScheduleFunction `json:"function,omitempty"`
+}
+
+// ScheduleFunction configures a Function callout that computes a scheduled
+// transition's firing time (and optional expiry) per entity. Mutually
+// exclusive with TransitionSchedule.DelayMs (enforced by the engine at import).
+type ScheduleFunction struct {
+	Name                 string `json:"name"`
+	ResultKind           string `json:"resultKind"` // must be "Schedule"
+	CalculationNodesTags string `json:"calculationNodesTags"`
+	AttachEntity         bool   `json:"attachEntity"`
+	Context              string `json:"context,omitempty"`
+	ResponseTimeoutMs    int64  `json:"responseTimeoutMs,omitempty"`
 }
 
 // ScheduledTaskType discriminates ScheduledTask variants. Only

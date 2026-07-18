@@ -121,6 +121,40 @@ func RunScheduledTaskStoreConformance(t *testing.T, newFactory func() StoreFacto
 		t.Error("new-state task should be armed")
 	}
 
+	// ReconcileForEntity: req.Cancel explicitly deletes a task id regardless
+	// of SourceState — the born-expired path, where a ScheduleFunction
+	// resolves a deadline already in the past for the CURRENT state, so it
+	// must never be armed and any previously-armed row for it must be
+	// cancelled. Arm a task in the current state, then reconcile again with
+	// that id in Cancel (not in Arm): the row must be gone, and — because
+	// this is a Cancel-driven delete, not a SourceState-mismatch cancel —
+	// the returned cancelled slice must NOT include it (the caller audits
+	// Cancel deletes separately, as EXPIRE not CANCEL).
+	bornExpiredID := "e4:S3:T3"
+	if err := sts.Upsert(ctx, ScheduledTask{ID: bornExpiredID, TenantID: "t1", Type: ScheduledTaskFireTransition,
+		ScheduledTime: 100, EntityID: "e4", SourceState: "S3", Transition: "T3"}); err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err = sts.ReconcileForEntity(ctx, ReconcileRequest{
+		TenantID: "t1", EntityID: "e4", CurrentState: "S3", Cancel: []string{bornExpiredID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found, _ := sts.Get(ctx, bornExpiredID); found {
+		t.Error("req.Cancel task should be deleted")
+	}
+	for _, c := range cancelled {
+		if c.ID == bornExpiredID {
+			t.Errorf("req.Cancel delete must not appear in the returned cancelled (SourceState-mismatch) slice, got %+v", cancelled)
+		}
+	}
+
+	// Deleting a nonexistent id via req.Cancel is a harmless no-op.
+	if _, err := sts.ReconcileForEntity(ctx, ReconcileRequest{
+		TenantID: "t1", EntityID: "e4", CurrentState: "S3", Cancel: []string{"does-not-exist"}}); err != nil {
+		t.Fatal(err)
+	}
+
 	// Tenant isolation: a t2 task is not returned to a t1-scoped delete but IS
 	// visible to the cross-tenant ScanDue with its own TenantID.
 	other := ScheduledTask{ID: "e9:S:T", TenantID: "t2", Type: ScheduledTaskFireTransition,

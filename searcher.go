@@ -9,6 +9,14 @@ import (
 // search predicate pushdown (e.g. SQL WHERE clauses). Plugins that
 // implement Searcher get native query execution; those that don't
 // fall back to in-memory filtering.
+//
+// Search MUST honour an active transaction (read-your-own-writes): with no
+// transaction active it is a committed pushdown; with a transaction active it
+// overlays the transaction's write-set so the result is identical to what
+// GetAll + in-memory match would produce. In-transaction point-in-time reads
+// are committed-only — they never see the transaction's own uncommitted
+// writes for the PIT dimension. Returned entities enter the transaction's
+// read-set only when SearchOptions.TrackingRead is set.
 type Searcher interface {
 	Search(ctx context.Context, filter Filter, opts SearchOptions) ([]*Entity, error)
 }
@@ -21,6 +29,15 @@ type SearchOptions struct {
 	Limit        int
 	Offset       int
 	OrderBy      []OrderSpec
+
+	// TrackingRead, when true and a transaction is active, records the
+	// entities this search returns into the transaction's read-set, so
+	// commit-time first-committer-wins validates them (a FOR-SHARE / locking
+	// read, implemented optimistically). Default false: a plain snapshot
+	// predicate read that records nothing. No-op when no transaction is
+	// active. In-transaction search never prevents phantoms regardless of
+	// this flag (see docs/CONSISTENCY.md).
+	TrackingRead bool
 }
 
 // OrderKind selects the canonical comparison applied to a sort key so that

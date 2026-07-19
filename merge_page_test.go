@@ -101,6 +101,56 @@ func TestMergePage_EmptyCommittedSourceOnlyAdds(t *testing.T) {
 	}
 }
 
+// TestMergePage_EarlyStopsWithoutDrainingSource is the core guarantee: with
+// a small bounded limit and no adds/deletes, MergePage must pull only enough
+// committed rows to fill offset+limit and then stop — never draining a large
+// source. The committed rows are generated lazily inside the closure (no
+// upfront allocation of the full source), and a counter proves the number of
+// next() calls stays at offset+limit+1 (the +1 is the one-ahead buffered
+// pull that overshoots by exactly one before the early-stop break).
+func TestMergePage_EarlyStopsWithoutDrainingSource(t *testing.T) {
+	specs := []spi.OrderSpec{{Path: "n", Source: spi.SourceData, Kind: spi.OrderNumeric}}
+	const sourceSize = 100_000
+	offset, limit := 0, 1
+	calls := 0
+	i := 0
+	next := func() (*spi.Entity, bool, error) {
+		calls++
+		if i >= sourceSize {
+			return nil, false, nil
+		}
+		e := &spi.Entity{Data: []byte(`{"n":` + itoa(i) + `}`), Meta: spi.EntityMeta{ID: "id" + itoa(i)}}
+		i++
+		return e, true, nil
+	}
+	got, err := spi.MergePage(next, nil, none, specs, offset, limit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 row, got %d", len(got))
+	}
+	if maxCalls := offset + limit + 1; calls > maxCalls {
+		t.Fatalf("MergePage drained source: %d next() calls, want <= %d (did not early-stop)", calls, maxCalls)
+	}
+}
+
+// itoa is a tiny allocation-light int->string for building lazy test payloads
+// without pulling in strconv at every call site.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b [20]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(b[i:])
+}
+
 // TestMergePage_PropagatesNextError verifies an error from the lazy
 // committed-source puller aborts the merge and is returned to the caller,
 // rather than being swallowed or treated as exhaustion.

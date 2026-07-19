@@ -4,8 +4,10 @@ package spi
 // (next, lazy pull) with a pre-sorted adds slice, skipping committed rows
 // for which deleted(id) is true, ordered by LessByOrder(specs). It returns
 // the [offset, offset+limit) window. limit<=0 means unbounded. Memory is
-// bounded to ~offset+limit+len(adds): the committed source is pulled lazily
-// and the merge early-stops once enough survivors are gathered.
+// bounded to ~offset+limit+len(adds) when limit>0: the committed source is
+// pulled lazily and the merge early-stops once enough survivors are
+// gathered. limit<=0 (unbounded) drains and materializes the entire
+// surviving sequence.
 func MergePage(next func() (*Entity, bool, error), adds []*Entity, deleted func(id string) bool, specs []OrderSpec, offset, limit int) ([]*Entity, error) {
 	need := -1
 	if limit > 0 {

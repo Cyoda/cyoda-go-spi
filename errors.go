@@ -102,6 +102,16 @@ var ErrTxTenantMismatch = errors.New("transaction tenant mismatch")
 // when the result group count would exceed the configured ceiling.
 var ErrGroupCardinalityExceeded = errors.New("group cardinality exceeded ceiling")
 
+// ErrSearchResultLimitExceeded is returned by a Searcher whose direct search
+// matched more entities than the configured result-limit cap (bounded-or-fail
+// contract). The engine maps it to a client-facing 400.
+var ErrSearchResultLimitExceeded = errors.New("search result limit exceeded")
+
+// ErrScanBudgetExhausted is returned by a Searcher or streaming aggregator
+// whose residual (non-pushdown) scan examined more rows than its configured
+// scan budget before completing. The engine maps it to a client-facing 400.
+var ErrScanBudgetExhausted = errors.New("scan budget exhausted")
+
 // ErrAggregationNotPushdownable signals that a GroupedAggregator
 // implementation cannot safely push down a specific request shape; the
 // caller (typically the service layer) should fall through to the

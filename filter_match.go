@@ -235,9 +235,19 @@ func evalTemporalLeaf(f Filter, val any) bool {
 // UnixMilli (meta path); RFC3339 string → ParseTemporalMillis (future
 // polymorphic-temporal body text). Anything else is not a valid instant →
 // ok=false (excluded).
+//
+// A zero time.Time (t.IsZero()) is treated as ok=false rather than its
+// nominal year-1 instant: a present-but-unset stored value is "no value",
+// not a real, comparable instant. Without this guard a zero-value
+// creationDate/lastUpdateTime would sort as "earlier than everything" and
+// incorrectly match LT/LTE-style comparisons, diverging from
+// internal/match.matchTemporalMeta, which already excludes on !stored.IsZero().
 func toEpochMillis(v any) (int64, bool) {
 	switch t := v.(type) {
 	case time.Time:
+		if t.IsZero() {
+			return 0, false
+		}
 		return t.UnixMilli(), true
 	case string:
 		return ParseTemporalMillis(t)

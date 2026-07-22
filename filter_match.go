@@ -95,6 +95,10 @@ func evalLeafFilter(f Filter, data []byte, meta EntityMeta) bool {
 		return isNegativeOp
 	}
 
+	if f.Coercion == CoerceTemporal {
+		return evalTemporalLeaf(f, val) // val already extracted above; found/null handled by the earlier guard
+	}
+
 	switch f.Op {
 	case FilterEq:
 		return compareFilterValues(val, f.Value) == 0
@@ -192,9 +196,52 @@ func extractFilterMetaValue(path string, meta EntityMeta) (any, bool) {
 		return meta.ChangeType, true
 	case "transaction_id":
 		return meta.TransactionID, true
+	// Canonical client-name vocabulary (additive; #423). Keep the storage-key
+	// cases above in sync with plugins/sqlite/post_filter.go — these new
+	// cases are the client-facing names used by domain-layer Filter building.
+	case "id":
+		return meta.ID, true
+	case "creationDate":
+		return meta.CreationDate, true // time.Time (temporal)
+	case "lastUpdateTime":
+		return meta.LastModifiedDate, true // time.Time (temporal)
+	case "transitionForLatestSave":
+		return meta.TransitionForLatestSave, true
+	case "transactionId":
+		return meta.TransactionID, true
 	default:
 		return nil, false
 	}
+}
+
+// evalTemporalLeaf evaluates a CoerceTemporal leaf: the stored value (already
+// extracted) and the filter operand(s) are converted to floored epoch-ms and
+// compared via the shared CompareTemporal dispatcher (#423 / #431 seed).
+func evalTemporalLeaf(f Filter, val any) bool {
+	storedMs, storedOK := toEpochMillis(val)
+	if f.Op == FilterBetween {
+		if len(f.Values) < 2 {
+			return false
+		}
+		lo, lok := ParseTemporalMillis(fmt.Sprint(f.Values[0]))
+		hi, hok := ParseTemporalMillis(fmt.Sprint(f.Values[1]))
+		return CompareTemporal(FilterBetween, storedMs, storedOK, lo, hi, lok && hok)
+	}
+	op, ook := ParseTemporalMillis(fmt.Sprint(f.Value))
+	return CompareTemporal(f.Op, storedMs, storedOK, op, 0, ook)
+}
+
+// toEpochMillis converts a stored leaf value to floored epoch-ms. time.Time →
+// UnixMilli (meta path); RFC3339 string → ParseTemporalMillis (future #137 body
+// text). Anything else is not a valid instant → ok=false (excluded per §7.1).
+func toEpochMillis(v any) (int64, bool) {
+	switch t := v.(type) {
+	case time.Time:
+		return t.UnixMilli(), true
+	case string:
+		return ParseTemporalMillis(t)
+	}
+	return 0, false
 }
 
 // timeToMicro converts a time.Time to microseconds since Unix epoch.
@@ -216,13 +263,14 @@ func timeToMicro(t time.Time) int64 {
 // compareFilterValues orders two raw values. Returns <0, 0, >0 like strings.Compare.
 //
 // Numeric coercion intentionally does NOT parse strings — only float64/float32/
-// int/int64/json.Number are treated as numeric. This mirrors the sqlite plugin's
-// compareValues + toFloat64 (plugins/sqlite/post_filter.go). The Match path
-// (predicate.Condition) does parse strings via operators.go toFloat64 — keep
-// the two helpers separate so the Filter path stays in lockstep with sqlite.
+// int/int64/json.Number are treated as numeric (see the shared NumericFloat in
+// temporal.go, #431 seed). This mirrors the sqlite plugin's compareValues +
+// toFloat64 (plugins/sqlite/post_filter.go). The Match path (predicate.Condition)
+// does parse strings via operators.go toFloat64 — keep the two helpers separate
+// so the Filter path stays in lockstep with sqlite.
 func compareFilterValues(a, b any) int {
-	af, aok := toFilterFloat64(a)
-	bf, bok := toFilterFloat64(b)
+	af, aok := NumericFloat(a)
+	bf, bok := NumericFloat(b)
 	if aok && bok {
 		switch {
 		case af < bf:
@@ -234,31 +282,6 @@ func compareFilterValues(a, b any) int {
 		}
 	}
 	return strings.Compare(fmt.Sprint(a), fmt.Sprint(b))
-}
-
-// toFilterFloat64 mirrors plugins/sqlite/post_filter.go toFloat64 exactly.
-// Strings are NOT parsed as numbers — a stringly-typed numeric field falls
-// through to byte-lex string comparison, just like in sqlite. Keep this in
-// sync with that file; drift would silently change cross-backend semantics
-// for ordering ops (Gt/Lt/Gte/Lte/Between) on string-encoded numerics.
-func toFilterFloat64(v any) (float64, bool) {
-	switch n := v.(type) {
-	case float64:
-		return n, true
-	case float32:
-		return float64(n), true
-	case int:
-		return float64(n), true
-	case int64:
-		return float64(n), true
-	case json.Number:
-		f, err := n.Float64()
-		if err != nil {
-			return 0, false
-		}
-		return f, true
-	}
-	return 0, false
 }
 
 // matchFilterLike mirrors the sqlite plugin's matchLike (plugins/sqlite/

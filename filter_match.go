@@ -196,8 +196,8 @@ func extractFilterMetaValue(path string, meta EntityMeta) (any, bool) {
 		return meta.ChangeType, true
 	case "transaction_id":
 		return meta.TransactionID, true
-	// Canonical client-name vocabulary (additive; #423). Keep the storage-key
-	// cases above in sync with plugins/sqlite/post_filter.go — these new
+	// Canonical client-name vocabulary (additive). Keep the storage-key
+	// cases above in sync with plugins/sqlite/post_filter.go — these
 	// cases are the client-facing names used by domain-layer Filter building.
 	case "id":
 		return meta.ID, true
@@ -216,7 +216,7 @@ func extractFilterMetaValue(path string, meta EntityMeta) (any, bool) {
 
 // evalTemporalLeaf evaluates a CoerceTemporal leaf: the stored value (already
 // extracted) and the filter operand(s) are converted to floored epoch-ms and
-// compared via the shared CompareTemporal dispatcher (#423 / #431 seed).
+// compared via the shared CompareTemporal dispatcher.
 func evalTemporalLeaf(f Filter, val any) bool {
 	storedMs, storedOK := toEpochMillis(val)
 	if f.Op == FilterBetween {
@@ -232,8 +232,9 @@ func evalTemporalLeaf(f Filter, val any) bool {
 }
 
 // toEpochMillis converts a stored leaf value to floored epoch-ms. time.Time →
-// UnixMilli (meta path); RFC3339 string → ParseTemporalMillis (future #137 body
-// text). Anything else is not a valid instant → ok=false (excluded per §7.1).
+// UnixMilli (meta path); RFC3339 string → ParseTemporalMillis (future
+// polymorphic-temporal body text). Anything else is not a valid instant →
+// ok=false (excluded).
 func toEpochMillis(v any) (int64, bool) {
 	switch t := v.(type) {
 	case time.Time:
@@ -264,7 +265,7 @@ func timeToMicro(t time.Time) int64 {
 //
 // Numeric coercion intentionally does NOT parse strings — only float64/float32/
 // int/int64/json.Number are treated as numeric (see the shared NumericFloat in
-// temporal.go, #431 seed). This mirrors the sqlite plugin's compareValues +
+// temporal.go). This mirrors the sqlite plugin's compareValues +
 // toFloat64 (plugins/sqlite/post_filter.go). The Match path (predicate.Condition)
 // does parse strings via operators.go toFloat64 — keep the two helpers separate
 // so the Filter path stays in lockstep with sqlite.

@@ -10,7 +10,8 @@ import (
 // with an explicit offset (Z or ±hh:mm). The mandatory offset makes the value an
 // absolute instant — which is what lets the SQL cyoda_epoch_millis be IMMUTABLE.
 // Shared kernel: called by internal/match, spi.MatchFilter, and the SQL planners
-// (to precompute operands). Do not duplicate this logic (#431).
+// (to precompute operands). Do not duplicate this logic — it is the single home
+// for the temporal-scalar rule.
 func ParseTemporalMillis(s string) (int64, bool) {
 	t, err := time.Parse(time.RFC3339, s)
 	if err != nil {
@@ -20,7 +21,7 @@ func ParseTemporalMillis(s string) (int64, bool) {
 }
 
 // CompareTemporal is the single per-operator temporal decision, shared by both
-// Go evaluators (#431). storedOK=false (stored value not a valid instant) →
+// Go evaluators. storedOK=false (stored value not a valid instant) →
 // excluded for positive ops, vacuously true for NE. loMs is the (single) operand
 // for non-BETWEEN ops; loMs..hiMs are the inclusive bounds for BETWEEN. loHiOK is
 // false only if an operand failed to parse (validation makes this unreachable for
@@ -50,7 +51,7 @@ func CompareTemporal(op FilterOp, storedMs int64, storedOK bool, loMs, hiMs int6
 
 // NumericFloat coerces genuine numeric Go types to float64. It deliberately does
 // NOT parse strings — this is the canonical numeric-leaf coercion both evaluators
-// use (#423 numeric alignment / #431 seed). Mirrors the existing toFilterFloat64.
+// use. Mirrors the sqlite plugin's toFloat64.
 func NumericFloat(v any) (float64, bool) {
 	switch n := v.(type) {
 	case float64:

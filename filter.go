@@ -47,7 +47,8 @@ const (
 // OrderSpec.Kind for sort. CoerceNone (zero value) preserves the existing
 // numeric/text/bool evaluation; CoerceTemporal compares as floored epoch-ms
 // instants. The domain layer stamps this from the model schema / meta type;
-// backends consume it without inspecting the value (#423). #137 adds no new value.
+// backends consume it without inspecting the value. Polymorphic-temporal body
+// typing reuses this marker unchanged — it adds no new coercion value.
 type FilterCoercion int
 
 const (
@@ -65,5 +66,5 @@ type Filter struct {
 	Value    any
 	Values   []any
 	Children []Filter
-	Coercion FilterCoercion // #423: temporal comparison routing (zero = CoerceNone)
+	Coercion FilterCoercion // temporal comparison routing (zero = CoerceNone)
 }

@@ -51,7 +51,7 @@ const (
 type FilterCoercion int
 
 const (
-	CoerceNone     FilterCoercion = iota
+	CoerceNone FilterCoercion = iota
 	CoerceTemporal
 )
 

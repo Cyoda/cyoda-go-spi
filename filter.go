@@ -43,6 +43,18 @@ const (
 	SourceMeta FieldSource = "meta"
 )
 
+// FilterCoercion selects the comparison semantics for a leaf, mirroring
+// OrderSpec.Kind for sort. CoerceNone (zero value) preserves the existing
+// numeric/text/bool evaluation; CoerceTemporal compares as floored epoch-ms
+// instants. The domain layer stamps this from the model schema / meta type;
+// backends consume it without inspecting the value (#423). #137 adds no new value.
+type FilterCoercion int
+
+const (
+	CoerceNone     FilterCoercion = iota
+	CoerceTemporal
+)
+
 // Filter is a generic predicate tree for search pushdown.
 // Leaf nodes carry Op, Path, Source, and Value/Values.
 // Branch nodes (FilterAnd, FilterOr) carry Children.
@@ -53,4 +65,5 @@ type Filter struct {
 	Value    any
 	Values   []any
 	Children []Filter
+	Coercion FilterCoercion // #423: temporal comparison routing (zero = CoerceNone)
 }

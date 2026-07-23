@@ -6,10 +6,19 @@ import (
 	"time"
 )
 
+// WriteAttribution records the (attributed, executor) principal pair for a
+// single staged write, per the AttributionFor stamp rule.
+type WriteAttribution struct {
+	Attributed Principal
+	Executor   Principal
+}
+
 // TransactionState holds the state of an active SSI transaction.
 // All processor execution is sequential (no goroutines) — see
 // docs/superpowers/specs/2026-04-01-workflow-processor-execution-design.md.
-// SAVEPOINTs snapshot/restore these maps for ASYNC_NEW_TX rollback isolation.
+// SAVEPOINTs snapshot/restore these maps for ASYNC_NEW_TX rollback isolation,
+// with DeleteAttribution snapshotted/restored paired with Deletes — the two
+// maps always cover the same key set.
 //
 // # Concurrency contract
 //
@@ -26,7 +35,10 @@ import (
 //     SPI-method invocation on the same tx to drain before mutating or
 //     closing tx state. Every plugin method that reads or writes
 //     ReadSet, WriteSet, Buffer, Deletes, RolledBack, or Closed must
-//     acquire OpMu in the appropriate posture.
+//     acquire OpMu in the appropriate posture. DeleteAttribution carries
+//     the same posture as Deletes — every method that reads or writes
+//     Deletes must apply the identical OpMu discipline to DeleteAttribution,
+//     since the two maps are always mutated together.
 //
 //  2. Within-class serialisation — application's responsibility, NOT
 //     enforced by OpMu. OpMu.RLock allows multiple readers concurrently;
@@ -41,17 +53,19 @@ import (
 //
 // # Lock posture per field
 //
-//   - ReadSet, WriteSet, Buffer, Deletes: read or written under OpMu.RLock
-//     by in-flight ops; iterated or replaced under OpMu.Lock by Commit /
-//     Rollback / RollbackToSavepoint.
+//   - ReadSet, WriteSet, Buffer, Deletes, DeleteAttribution: read or written
+//     under OpMu.RLock by in-flight ops; iterated or replaced under
+//     OpMu.Lock by Commit / Rollback / RollbackToSavepoint. DeleteAttribution
+//     shares Deletes' posture exactly — the two are always read, written,
+//     and savepoint-snapshotted together.
 //   - Closed: written under OpMu.Lock by Commit/Rollback in their defer
 //     (so all return paths are covered); read under OpMu.RLock by every
 //     in-flight op so the op fails fast on a closed tx.
 //   - RolledBack: written under OpMu.Lock by Rollback eagerly inside the
 //     OpMu region (not in defer); read under OpMu.RLock by every
 //     in-flight op.
-//   - ID, TenantID, SnapshotTime: immutable after [TransactionManager.Begin]
-//     returns; safe to read without locks.
+//   - ID, TenantID, SnapshotTime, Origin: immutable after
+//     [TransactionManager.Begin] returns; safe to read without locks.
 //
 // # Lock order
 //
@@ -83,17 +97,18 @@ import (
 // `.claude/rules/tx-state-locking.md` in the cyoda-go-spi repository for
 // the review checklist enforced at code review.
 type TransactionState struct {
-	ID           string
-	TenantID     TenantID
-	SnapshotTime time.Time
-	Origin       Principal // attribution root for the tx; immutable after Begin (see godoc above)
-	ReadSet      map[string]bool    // entity IDs read; access under OpMu (see godoc)
-	WriteSet     map[string]bool    // entity IDs written; access under OpMu
-	Buffer       map[string]*Entity // staged writes; access under OpMu
-	Deletes      map[string]bool    // staged deletes; access under OpMu
-	RolledBack   bool               // closure flag; written under OpMu.Lock, read under OpMu.RLock
-	OpMu         sync.RWMutex       // see TransactionState godoc above for full contract
-	Closed       bool               // closure flag; written under OpMu.Lock, read under OpMu.RLock
+	ID                string
+	TenantID          TenantID
+	SnapshotTime      time.Time
+	Origin            Principal                   // attribution root for the tx; immutable after Begin (see godoc above)
+	ReadSet           map[string]bool             // entity IDs read; access under OpMu (see godoc)
+	WriteSet          map[string]bool             // entity IDs written; access under OpMu
+	Buffer            map[string]*Entity          // staged writes; access under OpMu
+	Deletes           map[string]bool             // staged deletes; access under OpMu
+	DeleteAttribution map[string]WriteAttribution // entityID → actors for staged deletes; same OpMu posture as Deletes (see godoc)
+	RolledBack        bool                        // closure flag; written under OpMu.Lock, read under OpMu.RLock
+	OpMu              sync.RWMutex                // see TransactionState godoc above for full contract
+	Closed            bool                        // closure flag; written under OpMu.Lock, read under OpMu.RLock
 }
 
 const txContextKey contextKey = "transaction"

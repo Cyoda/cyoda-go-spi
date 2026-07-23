@@ -24,8 +24,10 @@ type EntityMeta struct {
 	CreationDate            time.Time
 	LastModifiedDate        time.Time
 	TransactionID           string
-	ChangeType              string // "CREATED", "UPDATED", "DELETED"
-	ChangeUser              string // user ID who performed the change
+	ChangeType              string        // "CREATED", "UPDATED", "DELETED"
+	ChangeUser              string        // user ID who performed the change
+	ChangeUserKind          PrincipalKind // kind of the attributed ChangeUser; empty on legacy rows
+	ChangeExecutor          Principal     // the actual caller that performed the change, independent of attribution
 	TransitionForLatestSave string
 }
 
@@ -42,6 +44,14 @@ type EntityVersion struct {
 	Timestamp  time.Time
 	Version    int64
 	Deleted    bool
+	// AttributedKind is the kind of the attributed User above; empty on
+	// legacy rows. Populated independently of Entity — Entity is nil for
+	// DELETED versions on some backends, but attribution must not be.
+	AttributedKind PrincipalKind
+	// Executor is the actual caller that performed the change, independent
+	// of attribution. Populated independently of Entity for the same reason
+	// as AttributedKind.
+	Executor Principal
 }
 
 // ModelState represents the lifecycle state of an entity model.
@@ -319,6 +329,12 @@ type ScheduledTask struct {
 
 	ArmedAt      int64 `json:"armedAt,omitempty"`
 	AttemptCount int   `json:"attemptCount,omitempty"`
+
+	// ArmedBy is the arming principal (chain origin at arm time, per the
+	// follow-on-action attribution design); zero on legacy rows — fire
+	// treats zero as the system principal. omitempty does not omit a zero
+	// struct; readers rely on the zero-value check, never field absence.
+	ArmedBy Principal `json:"armedBy,omitempty"`
 }
 
 // --- State machine event types ---

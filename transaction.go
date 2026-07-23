@@ -63,7 +63,8 @@ type TransactionManager interface {
 	GetSubmitTime(ctx context.Context, txID string) (time.Time, error)
 
 	// Savepoint creates a named savepoint within the given transaction by
-	// snapshotting tx.Buffer / tx.ReadSet / tx.WriteSet / tx.Deletes.
+	// snapshotting tx.Buffer / tx.ReadSet / tx.WriteSet / tx.Deletes, with
+	// tx.DeleteAttribution snapshotted paired with tx.Deletes.
 	//
 	// Locking discipline: read-only on tx state. Implementations must
 	// acquire tx.OpMu.RLock for the snapshot read so the operation is
@@ -76,7 +77,8 @@ type TransactionManager interface {
 
 	// RollbackToSavepoint rolls back all work done since the savepoint was
 	// created by replacing tx.Buffer / tx.ReadSet / tx.WriteSet /
-	// tx.Deletes with the snapshot taken at Savepoint time.
+	// tx.Deletes with the snapshot taken at Savepoint time, restoring
+	// tx.DeleteAttribution paired with tx.Deletes.
 	//
 	// Locking discipline: write on tx state — exclusive against every
 	// other tx-path op. Implementations must acquire tx.OpMu.Lock (write
@@ -88,8 +90,8 @@ type TransactionManager interface {
 
 	// ReleaseSavepoint releases a savepoint, merging its work into the
 	// parent transaction. The work done since the savepoint already lives
-	// in tx.Buffer / tx.ReadSet / tx.WriteSet / tx.Deletes — Release only
-	// removes the snapshot record from manager-side state.
+	// in tx.Buffer / tx.ReadSet / tx.WriteSet / tx.Deletes / tx.DeleteAttribution
+	// — Release only removes the snapshot record from manager-side state.
 	//
 	// Locking discipline: does not touch any field of TransactionState
 	// (only manager-side savepoint records). Implementations need only

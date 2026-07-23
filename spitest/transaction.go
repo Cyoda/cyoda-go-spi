@@ -11,6 +11,27 @@ import (
 	spi "github.com/cyoda-platform/cyoda-go-spi"
 )
 
+// beginGuarded begins a transaction and registers a t.Cleanup that
+// rolls it back unconditionally. It exists because tx subtests need
+// direct Begin/Commit/Rollback control (unlike withTx) to inspect
+// in-flight state, but a require.* failure between Begin and the
+// test's own Commit/Rollback would otherwise leave the transaction
+// active for the rest of the run — on backends whose committed-log
+// pruning requires zero active transactions (e.g. sqlite), one leaked
+// tx cascades into unrelated subtest failures.
+//
+// The registered Rollback is purely a safety net: on the happy path
+// the test still calls Commit/Rollback itself, and the cleanup's
+// resulting error (tx already terminated) is ignored. Callers must not
+// rely on the guard for actual test semantics.
+func beginGuarded(t *testing.T, tm spi.TransactionManager, ctx spiCtx) (txID string, txCtx spiCtx) {
+	t.Helper()
+	txID, txCtx, err := tm.Begin(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tm.Rollback(txCtx, txID) })
+	return txID, txCtx
+}
+
 // runTransactionSuite covers TransactionManager. Each subtest gets a
 // fresh tenant.
 func runTransactionSuite(t *testing.T, h Harness, tracker *skipTracker) {
@@ -40,8 +61,7 @@ func testTxCommitVisibility(t *testing.T, h Harness) {
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 
-	txID, txCtx, err := tm.Begin(ctx)
-	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
 
 	es, err := h.Factory.EntityStore(txCtx)
 	require.NoError(t, err)
@@ -72,8 +92,7 @@ func testTxRollbackDiscards(t *testing.T, h Harness) {
 	require.NoError(t, err)
 
 	id := newID()
-	txID, txCtx, err := tm.Begin(ctx)
-	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
 	es, err := h.Factory.EntityStore(txCtx)
 	require.NoError(t, err)
 	_, err = es.Save(txCtx, newEntity(t, "m-rb", id, map[string]any{"k": 1}))
@@ -95,8 +114,7 @@ func testTxJoin(t *testing.T, h Harness) {
 	require.NoError(t, err)
 
 	id := newID()
-	txID, txCtx1, err := tm.Begin(ctx)
-	require.NoError(t, err)
+	txID, txCtx1 := beginGuarded(t, tm, ctx)
 	es1, err := h.Factory.EntityStore(txCtx1)
 	require.NoError(t, err)
 	_, err = es1.Save(txCtx1, newEntity(t, "m-join", id, map[string]any{"side": "A"}))
@@ -121,8 +139,7 @@ func testTxSubmitTime(t *testing.T, h Harness) {
 	require.NoError(t, err)
 
 	before := h.Now().UTC()
-	txID, txCtx, err := tm.Begin(ctx)
-	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
 	// Pass txCtx (not ctx) so backends that store tx-state in the context
 	// (e.g. Cassandra) can locate the transaction on Commit.
 	require.NoError(t, tm.Commit(txCtx, txID))
@@ -144,8 +161,7 @@ func testTxSavepointRelease(t *testing.T, h Harness) {
 	idPre := newID()
 	idPost := newID()
 
-	txID, txCtx, err := tm.Begin(ctx)
-	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
 	es, err := h.Factory.EntityStore(txCtx)
 	require.NoError(t, err)
 	_, err = es.Save(txCtx, newEntity(t, "m-sp", idPre, map[string]any{}))
@@ -180,8 +196,7 @@ func testTxSavepointRollback(t *testing.T, h Harness) {
 	idPre := newID()
 	idPost := newID()
 
-	txID, txCtx, err := tm.Begin(ctx)
-	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
 	es, err := h.Factory.EntityStore(txCtx)
 	require.NoError(t, err)
 	_, err = es.Save(txCtx, newEntity(t, "m-sp", idPre, map[string]any{}))
@@ -210,8 +225,7 @@ func testTxBeginAfterCommit(t *testing.T, h Harness) {
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 
-	txID, txCtx, err := tm.Begin(ctx)
-	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
 	// Pass txCtx (not ctx) so backends that store tx-state in the context
 	// (e.g. Cassandra) can locate the transaction on Commit.
 	require.NoError(t, tm.Commit(txCtx, txID))
@@ -235,8 +249,7 @@ func testTxStateJoinAfterCommit(t *testing.T, h Harness) {
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 
-	txID, txCtx, err := tm.Begin(ctx)
-	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
 	require.NoError(t, tm.Commit(txCtx, txID))
 
 	_, err = tm.Join(ctx, txID)
@@ -254,8 +267,7 @@ func testTxStateCommitAfterCommit(t *testing.T, h Harness) {
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 
-	txID, txCtx, err := tm.Begin(ctx)
-	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
 	require.NoError(t, tm.Commit(txCtx, txID))
 
 	err = tm.Commit(txCtx, txID)
@@ -273,8 +285,7 @@ func testTxStateCommitAfterRollback(t *testing.T, h Harness) {
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 
-	txID, txCtx, err := tm.Begin(ctx)
-	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
 	require.NoError(t, tm.Rollback(txCtx, txID))
 
 	err = tm.Commit(txCtx, txID)
@@ -293,8 +304,7 @@ func testTxStateOpAfterRollback(t *testing.T, h Harness) {
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 
-	txID, txCtx, err := tm.Begin(ctx)
-	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
 
 	es, err := h.Factory.EntityStore(txCtx)
 	require.NoError(t, err)
@@ -319,9 +329,7 @@ func testTxStateTenantMismatchOnJoin(t *testing.T, h Harness) {
 
 	tmA, err := h.Factory.TransactionManager(ctxA)
 	require.NoError(t, err)
-	txID, _, err := tmA.Begin(ctxA)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = tmA.Rollback(ctxA, txID) })
+	txID, _ := beginGuarded(t, tmA, ctxA)
 
 	tmB, err := h.Factory.TransactionManager(ctxB)
 	require.NoError(t, err)
@@ -339,9 +347,7 @@ func testTxStateTenantMismatchOnCommit(t *testing.T, h Harness) {
 
 	tmA, err := h.Factory.TransactionManager(ctxA)
 	require.NoError(t, err)
-	txID, txCtxA, err := tmA.Begin(ctxA)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = tmA.Rollback(txCtxA, txID) })
+	txID, _ := beginGuarded(t, tmA, ctxA)
 
 	tmB, err := h.Factory.TransactionManager(ctxB)
 	require.NoError(t, err)
@@ -359,9 +365,7 @@ func testTxStateSavepointNotFound(t *testing.T, h Harness) {
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 
-	txID, txCtx, err := tm.Begin(ctx)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = tm.Rollback(txCtx, txID) })
+	txID, txCtx := beginGuarded(t, tm, ctx)
 
 	err = tm.RollbackToSavepoint(txCtx, txID, "no-such-savepoint")
 	require.Error(t, err, "RollbackToSavepoint with unknown id must fail")
@@ -383,9 +387,7 @@ func testTxOriginCaptureAndJoin(t *testing.T, h Harness) {
 
 	tm, err := h.Factory.TransactionManager(rootCtx)
 	require.NoError(t, err)
-	txID, txCtx1, err := tm.Begin(rootCtx)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = tm.Rollback(txCtx1, txID) })
+	txID, txCtx1 := beginGuarded(t, tm, rootCtx)
 
 	tx1 := spi.GetTransaction(txCtx1)
 	require.NotNil(t, tx1, "Begin must populate TransactionState in the returned context")
@@ -417,9 +419,7 @@ func testTxOriginAmbientRoot(t *testing.T, h Harness) {
 
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
-	txID, txCtx, err := tm.Begin(ctx)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = tm.Rollback(txCtx, txID) })
+	_, txCtx := beginGuarded(t, tm, ctx)
 
 	tx := spi.GetTransaction(txCtx)
 	require.NotNil(t, tx, "Begin must populate TransactionState in the returned context")
@@ -448,8 +448,7 @@ func testTxDeleteAttributionSavepoint(t *testing.T, h Harness) {
 
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
-	txID, txCtx, err := tm.Begin(ctx)
-	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
 
 	es, err := h.Factory.EntityStore(txCtx)
 	require.NoError(t, err)

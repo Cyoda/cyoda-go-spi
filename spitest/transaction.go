@@ -445,12 +445,22 @@ func testTxOriginAmbientRoot(t *testing.T, h Harness) {
 // (attributed = origin user, executor = first service) — untouched by the
 // later rollback — while B's tombstone carries the SECOND service as
 // executor, proving the discarded first staging left nothing stale behind.
+//
+// A third entity C is staged for delete alongside B (after the savepoint)
+// and is discarded by the same RollbackToSavepoint, but — unlike B — is
+// NEVER re-staged before Commit. This pins the case a re-stage-after-rollback
+// test cannot: a staged delete that a savepoint rollback discards, and that
+// stays discarded, must not resurface at Commit. Checked purely through
+// committed, observable outcomes (Get + GetVersionHistory on a fresh
+// non-tx ctx) — never TransactionState's internal Deletes/DeleteAttribution
+// maps, which a backend that doesn't buffer wouldn't populate anyway.
 func testTxDeleteAttributionSavepoint(t *testing.T, h Harness) {
 	tenant := h.NewTenant()
 	rootCtx := tenantContextAs(tenant, "root-user", spi.PrincipalUser)
 	origin := spi.Principal{ID: "root-user", Kind: spi.PrincipalUser}
 	idA := newID()
 	idB := newID()
+	idC := newID()
 
 	withTx(t, h, rootCtx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -458,6 +468,8 @@ func testTxDeleteAttributionSavepoint(t *testing.T, h Harness) {
 		_, err = es.Save(txCtx, newEntity(t, "m-delattr", idA, map[string]any{}))
 		require.NoError(t, err)
 		_, err = es.Save(txCtx, newEntity(t, "m-delattr", idB, map[string]any{}))
+		require.NoError(t, err)
+		_, err = es.Save(txCtx, newEntity(t, "m-delattr", idC, map[string]any{}))
 		require.NoError(t, err)
 	})
 
@@ -478,6 +490,7 @@ func testTxDeleteAttributionSavepoint(t *testing.T, h Harness) {
 	require.NoError(t, err)
 
 	require.NoError(t, esSvc1.Delete(txCtxSvc1, idB))
+	require.NoError(t, esSvc1.Delete(txCtxSvc1, idC))
 
 	require.NoError(t, tm.RollbackToSavepoint(txCtxSvc1, txID, sp))
 
@@ -517,4 +530,22 @@ func testTxDeleteAttributionSavepoint(t *testing.T, h Harness) {
 	require.Equal(t, origin.Kind, tombstoneB.AttributedKind)
 	require.Equal(t, svc2, tombstoneB.Executor,
 		"B's tombstone must carry the SECOND service as executor — the fresh re-stage wins, nothing stale from the discarded first staging")
+
+	// C was staged for delete alongside B (after the savepoint) and
+	// discarded by the same RollbackToSavepoint, but — unlike B — was never
+	// re-staged before Commit. It must survive Commit untouched: still
+	// gettable, with no deleted version anywhere in its history. A backend
+	// that resurrects a rolled-back staged delete (e.g. by unconditionally
+	// restoring the pre-savepoint staging snapshot instead of the
+	// post-rollback one) would fail this.
+	entC, err := esOut.Get(rootCtx, idC)
+	require.NoError(t, err, "C must still be gettable after commit — its staged delete was discarded by the savepoint rollback and never re-staged")
+	require.NotNil(t, entC)
+
+	historyC, err := esOut.GetVersionHistory(rootCtx, idC)
+	require.NoError(t, err)
+	require.NotEmpty(t, historyC)
+	for _, v := range historyC {
+		require.False(t, v.Deleted, "C must have no deleted version/tombstone in its history — the discarded staged delete must not resurface at commit")
+	}
 }

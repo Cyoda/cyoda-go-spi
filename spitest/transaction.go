@@ -427,17 +427,32 @@ func testTxOriginAmbientRoot(t *testing.T, h Harness) {
 		"ambient origin must win over the caller's UserContext-derived Principal when no parent tx exists")
 }
 
-// testTxDeleteAttributionSavepoint verifies DeleteAttribution stages
-// alongside Deletes, is restored 1:1 with Deletes across
-// RollbackToSavepoint, and that the surviving entry's attribution is what
-// the committed tombstone carries.
+// testTxDeleteAttributionSavepoint verifies delete attribution is a
+// contract on COMMITTED OUTCOMES, not on any particular backend's in-flight
+// bookkeeping. Memory/sqlite buffer staged deletes in TransactionState and
+// flush them at Commit; postgres executes the DELETE immediately in SQL and
+// lets SAVEPOINT/ROLLBACK TO SAVEPOINT govern visibility. Both mechanisms
+// must produce the same committed tombstones, so this test drives ONLY
+// through SPI interfaces (TransactionManager/EntityStore) and asserts ONLY
+// what GetVersionHistory reports after Commit — never TransactionState's
+// internal Deletes/DeleteAttribution maps, which are meaningless on a
+// backend that doesn't buffer.
+//
+// Scenario: under a user-origin tx, a service-kind joined ctx stages delete
+// A; Savepoint; stage delete B; RollbackToSavepoint discards B; a SECOND
+// service identity joins and re-stages delete B; Commit. Expected outcome:
+// A's tombstone carries the attribution staged before the savepoint
+// (attributed = origin user, executor = first service) — untouched by the
+// later rollback — while B's tombstone carries the SECOND service as
+// executor, proving the discarded first staging left nothing stale behind.
 func testTxDeleteAttributionSavepoint(t *testing.T, h Harness) {
 	tenant := h.NewTenant()
-	ctx := tenantContextAs(tenant, "actor-1", spi.PrincipalUser)
+	rootCtx := tenantContextAs(tenant, "root-user", spi.PrincipalUser)
+	origin := spi.Principal{ID: "root-user", Kind: spi.PrincipalUser}
 	idA := newID()
 	idB := newID()
 
-	withTx(t, h, ctx, func(txCtx context.Context) {
+	withTx(t, h, rootCtx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
 		require.NoError(t, err)
 		_, err = es.Save(txCtx, newEntity(t, "m-delattr", idA, map[string]any{}))
@@ -446,58 +461,60 @@ func testTxDeleteAttributionSavepoint(t *testing.T, h Harness) {
 		require.NoError(t, err)
 	})
 
-	tm, err := h.Factory.TransactionManager(ctx)
+	tm, err := h.Factory.TransactionManager(rootCtx)
 	require.NoError(t, err)
-	txID, txCtx := beginGuarded(t, tm, ctx)
+	txID, _ := beginGuarded(t, tm, rootCtx)
 
-	es, err := h.Factory.EntityStore(txCtx)
-	require.NoError(t, err)
-	require.NoError(t, es.Delete(txCtx, idA))
-
-	tx := spi.GetTransaction(txCtx)
-	require.NotNil(t, tx)
-	stagedA, ok := tx.DeleteAttribution[idA]
-	require.True(t, ok, "DeleteAttribution must record A's delete as soon as it is staged")
-	wantA := spi.Principal{ID: "actor-1", Kind: spi.PrincipalUser}
-	require.Equal(t, wantA, stagedA.Attributed)
-	require.Equal(t, wantA, stagedA.Executor)
-
-	sp, err := tm.Savepoint(txCtx, txID)
+	svc1 := spi.Principal{ID: "svc-1", Kind: spi.PrincipalService}
+	svc1Ctx := tenantContextAs(tenant, svc1.ID, svc1.Kind)
+	txCtxSvc1, err := tm.Join(svc1Ctx, txID)
 	require.NoError(t, err)
 
-	require.NoError(t, es.Delete(txCtx, idB))
-	tx = spi.GetTransaction(txCtx)
-	require.Len(t, tx.Deletes, 2, "both deletes staged before RollbackToSavepoint")
-	require.Len(t, tx.DeleteAttribution, 2, "DeleteAttribution must track every staged delete, 1:1 with Deletes")
-
-	require.NoError(t, tm.RollbackToSavepoint(txCtx, txID, sp))
-
-	tx = spi.GetTransaction(txCtx)
-	require.Equal(t, map[string]bool{idA: true}, tx.Deletes,
-		"RollbackToSavepoint must restore Deletes to exactly the pre-savepoint set")
-	require.Len(t, tx.DeleteAttribution, 1,
-		"DeleteAttribution must be restored in lockstep with Deletes — same key set, always")
-	require.Equal(t, stagedA, tx.DeleteAttribution[idA],
-		"A's attribution must be unchanged by the savepoint round-trip")
-	_, bStillPresent := tx.DeleteAttribution[idB]
-	require.False(t, bStillPresent, "B's attribution must not survive rollback-to-savepoint")
-
-	require.NoError(t, tm.Commit(txCtx, txID))
-
-	esOut, err := h.Factory.EntityStore(ctx)
+	esSvc1, err := h.Factory.EntityStore(txCtxSvc1)
 	require.NoError(t, err)
-	history, err := esOut.GetVersionHistory(ctx, idA)
-	require.NoError(t, err)
-	require.NotEmpty(t, history)
-	tombstone := history[len(history)-1]
-	require.True(t, tombstone.Deleted, "A's last version must be the committed tombstone")
-	require.Equal(t, wantA.Kind, tombstone.AttributedKind,
-		"tombstone's AttributedKind must match the staged DeleteAttribution")
-	require.Equal(t, wantA, tombstone.Executor,
-		"tombstone's Executor must match the staged DeleteAttribution")
+	require.NoError(t, esSvc1.Delete(txCtxSvc1, idA))
 
-	esB, err := h.Factory.EntityStore(ctx)
+	sp, err := tm.Savepoint(txCtxSvc1, txID)
 	require.NoError(t, err)
-	_, err = esB.Get(ctx, idB)
-	require.NoError(t, err, "B must survive commit — its delete was discarded by RollbackToSavepoint")
+
+	require.NoError(t, esSvc1.Delete(txCtxSvc1, idB))
+
+	require.NoError(t, tm.RollbackToSavepoint(txCtxSvc1, txID, sp))
+
+	svc2 := spi.Principal{ID: "svc-2", Kind: spi.PrincipalService}
+	svc2Ctx := tenantContextAs(tenant, svc2.ID, svc2.Kind)
+	txCtxSvc2, err := tm.Join(svc2Ctx, txID)
+	require.NoError(t, err)
+
+	esSvc2, err := h.Factory.EntityStore(txCtxSvc2)
+	require.NoError(t, err)
+	require.NoError(t, esSvc2.Delete(txCtxSvc2, idB),
+		"B must be re-stageable after RollbackToSavepoint discarded its first staging")
+
+	require.NoError(t, tm.Commit(txCtxSvc2, txID))
+
+	esOut, err := h.Factory.EntityStore(rootCtx)
+	require.NoError(t, err)
+
+	historyA, err := esOut.GetVersionHistory(rootCtx, idA)
+	require.NoError(t, err)
+	require.NotEmpty(t, historyA)
+	tombstoneA := historyA[len(historyA)-1]
+	require.True(t, tombstoneA.Deleted, "A's last version must be the committed tombstone")
+	require.Equal(t, origin.ID, tombstoneA.User,
+		"A's tombstone must carry the origin user as attributed, staged before the savepoint")
+	require.Equal(t, origin.Kind, tombstoneA.AttributedKind)
+	require.Equal(t, svc1, tombstoneA.Executor,
+		"A's tombstone must carry the first service as executor — unaffected by the later savepoint rollback")
+
+	historyB, err := esOut.GetVersionHistory(rootCtx, idB)
+	require.NoError(t, err)
+	require.NotEmpty(t, historyB)
+	tombstoneB := historyB[len(historyB)-1]
+	require.True(t, tombstoneB.Deleted, "B's last version must be the committed tombstone")
+	require.Equal(t, origin.ID, tombstoneB.User,
+		"B's tombstone must carry the origin user as attributed")
+	require.Equal(t, origin.Kind, tombstoneB.AttributedKind)
+	require.Equal(t, svc2, tombstoneB.Executor,
+		"B's tombstone must carry the SECOND service as executor — the fresh re-stage wins, nothing stale from the discarded first staging")
 }

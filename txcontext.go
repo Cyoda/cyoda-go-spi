@@ -18,7 +18,9 @@ type WriteAttribution struct {
 // docs/superpowers/specs/2026-04-01-workflow-processor-execution-design.md.
 // SAVEPOINTs snapshot/restore these maps for ASYNC_NEW_TX rollback isolation,
 // with DeleteAttribution snapshotted/restored paired with Deletes — the two
-// maps always cover the same key set.
+// maps always cover the same key set, for backends that populate them at all
+// (see the Deletes/DeleteAttribution field comments below — the conformance
+// contract is the committed outcome, never these maps' contents).
 //
 // # Concurrency contract
 //
@@ -104,8 +106,18 @@ type TransactionState struct {
 	ReadSet           map[string]bool             // entity IDs read; access under OpMu (see godoc)
 	WriteSet          map[string]bool             // entity IDs written; access under OpMu
 	Buffer            map[string]*Entity          // staged writes; access under OpMu
+	// Deletes and DeleteAttribution are the buffering mechanism: backends
+	// that stage deletes in TransactionState (e.g. memory, sqlite) use
+	// these maps to carry staging + attribution through to the commit-time
+	// flush, and populate them at delete-stage time; access under OpMu.
+	// Backends whose delete staging/visibility is instead governed by the
+	// underlying store (e.g. postgres, via immediate DML under a SQL
+	// SAVEPOINT) stamp attribution directly at delete time and MAY leave
+	// these maps unpopulated — that is not a bug. The conformance contract
+	// is the committed outcome (GetVersionHistory's tombstone), never these
+	// maps' contents; do not assert on them from backend-agnostic tests.
 	Deletes           map[string]bool             // staged deletes; access under OpMu
-	DeleteAttribution map[string]WriteAttribution // entityID → actors for staged deletes; same OpMu posture as Deletes (see godoc)
+	DeleteAttribution map[string]WriteAttribution // entityID → actors for staged deletes; same OpMu posture as Deletes
 	RolledBack        bool                        // closure flag; written under OpMu.Lock, read under OpMu.RLock
 	OpMu              sync.RWMutex                // see TransactionState godoc above for full contract
 	Closed            bool                        // closure flag; written under OpMu.Lock, read under OpMu.RLock

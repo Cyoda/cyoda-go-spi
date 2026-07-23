@@ -12,6 +12,30 @@ MAINTAINING.md.
 
 ## [Unreleased]
 
+### Added
+
+- Follow-on-action attribution: `Principal` / `PrincipalKind`
+  (`user`/`service`/`system`), `UserContext.Kind`,
+  `TransactionState.Origin` (the tx's immutable attribution root) and
+  `TransactionState.DeleteAttribution` (per-staged-delete
+  attributed/executor pair, same OpMu/savepoint posture as `Deletes`),
+  `ScheduledTask.ArmedBy` (arming principal at fire-time), and
+  `EntityMeta.ChangeUserKind`/`ChangeExecutor` +
+  `EntityVersion.AttributedKind`/`Executor`. `WithAmbientOrigin` /
+  `GetAmbientOrigin` seed an origin for causal-chain roots with no
+  transaction yet (the scheduled-fire case); `ResolveOrigin`
+  (parent-tx > ambient > UserContext) and `AttributionFor`
+  (attributed, executor stamp rule) are the shared, single-source
+  implementations every backend must use.
+- `spitest/transaction.go`: `Attribution/OriginCaptureAndJoin`,
+  `Attribution/OriginAmbientRoot`, `Attribution/DeleteAttributionSavepoint`
+  conformance subtests.
+- `spitest/entity.go`: `Attribution/ExecutorRoundTrip` conformance subtest
+  (covers a DELETED version's `Executor` being readable without
+  dereferencing `Entity`).
+- `scheduled_task_store_conformance.go`: `ArmedBy` round-trip through
+  `Upsert`/`Get`, plus the legacy-row (zero `ArmedBy`) case.
+
 ## [0.8.1] - 2026-06-23
 
 > **There is no v0.8.0 release.** A v0.8.0 tag was created prematurely on

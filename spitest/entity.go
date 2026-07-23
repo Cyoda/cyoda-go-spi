@@ -45,6 +45,9 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "TenantIsolation/GetAll", testEntityTenantIsolationGetAll)
 	runSubtest(t, h, tracker, "TenantIsolation/Delete", testEntityTenantIsolationDelete)
 	runSubtest(t, h, tracker, "EmptyTenant", testEntityEmptyTenant)
+
+	// Attribution group (follow-on-action attribution design)
+	runSubtest(t, h, tracker, "Attribution/ExecutorRoundTrip", testEntityExecutorRoundTrip)
 }
 
 func testEntityCreateAndGet(t *testing.T, h Harness) {
@@ -730,6 +733,55 @@ func testEntityTenantIsolationDelete(t *testing.T, h Harness) {
 	esB, _ := h.Factory.EntityStore(txCtxB)
 	err = esB.Delete(txCtxB, id)
 	require.ErrorIs(t, err, spi.ErrNotFound, "cross-tenant Delete must return ErrNotFound")
+}
+
+// testEntityExecutorRoundTrip verifies that the ChangeUser/ChangeUserKind/
+// ChangeExecutor attribution fields a caller stamps on Entity.Meta before
+// Save round-trip through GetVersionHistory as EntityVersion.AttributedKind/
+// Executor — including for a DELETED version, whose Executor must be
+// readable without dereferencing the (possibly nil, on some backends)
+// Entity field.
+func testEntityExecutorRoundTrip(t *testing.T, h Harness) {
+	tenant := h.NewTenant()
+	ctx := tenantContext(tenant)
+	id := newID()
+	createdExecutor := spi.Principal{ID: "svc-1", Kind: spi.PrincipalService}
+
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = es.Save(txCtx, newAttributedEntity(t, "m-exec", id, map[string]any{"v": 1},
+			"origin-user", spi.PrincipalUser, createdExecutor))
+		require.NoError(t, err)
+	})
+	h.AdvanceClock(1 * time.Millisecond)
+
+	wantDeleteExecutor := spi.Principal{ID: "del-user", Kind: spi.PrincipalUser}
+	deleterCtx := tenantContextAs(tenant, wantDeleteExecutor.ID, wantDeleteExecutor.Kind)
+	withTx(t, h, deleterCtx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		require.NoError(t, es.Delete(txCtx, id))
+	})
+
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	history, err := es.GetVersionHistory(ctx, id)
+	require.NoError(t, err)
+	require.Len(t, history, 2, "one CREATE version + one DELETE tombstone")
+
+	createdVersion := history[0]
+	require.Equal(t, spi.PrincipalUser, createdVersion.AttributedKind,
+		"CREATE version's AttributedKind must equal Meta.ChangeUserKind as written at Save")
+	require.Equal(t, createdExecutor, createdVersion.Executor,
+		"CREATE version's Executor must equal Meta.ChangeExecutor as written at Save")
+
+	deletedVersion := history[len(history)-1]
+	require.True(t, deletedVersion.Deleted, "second version must be the DELETE tombstone")
+	require.Equal(t, wantDeleteExecutor, deletedVersion.Executor,
+		"a DELETED version's Executor must be readable directly, without dereferencing Entity")
+	require.Equal(t, wantDeleteExecutor.Kind, deletedVersion.AttributedKind,
+		"a DELETED version's AttributedKind must likewise be readable without dereferencing Entity")
 }
 
 func testEntityEmptyTenant(t *testing.T, h Harness) {

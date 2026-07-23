@@ -79,6 +79,20 @@ func newID() string {
 	return id.String()
 }
 
+// newAttributedEntity builds an Entity like newEntity but also stamps the
+// attribution Meta fields a caller (e.g. cyoda-go's entity service) sets
+// before invoking Save — ChangeUser/ChangeUserKind/ChangeExecutor. Plugins
+// must persist these verbatim and surface them via GetVersionHistory as
+// EntityVersion.AttributedKind/Executor; see testEntityExecutorRoundTrip.
+func newAttributedEntity(t *testing.T, modelName, id string, payload map[string]any, changeUser string, changeUserKind spi.PrincipalKind, executor spi.Principal) *spi.Entity {
+	t.Helper()
+	e := newEntity(t, modelName, id, payload)
+	e.Meta.ChangeUser = changeUser
+	e.Meta.ChangeUserKind = changeUserKind
+	e.Meta.ChangeExecutor = executor
+	return e
+}
+
 // iterSeq wraps a slice into an iter.Seq, matching the SaveAll interface.
 func iterSeq[T any](items []T) iter.Seq[T] {
 	return func(yield func(T) bool) {

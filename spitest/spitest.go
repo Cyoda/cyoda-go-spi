@@ -149,11 +149,27 @@ func defaultNewTenant() spi.TenantID {
 
 // tenantContext returns a background context carrying a synthetic
 // UserContext for the given tenant, sufficient for plugin tenant
-// resolution.
+// resolution. Kind is left at its zero value; tests that care about
+// attribution use tenantContextAs instead.
 func tenantContext(tenant spi.TenantID) context.Context {
 	return spi.WithUserContext(context.Background(), &spi.UserContext{
 		UserID:   "conformance-test",
 		UserName: "conformance",
+		Tenant:   spi.Tenant{ID: tenant, Name: string(tenant)},
+	})
+}
+
+// tenantContextAs returns a background context carrying a synthetic
+// UserContext for the given tenant with an explicit userID and
+// PrincipalKind. Used by attribution conformance tests (origin capture,
+// executor round-trip) that need deterministic control over Kind —
+// tenantContext's fixed "conformance-test" user with zero-value Kind
+// isn't distinguishable across actors and isn't attribution-shaped.
+func tenantContextAs(tenant spi.TenantID, userID string, kind spi.PrincipalKind) context.Context {
+	return spi.WithUserContext(context.Background(), &spi.UserContext{
+		UserID:   userID,
+		UserName: userID,
+		Kind:     kind,
 		Tenant:   spi.Tenant{ID: tenant, Name: string(tenant)},
 	})
 }

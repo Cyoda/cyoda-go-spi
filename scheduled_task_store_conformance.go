@@ -155,6 +155,42 @@ func RunScheduledTaskStoreConformance(t *testing.T, newFactory func() StoreFacto
 		t.Fatal(err)
 	}
 
+	// Attribution: ArmedBy round-trips through Upsert/Get unchanged. This
+	// generic StoreFactory-level harness has no handle onto raw storage, so
+	// it cannot write a legacy row via out-of-band JSON that omits the
+	// armedBy key entirely (only a plugin's own storage-layer test can do
+	// that); the zero-value/"legacy" case is exercised here via the
+	// ScheduledTask struct's own zero value for ArmedBy, which must round-trip
+	// as the zero Principal, never a synthesized one.
+	armedByID := "e5:S:T"
+	armed := ScheduledTask{ID: armedByID, TenantID: "t1", Type: ScheduledTaskFireTransition,
+		ScheduledTime: 100, EntityID: "e5", SourceState: "S", Transition: "T",
+		ArmedBy: Principal{ID: "svc-arm", Kind: PrincipalService}}
+	if err := sts.Upsert(ctx, armed); err != nil {
+		t.Fatal(err)
+	}
+	gotArmed, found, err := sts.Get(ctx, armedByID)
+	if err != nil || !found {
+		t.Fatalf("Get armedBy fixture: found=%v err=%v", found, err)
+	}
+	if gotArmed.ArmedBy != armed.ArmedBy {
+		t.Fatalf("ArmedBy round-trip: want %+v, got %+v", armed.ArmedBy, gotArmed.ArmedBy)
+	}
+
+	legacyID := "e6:S:T"
+	legacy := ScheduledTask{ID: legacyID, TenantID: "t1", Type: ScheduledTaskFireTransition,
+		ScheduledTime: 100, EntityID: "e6", SourceState: "S", Transition: "T"}
+	if err := sts.Upsert(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	gotLegacy, found, err := sts.Get(ctx, legacyID)
+	if err != nil || !found {
+		t.Fatalf("Get legacy fixture: found=%v err=%v", found, err)
+	}
+	if gotLegacy.ArmedBy != (Principal{}) {
+		t.Fatalf("legacy row (no ArmedBy set) must yield the zero Principal, got %+v", gotLegacy.ArmedBy)
+	}
+
 	// Tenant isolation: a t2 task is not returned to a t1-scoped delete but IS
 	// visible to the cross-tenant ScanDue with its own TenantID.
 	other := ScheduledTask{ID: "e9:S:T", TenantID: "t2", Type: ScheduledTaskFireTransition,

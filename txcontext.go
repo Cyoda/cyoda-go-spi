@@ -99,13 +99,13 @@ type WriteAttribution struct {
 // `.claude/rules/tx-state-locking.md` in the cyoda-go-spi repository for
 // the review checklist enforced at code review.
 type TransactionState struct {
-	ID                string
-	TenantID          TenantID
-	SnapshotTime      time.Time
-	Origin            Principal                   // attribution root for the tx; immutable after Begin (see godoc above)
-	ReadSet           map[string]bool             // entity IDs read; access under OpMu (see godoc)
-	WriteSet          map[string]bool             // entity IDs written; access under OpMu
-	Buffer            map[string]*Entity          // staged writes; access under OpMu
+	ID           string
+	TenantID     TenantID
+	SnapshotTime time.Time
+	Origin       Principal          // attribution root for the tx; immutable after Begin (see godoc above)
+	ReadSet      map[string]bool    // entity IDs read; access under OpMu (see godoc)
+	WriteSet     map[string]bool    // entity IDs written; access under OpMu
+	Buffer       map[string]*Entity // staged writes; access under OpMu
 	// Deletes and DeleteAttribution are the buffering mechanism: backends
 	// that stage deletes in TransactionState (e.g. memory, sqlite) use
 	// these maps to carry staging + attribution through to the commit-time

@@ -798,4 +798,3 @@ func testEntityEmptyTenant(t *testing.T, h Harness) {
 	require.NoError(t, err)
 	require.Equal(t, int64(0), n)
 }
-

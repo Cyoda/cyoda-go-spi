@@ -86,6 +86,7 @@ type TransactionState struct {
 	ID           string
 	TenantID     TenantID
 	SnapshotTime time.Time
+	Origin       Principal // attribution root for the tx; immutable after Begin (see godoc above)
 	ReadSet      map[string]bool    // entity IDs read; access under OpMu (see godoc)
 	WriteSet     map[string]bool    // entity IDs written; access under OpMu
 	Buffer       map[string]*Entity // staged writes; access under OpMu

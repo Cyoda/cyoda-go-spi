@@ -1,6 +1,7 @@
 package predicate_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -55,6 +56,22 @@ func TestParseLifecycleCondition(t *testing.T) {
 	}
 }
 
+func TestParseSimple_NumericOperandLossless(t *testing.T) {
+	body := []byte(`{"type":"simple","jsonPath":"$.n","operatorType":"EQUALS","value":12345678901234567890}`)
+	c, err := predicate.ParseCondition(body)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	sc := c.(*predicate.SimpleCondition)
+	num, ok := sc.Value.(json.Number)
+	if !ok {
+		t.Fatalf("want json.Number, got %T (%v)", sc.Value, sc.Value)
+	}
+	if num.String() != "12345678901234567890" {
+		t.Fatalf("lossy operand: got %q", num.String())
+	}
+}
+
 func TestParseGroupWithNestedSimple(t *testing.T) {
 	body := []byte(`{
 		"type": "group",
@@ -89,9 +106,9 @@ func TestParseGroupWithNestedSimple(t *testing.T) {
 	if c0.JsonPath != "$.age" {
 		t.Errorf("expected jsonPath $.age, got %s", c0.JsonPath)
 	}
-	// JSON numbers decode as float64
-	if c0.Value != float64(18) {
-		t.Errorf("expected value 18, got %v", c0.Value)
+	// JSON numbers decode as json.Number (lossless) rather than float64.
+	if n, ok := c0.Value.(json.Number); !ok || n.String() != "18" {
+		t.Fatalf("expected json.Number(18), got %T %v", c0.Value, c0.Value)
 	}
 
 	c1, ok := gc.Conditions[1].(*predicate.SimpleCondition)

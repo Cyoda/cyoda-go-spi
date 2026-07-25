@@ -340,6 +340,24 @@ func TestMatchFilter_Between(t *testing.T) {
 	}
 }
 
+func TestMatchFilter_BetweenInclusive(t *testing.T) {
+	data := mustJSONFilter(t, map[string]any{"qty": 10})
+	// qty (10) sits exactly on the lower bound: exclusive BETWEEN must reject
+	// it, BETWEEN_INCLUSIVE must accept it.
+	exclusive := spi.Filter{Op: spi.FilterBetween, Path: "qty", Source: spi.SourceData, Values: []any{10, 200}, Declared: []spi.DataType{spi.Integer}}
+	if spi.MatchFilter(exclusive, data, spi.EntityMeta{}) {
+		t.Fatalf("expected 10 to NOT be strictly between 10 and 200")
+	}
+	inclusive := spi.Filter{Op: spi.FilterBetweenInclusive, Path: "qty", Source: spi.SourceData, Values: []any{10, 200}, Declared: []spi.DataType{spi.Integer}}
+	if !spi.MatchFilter(inclusive, data, spi.EntityMeta{}) {
+		t.Fatalf("expected 10 to be inclusively between 10 and 200")
+	}
+	inclusive.Values = []any{11, 200}
+	if spi.MatchFilter(inclusive, data, spi.EntityMeta{}) {
+		t.Fatalf("expected 10 to not be between 11 and 200")
+	}
+}
+
 func TestMatchFilter_CaseInsensitiveOps(t *testing.T) {
 	data := mustJSONFilter(t, map[string]any{"color": "Red"})
 	cases := []struct {

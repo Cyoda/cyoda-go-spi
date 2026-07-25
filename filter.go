@@ -22,8 +22,9 @@ const (
 	FilterIsNull  FilterOp = "is_null"
 	FilterNotNull FilterOp = "not_null"
 
-	FilterBetween      FilterOp = "between"
-	FilterMatchesRegex FilterOp = "matches_regex"
+	FilterBetween          FilterOp = "between"
+	FilterBetweenInclusive FilterOp = "between_inclusive"
+	FilterMatchesRegex     FilterOp = "matches_regex"
 
 	FilterIEq            FilterOp = "ieq"
 	FilterINe            FilterOp = "ine"

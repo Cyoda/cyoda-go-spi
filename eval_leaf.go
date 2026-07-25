@@ -41,6 +41,9 @@ import (
 //   - String ops act only on a textual stored value; a string op against a
 //     non-textual (numeric/boolean) stored slot is a non-match and never
 //     stringifies the stored value.
+//   - BETWEEN_INCLUSIVE is BETWEEN's inclusive twin (lo <= v <= hi vs lo < v <
+//     hi); it shares BETWEEN's expansion/bucketing exactly and differs only in
+//     the final bound comparison (see rangeMatch in evalBetween).
 
 // expKind discriminates the operator families an Expansion can hold.
 type expKind int
@@ -49,7 +52,7 @@ const (
 	kindUnary    expKind = iota // IS_NULL / NOT_NULL
 	kindStringOp                // CONTAINS / STARTS_WITH / …/ LIKE / MATCHES / I*/INOT_*
 	kindCompare                 // EQ / NE / GT / GTE / LT / LTE
-	kindBetween                 // BETWEEN (and, later, BETWEEN_INCLUSIVE)
+	kindBetween                 // BETWEEN / BETWEEN_INCLUSIVE
 )
 
 // otherCond is one same-type sub-condition for a non-numeric, non-temporal
@@ -113,8 +116,8 @@ func (e Expansion) Void() bool { return e.void }
 //   - Unary ops (IS_NULL / NOT_NULL): operand and values are ignored.
 //   - Binary ops (the six comparables, all string ops): operand is the single
 //     value; values is ignored.
-//   - Range ops (BETWEEN): values must hold exactly the two bounds; operand is
-//     ignored.
+//   - Range ops (BETWEEN / BETWEEN_INCLUSIVE): values must hold exactly the two
+//     bounds; operand is ignored.
 //
 // Errors (the caller maps to INVALID_CONDITION / CONDITION_TYPE_MISMATCH):
 //   - a range op whose values is not exactly length 2 → arity error;
@@ -145,7 +148,7 @@ func ExpandLeaf(op FilterOp, operand string, values []string, declared []DataTyp
 		}
 		return e, nil
 
-	case FilterBetween:
+	case FilterBetween, FilterBetweenInclusive:
 		return expandBetween(op, values, declared)
 
 	case FilterEq, FilterNe, FilterGt, FilterGte, FilterLt, FilterLte:
@@ -209,10 +212,12 @@ func expandCompare(op FilterOp, operand string, declared []DataType) (Expansion,
 	return e, nil
 }
 
-// expandBetween builds a precise, exclusive range expansion. Numeric bounds are
-// compared with Decimal (no rounding, no double-widening); temporal bounds are
-// resolved per declared subtype to floored epoch-millis; a declared String type
-// enables lexicographic bounds.
+// expandBetween builds a precise range expansion for BETWEEN and
+// BETWEEN_INCLUSIVE alike — op only decides the bound inclusivity applied at
+// eval time (evalBetween); the bucketing/parsing here is identical for both.
+// Numeric bounds are compared with Decimal (no rounding, no double-widening);
+// temporal bounds are resolved per declared subtype to floored epoch-millis; a
+// declared String type enables lexicographic bounds.
 func expandBetween(op FilterOp, values []string, declared []DataType) (Expansion, error) {
 	if len(values) != 2 {
 		return Expansion{}, fmt.Errorf("ExpandLeaf: range operator %q requires exactly 2 bounds, got %d", op, len(values))
@@ -395,10 +400,12 @@ func (e Expansion) evalCompare(stored gjson.Result) bool {
 	return false
 }
 
-// evalBetween applies the precise, EXCLUSIVE range test. An inclusive variant is
-// a one-line change here (flip the strict `<` bounds to `<=`), which is why the
-// bounds are kept precise rather than folded into a shared BETWEEN op.
+// evalBetween applies the precise range test, EXCLUSIVE for BETWEEN and
+// INCLUSIVE for BETWEEN_INCLUSIVE — the two share every bucketing/parsing step
+// (expandBetween) and differ only in the final bound comparison, done here via
+// rangeMatch/rangeMatchMs.
 func (e Expansion) evalBetween(stored gjson.Result) bool {
+	inclusive := e.op == FilterBetweenInclusive
 	switch stored.Type {
 	case gjson.Number:
 		if !e.numOK {
@@ -419,7 +426,7 @@ func (e Expansion) evalBetween(stored gjson.Result) bool {
 		if !assignable {
 			return false
 		}
-		return e.numLo.Cmp(dec) < 0 && dec.Cmp(e.numHi) < 0
+		return rangeMatch(e.numLo.Cmp(dec), dec.Cmp(e.numHi), inclusive)
 
 	case gjson.String:
 		s := stored.String()
@@ -433,18 +440,38 @@ func (e Expansion) evalBetween(stored gjson.Result) bool {
 					if tr.typ != src.Type {
 						continue
 					}
-					if tr.lo < ms && ms < tr.hi {
+					if rangeMatchMs(tr.lo, ms, tr.hi, inclusive) {
 						return true
 					}
 				}
 			}
 		}
-		if e.strBetween && strings.Compare(s, e.strLo) > 0 && strings.Compare(s, e.strHi) < 0 {
+		if e.strBetween && rangeMatch(strings.Compare(e.strLo, s), strings.Compare(s, e.strHi), inclusive) {
 			return true
 		}
 		return false
 	}
 	return false
+}
+
+// rangeMatch decides a BETWEEN/BETWEEN_INCLUSIVE bound test from two three-way
+// comparisons: loCmp is lo-vs-value (Cmp semantics: <0 means lo < value) and
+// hiCmp is value-vs-hi (<0 means value < hi). inclusive=false requires both
+// strict (<0); inclusive=true also accepts the on-the-bound case (<=0).
+func rangeMatch(loCmp, hiCmp int, inclusive bool) bool {
+	if inclusive {
+		return loCmp <= 0 && hiCmp <= 0
+	}
+	return loCmp < 0 && hiCmp < 0
+}
+
+// rangeMatchMs is rangeMatch specialized for millisecond bounds, avoiding a
+// three-way-comparison allocation on the temporal hot path.
+func rangeMatchMs(lo, ms, hi int64, inclusive bool) bool {
+	if inclusive {
+		return lo <= ms && ms <= hi
+	}
+	return lo < ms && ms < hi
 }
 
 // evalStringOp applies a string operator to a textual stored value. The stored

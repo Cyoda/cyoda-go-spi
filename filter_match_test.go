@@ -38,15 +38,15 @@ func TestMatchFilter_EmptyAndIsTrue_EmptyOrIsFalse(t *testing.T) {
 
 func TestMatchFilter_EqAndContainsAndMeta(t *testing.T) {
 	data := []byte(`{"name":"alpha","n":7}`)
-	eq := spi.Filter{Op: spi.FilterEq, Source: spi.SourceData, Path: "name", Value: "alpha"}
+	eq := spi.Filter{Op: spi.FilterEq, Source: spi.SourceData, Path: "name", Value: "alpha", Declared: []spi.DataType{spi.String}}
 	if !spi.MatchFilter(eq, data, meta("e1", "S")) {
 		t.Fatal("eq should match")
 	}
-	gt := spi.Filter{Op: spi.FilterGt, Source: spi.SourceData, Path: "n", Value: 3}
+	gt := spi.Filter{Op: spi.FilterGt, Source: spi.SourceData, Path: "n", Value: 3, Declared: []spi.DataType{spi.Integer}}
 	if !spi.MatchFilter(gt, data, meta("e1", "S")) {
 		t.Fatal("gt numeric should match")
 	}
-	mstate := spi.Filter{Op: spi.FilterEq, Source: spi.SourceMeta, Path: "state", Value: "ACTIVE"}
+	mstate := spi.Filter{Op: spi.FilterEq, Source: spi.SourceMeta, Path: "state", Value: "ACTIVE", Declared: []spi.DataType{spi.String}}
 	if !spi.MatchFilter(mstate, data, meta("e1", "ACTIVE")) {
 		t.Fatal("meta state eq should match")
 	}
@@ -57,10 +57,11 @@ func TestMatchFilter_EqAndContainsAndMeta(t *testing.T) {
 func TestMatchFilter_EqString(t *testing.T) {
 	data := mustJSONFilter(t, map[string]any{"variantId": "v1"})
 	f := spi.Filter{
-		Op:     spi.FilterEq,
-		Path:   "variantId",
-		Source: spi.SourceData,
-		Value:  "v1",
+		Op:       spi.FilterEq,
+		Path:     "variantId",
+		Source:   spi.SourceData,
+		Value:    "v1",
+		Declared: []spi.DataType{spi.String},
 	}
 	if !spi.MatchFilter(f, data, spi.EntityMeta{}) {
 		t.Fatalf("expected MatchFilter to be true for matching data")
@@ -80,10 +81,11 @@ func TestMatchFilter_EmptyFilterMatchesAll(t *testing.T) {
 
 func TestMatchFilter_StateEq(t *testing.T) {
 	f := spi.Filter{
-		Op:     spi.FilterEq,
-		Path:   "state",
-		Source: spi.SourceMeta,
-		Value:  "available",
+		Op:       spi.FilterEq,
+		Path:     "state",
+		Source:   spi.SourceMeta,
+		Value:    "available",
+		Declared: []spi.DataType{spi.String},
 	}
 	if !spi.MatchFilter(f, nil, spi.EntityMeta{State: "available"}) {
 		t.Fatalf("expected state match")
@@ -96,10 +98,11 @@ func TestMatchFilter_StateEq(t *testing.T) {
 func TestMatchFilter_Ne(t *testing.T) {
 	data := mustJSONFilter(t, map[string]any{"variantId": "v1"})
 	f := spi.Filter{
-		Op:     spi.FilterNe,
-		Path:   "variantId",
-		Source: spi.SourceData,
-		Value:  "v2",
+		Op:       spi.FilterNe,
+		Path:     "variantId",
+		Source:   spi.SourceData,
+		Value:    "v2",
+		Declared: []spi.DataType{spi.String},
 	}
 	if !spi.MatchFilter(f, data, spi.EntityMeta{}) {
 		t.Fatalf("expected Ne to be true for different value")
@@ -127,7 +130,7 @@ func TestMatchFilter_NumericOrdering(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := spi.Filter{Op: tc.op, Path: "qty", Source: spi.SourceData, Value: tc.val}
+			f := spi.Filter{Op: tc.op, Path: "qty", Source: spi.SourceData, Value: tc.val, Declared: []spi.DataType{spi.Integer}}
 			if got := spi.MatchFilter(f, data, spi.EntityMeta{}); got != tc.want {
 				t.Fatalf("op=%s val=%v: got %v want %v", tc.op, tc.val, got, tc.want)
 			}
@@ -163,8 +166,8 @@ func TestMatchFilter_AndGroup(t *testing.T) {
 	f := spi.Filter{
 		Op: spi.FilterAnd,
 		Children: []spi.Filter{
-			{Op: spi.FilterEq, Path: "variantId", Source: spi.SourceData, Value: "v1"},
-			{Op: spi.FilterGt, Path: "qty", Source: spi.SourceData, Value: 1},
+			{Op: spi.FilterEq, Path: "variantId", Source: spi.SourceData, Value: "v1", Declared: []spi.DataType{spi.String}},
+			{Op: spi.FilterGt, Path: "qty", Source: spi.SourceData, Value: 1, Declared: []spi.DataType{spi.Integer}},
 		},
 	}
 	if !spi.MatchFilter(f, data, spi.EntityMeta{}) {
@@ -182,8 +185,8 @@ func TestMatchFilter_OrGroup(t *testing.T) {
 	f := spi.Filter{
 		Op: spi.FilterOr,
 		Children: []spi.Filter{
-			{Op: spi.FilterEq, Path: "variantId", Source: spi.SourceData, Value: "vX"},
-			{Op: spi.FilterEq, Path: "variantId", Source: spi.SourceData, Value: "v1"},
+			{Op: spi.FilterEq, Path: "variantId", Source: spi.SourceData, Value: "vX", Declared: []spi.DataType{spi.String}},
+			{Op: spi.FilterEq, Path: "variantId", Source: spi.SourceData, Value: "v1", Declared: []spi.DataType{spi.String}},
 		},
 	}
 	if !spi.MatchFilter(f, data, spi.EntityMeta{}) {
@@ -216,7 +219,7 @@ func TestMatchFilter_StringOps(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := spi.Filter{Op: tc.op, Path: "name", Source: spi.SourceData, Value: tc.val}
+			f := spi.Filter{Op: tc.op, Path: "name", Source: spi.SourceData, Value: tc.val, Declared: []spi.DataType{spi.String}}
 			if got := spi.MatchFilter(f, data, spi.EntityMeta{}); got != tc.want {
 				t.Fatalf("op=%s val=%q: got %v want %v", tc.op, tc.val, got, tc.want)
 			}
@@ -230,12 +233,12 @@ func TestMatchFilter_NestedAndOr(t *testing.T) {
 	f := spi.Filter{
 		Op: spi.FilterAnd,
 		Children: []spi.Filter{
-			{Op: spi.FilterEq, Path: "variantId", Source: spi.SourceData, Value: "v1"},
+			{Op: spi.FilterEq, Path: "variantId", Source: spi.SourceData, Value: "v1", Declared: []spi.DataType{spi.String}},
 			{
 				Op: spi.FilterOr,
 				Children: []spi.Filter{
-					{Op: spi.FilterGt, Path: "qty", Source: spi.SourceData, Value: 100},
-					{Op: spi.FilterEq, Path: "color", Source: spi.SourceData, Value: "red"},
+					{Op: spi.FilterGt, Path: "qty", Source: spi.SourceData, Value: 100, Declared: []spi.DataType{spi.Integer}},
+					{Op: spi.FilterEq, Path: "color", Source: spi.SourceData, Value: "red", Declared: []spi.DataType{spi.String}},
 				},
 			},
 		},
@@ -267,7 +270,7 @@ func TestMatchFilter_MetaOtherFields(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := spi.Filter{Op: spi.FilterEq, Path: tc.path, Source: spi.SourceMeta, Value: tc.val}
+			f := spi.Filter{Op: spi.FilterEq, Path: tc.path, Source: spi.SourceMeta, Value: tc.val, Declared: []spi.DataType{spi.String}}
 			if got := spi.MatchFilter(f, nil, metaVal); got != tc.want {
 				t.Fatalf("path=%s: got %v want %v", tc.path, got, tc.want)
 			}
@@ -298,7 +301,7 @@ func TestMatchFilter_EmptyOrGroupIsFalse(t *testing.T) {
 
 func TestMatchFilter_Between(t *testing.T) {
 	data := mustJSONFilter(t, map[string]any{"qty": 42})
-	f := spi.Filter{Op: spi.FilterBetween, Path: "qty", Source: spi.SourceData, Values: []any{10, 200}}
+	f := spi.Filter{Op: spi.FilterBetween, Path: "qty", Source: spi.SourceData, Values: []any{10, 200}, Declared: []spi.DataType{spi.Integer}}
 	if !spi.MatchFilter(f, data, spi.EntityMeta{}) {
 		t.Fatalf("expected 42 to be between 10 and 200")
 	}
@@ -329,7 +332,7 @@ func TestMatchFilter_CaseInsensitiveOps(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := spi.Filter{Op: tc.op, Path: "color", Source: spi.SourceData, Value: tc.val}
+			f := spi.Filter{Op: tc.op, Path: "color", Source: spi.SourceData, Value: tc.val, Declared: []spi.DataType{spi.String}}
 			if got := spi.MatchFilter(f, data, spi.EntityMeta{}); got != tc.want {
 				t.Fatalf("op=%s val=%q: got %v want %v", tc.op, tc.val, got, tc.want)
 			}
@@ -339,13 +342,80 @@ func TestMatchFilter_CaseInsensitiveOps(t *testing.T) {
 
 func TestMatchFilter_MatchesRegex(t *testing.T) {
 	data := mustJSONFilter(t, map[string]any{"name": "Cyoda-Go"})
-	hit := spi.Filter{Op: spi.FilterMatchesRegex, Path: "name", Source: spi.SourceData, Value: "^Cyoda-.*$"}
+	hit := spi.Filter{Op: spi.FilterMatchesRegex, Path: "name", Source: spi.SourceData, Value: "^Cyoda-.*$", Declared: []spi.DataType{spi.String}}
 	if !spi.MatchFilter(hit, data, spi.EntityMeta{}) {
 		t.Fatalf("expected regex to match")
 	}
-	miss := spi.Filter{Op: spi.FilterMatchesRegex, Path: "name", Source: spi.SourceData, Value: "^Zzz.*$"}
+	miss := spi.Filter{Op: spi.FilterMatchesRegex, Path: "name", Source: spi.SourceData, Value: "^Zzz.*$", Declared: []spi.DataType{spi.String}}
 	if spi.MatchFilter(miss, data, spi.EntityMeta{}) {
 		t.Fatalf("expected regex to not match")
+	}
+}
+
+// TestMatchFilter_NegativeOnNull_NonMatch pins the kernel's null/absent
+// uniformity: a negative op (NE / INE / INOT_*) against an absent-or-null
+// stored leaf is a NON-match, not the old vacuous-true. Negatives are
+// null-guarded, not implemented as !positive.
+func TestMatchFilter_NegativeOnNull_NonMatch(t *testing.T) {
+	data := mustJSONFilter(t, map[string]any{"present": "x"})
+	cases := []struct {
+		name string
+		op   spi.FilterOp
+	}{
+		{"ne absent", spi.FilterNe},
+		{"ine absent", spi.FilterINe},
+		{"inot_contains absent", spi.FilterINotContains},
+		{"inot_starts_with absent", spi.FilterINotStartsWith},
+		{"inot_ends_with absent", spi.FilterINotEndsWith},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := spi.Filter{Op: tc.op, Path: "missing", Source: spi.SourceData, Value: "anything", Declared: []spi.DataType{spi.String}}
+			if spi.MatchFilter(f, data, spi.EntityMeta{}) {
+				t.Fatalf("op=%s on absent field must be a non-match (null uniformity)", tc.op)
+			}
+		})
+	}
+
+	// Explicit JSON null (present-but-null) is treated identically to absent.
+	nullData := []byte(`{"v":null}`)
+	f := spi.Filter{Op: spi.FilterNe, Path: "v", Source: spi.SourceData, Value: "x", Declared: []spi.DataType{spi.String}}
+	if spi.MatchFilter(f, nullData, spi.EntityMeta{}) {
+		t.Fatalf("NE against a JSON-null stored leaf must be a non-match")
+	}
+}
+
+// TestMatchFilter_TemporalMetaViaDeclared exercises a temporal meta leaf routed
+// through the kernel by Declared=[ZonedDateTime] (no Coercion): the stored
+// time.Time is bridged to an RFC3339 string and the kernel's temporal branch
+// classifies + compares it as an instant.
+func TestMatchFilter_TemporalMetaViaDeclared(t *testing.T) {
+	metaVal := spi.EntityMeta{CreationDate: time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)}
+	eq := spi.Filter{Op: spi.FilterEq, Source: spi.SourceMeta, Path: "creationDate",
+		Value: "2021-01-01T00:00:00.000Z", Declared: []spi.DataType{spi.ZonedDateTime}}
+	if !spi.MatchFilter(eq, nil, metaVal) {
+		t.Fatal("temporal meta EQUALS (mixed precision, same instant) should match")
+	}
+	gt := spi.Filter{Op: spi.FilterGt, Source: spi.SourceMeta, Path: "creationDate",
+		Value: "2020-12-31T23:59:59Z", Declared: []spi.DataType{spi.ZonedDateTime}}
+	if !spi.MatchFilter(gt, nil, metaVal) {
+		t.Fatal("temporal meta GREATER_THAN earlier instant should match")
+	}
+}
+
+// TestMatchFilter_NumericJSONNumberOperand pins that a json.Number operand
+// (as the domain layer decodes numbers) is normalized to its exact string form
+// and compared precisely against the stored numeric value.
+func TestMatchFilter_NumericJSONNumberOperand(t *testing.T) {
+	data := mustJSONFilter(t, map[string]any{"qty": 42})
+	f := spi.Filter{Op: spi.FilterGt, Path: "qty", Source: spi.SourceData,
+		Value: json.Number("10"), Declared: []spi.DataType{spi.Integer}}
+	if !spi.MatchFilter(f, data, spi.EntityMeta{}) {
+		t.Fatal("json.Number operand 10 should compare precisely (42 > 10)")
+	}
+	f.Value = json.Number("100")
+	if spi.MatchFilter(f, data, spi.EntityMeta{}) {
+		t.Fatal("json.Number operand 100 should not match (42 > 100 is false)")
 	}
 }
 

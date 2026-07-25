@@ -3,8 +3,6 @@ package spi
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
-	"strings"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -66,111 +64,97 @@ func evalFilter(f Filter, data []byte, meta EntityMeta) bool {
 	return evalLeafFilter(f, data, meta)
 }
 
-// evalLeafFilter mirrors the sqlite plugin's evaluateLeaf (post_filter.go)
-// but takes raw data + meta instead of *Entity so it can be called from
-// inner loops without constructing an Entity wrapper.
+// evalLeafFilter routes a single leaf through the type-directed EvalLeaf kernel
+// (eval_leaf.go), the one authoritative comparator shared with the search
+// boundary. It resolves the stored value as a gjson.Result (preserving its
+// precise numeric/temporal Raw form), normalizes the operand(s) to Cloud
+// .asText() string form, and stamps the leaf's declared model types so the
+// kernel can do type-directed comparison.
+//
+// IS_NULL / NOT_NULL are routed through the kernel too — it decides them purely
+// from the stored Result's presence, uniformly for data and (bridged) meta.
+//
+// The operand was already validated at the search boundary, so a per-row expand
+// error (which only happens on a genuinely malformed operand) is treated as a
+// non-match rather than propagated: matched && err == nil.
 func evalLeafFilter(f Filter, data []byte, meta EntityMeta) bool {
-	// IsNull / NotNull are checked first because they care about presence,
-	// not value extraction succeeding.
-	switch f.Op {
-	case FilterIsNull:
-		_, found := extractFilterValue(f, data, meta)
-		return !found
-	case FilterNotNull:
-		val, found := extractFilterValue(f, data, meta)
-		return found && val != nil
-	}
-
-	val, found := extractFilterValue(f, data, meta)
-
-	// For "negative" ops (Ne, INe, NotContains, NotStartsWith, NotEndsWith),
-	// a missing-or-null field is vacuously true; for everything else, missing
-	// short-circuits to false.
-	isNegativeOp := f.Op == FilterNe ||
-		f.Op == FilterINe ||
-		f.Op == FilterINotContains ||
-		f.Op == FilterINotStartsWith ||
-		f.Op == FilterINotEndsWith
-	if !found || val == nil {
-		return isNegativeOp
-	}
-
-	if f.Coercion == CoerceTemporal {
-		return evalTemporalLeaf(f, val) // val already extracted above; found/null handled by the earlier guard
-	}
-
-	switch f.Op {
-	case FilterEq:
-		return compareFilterValues(val, f.Value) == 0
-	case FilterNe:
-		return compareFilterValues(val, f.Value) != 0
-	case FilterGt:
-		return compareFilterValues(val, f.Value) > 0
-	case FilterLt:
-		return compareFilterValues(val, f.Value) < 0
-	case FilterGte:
-		return compareFilterValues(val, f.Value) >= 0
-	case FilterLte:
-		return compareFilterValues(val, f.Value) <= 0
-	case FilterContains:
-		return strings.Contains(fmt.Sprint(val), fmt.Sprint(f.Value))
-	case FilterStartsWith:
-		return strings.HasPrefix(fmt.Sprint(val), fmt.Sprint(f.Value))
-	case FilterEndsWith:
-		return strings.HasSuffix(fmt.Sprint(val), fmt.Sprint(f.Value))
-	case FilterLike:
-		return matchFilterLike(fmt.Sprint(val), fmt.Sprint(f.Value))
-	case FilterBetween:
-		if len(f.Values) < 2 {
-			return false
-		}
-		return compareFilterValues(val, f.Values[0]) >= 0 &&
-			compareFilterValues(val, f.Values[1]) <= 0
-	case FilterMatchesRegex:
-		ok, err := opMatchesPattern(toGjsonResult(val), f.Value)
-		return err == nil && ok
-	case FilterIEq:
-		return strings.EqualFold(fmt.Sprint(val), fmt.Sprint(f.Value))
-	case FilterINe:
-		return !strings.EqualFold(fmt.Sprint(val), fmt.Sprint(f.Value))
-	case FilterIContains:
-		return strings.Contains(strings.ToLower(fmt.Sprint(val)), strings.ToLower(fmt.Sprint(f.Value)))
-	case FilterINotContains:
-		return !strings.Contains(strings.ToLower(fmt.Sprint(val)), strings.ToLower(fmt.Sprint(f.Value)))
-	case FilterIStartsWith:
-		return strings.HasPrefix(strings.ToLower(fmt.Sprint(val)), strings.ToLower(fmt.Sprint(f.Value)))
-	case FilterINotStartsWith:
-		return !strings.HasPrefix(strings.ToLower(fmt.Sprint(val)), strings.ToLower(fmt.Sprint(f.Value)))
-	case FilterIEndsWith:
-		return strings.HasSuffix(strings.ToLower(fmt.Sprint(val)), strings.ToLower(fmt.Sprint(f.Value)))
-	case FilterINotEndsWith:
-		return !strings.HasSuffix(strings.ToLower(fmt.Sprint(val)), strings.ToLower(fmt.Sprint(f.Value)))
-	}
-	return false
+	stored := filterStoredResult(f, data, meta)
+	matched, err := EvalLeafString(f.Op, operandString(f.Value), valuesToStrings(f.Values), f.Declared, stored)
+	return matched && err == nil
 }
 
-// extractFilterValue extracts the field value referenced by the filter.
-// SourceData uses a gjson path on the entity's JSON data; SourceMeta uses
-// a fixed set of metadata field names (matching the sqlite plugin's
-// extractMetaValue, which is the canonical mapping for SourceMeta paths).
-// Returns (value, found). found=false means the field is missing; found=true
-// with value=nil means the field exists and is JSON null.
-func extractFilterValue(f Filter, data []byte, meta EntityMeta) (any, bool) {
+// filterStoredResult resolves the stored value referenced by the leaf as a
+// gjson.Result, keeping its .Raw so the kernel can classify numerics/temporals
+// precisely. A missing data path yields a non-existent Result (Exists()==false);
+// SourceMeta values are bridged through metaGjsonResult. In both cases the
+// kernel handles absent/null uniformly.
+func filterStoredResult(f Filter, data []byte, meta EntityMeta) gjson.Result {
 	if f.Source == SourceMeta {
-		return extractFilterMetaValue(f.Path, meta)
+		r, _ := metaGjsonResult(f.Path, meta)
+		return r
 	}
-	return extractFilterDataValue(f.Path, data)
+	return gjson.GetBytes(data, f.Path)
 }
 
-func extractFilterDataValue(path string, data []byte) (any, bool) {
-	result := gjson.GetBytes(data, path)
-	if !result.Exists() {
-		return nil, false
+// metaGjsonResult bridges a SourceMeta value into a gjson.Result so the kernel
+// classifies it uniformly with data values. It reuses extractFilterMetaValue for
+// the canonical meta keyset, then JSON-encodes the value and parses it: a meta
+// string becomes a gjson String, a numeric meta a gjson Number, and a time.Time
+// an RFC3339 String the kernel's temporal branch parses (the domain stamps
+// Declared=[ZonedDateTime] for temporal meta leaves).
+//
+// An absent meta path — or a present-but-unset zero time.Time — yields a
+// non-existent Result so the kernel treats it as absent/null (IS_NULL true;
+// every binary op, negatives included, a non-match). The zero-time exclusion
+// preserves the invariant that an unset creationDate/lastUpdateTime is "no
+// value", not a comparable ~year-1 instant.
+func metaGjsonResult(path string, meta EntityMeta) (gjson.Result, bool) {
+	v, found := extractFilterMetaValue(path, meta)
+	if !found || v == nil {
+		return gjson.Result{}, false
 	}
-	if result.Type == gjson.Null {
-		return nil, true
+	if t, ok := v.(time.Time); ok && t.IsZero() {
+		return gjson.Result{}, false
 	}
-	return result.Value(), true
+	b, err := json.Marshal(v)
+	if err != nil {
+		return gjson.Result{}, false
+	}
+	return gjson.ParseBytes(b), true
+}
+
+// operandString normalizes a filter operand to its Cloud .asText() string form,
+// the shape ExpandLeaf parses. A json.Number keeps its exact lexical form; a
+// nil operand becomes the empty string (a genuinely-null binary operand was
+// rejected at the search boundary).
+func operandString(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return x
+	case bool:
+		if x {
+			return "true"
+		}
+		return "false"
+	case json.Number:
+		return x.String()
+	default:
+		return fmt.Sprint(x)
+	}
+}
+
+// valuesToStrings maps each range/list operand through operandString.
+func valuesToStrings(vs []any) []string {
+	if len(vs) == 0 {
+		return nil
+	}
+	out := make([]string, len(vs))
+	for i, v := range vs {
+		out[i] = operandString(v)
+	}
+	return out
 }
 
 // extractFilterMetaValue mirrors the sqlite plugin's extractMetaValue keyset
@@ -214,47 +198,6 @@ func extractFilterMetaValue(path string, meta EntityMeta) (any, bool) {
 	}
 }
 
-// evalTemporalLeaf evaluates a CoerceTemporal leaf: the stored value (already
-// extracted) and the filter operand(s) are converted to floored epoch-ms and
-// compared via the shared CompareTemporal dispatcher.
-func evalTemporalLeaf(f Filter, val any) bool {
-	storedMs, storedOK := toEpochMillis(val)
-	if f.Op == FilterBetween {
-		if len(f.Values) < 2 {
-			return false
-		}
-		lo, lok := ParseTemporalMillis(fmt.Sprint(f.Values[0]))
-		hi, hok := ParseTemporalMillis(fmt.Sprint(f.Values[1]))
-		return CompareTemporal(FilterBetween, storedMs, storedOK, lo, hi, lok && hok)
-	}
-	op, ook := ParseTemporalMillis(fmt.Sprint(f.Value))
-	return CompareTemporal(f.Op, storedMs, storedOK, op, 0, ook)
-}
-
-// toEpochMillis converts a stored leaf value to floored epoch-ms. time.Time →
-// UnixMilli (meta path); RFC3339 string → ParseTemporalMillis (future
-// polymorphic-temporal body text). Anything else is not a valid instant →
-// ok=false (excluded).
-//
-// A zero time.Time (t.IsZero()) is treated as ok=false rather than its
-// nominal year-1 instant: a present-but-unset stored value is "no value",
-// not a real, comparable instant. Without this guard a zero-value
-// creationDate/lastUpdateTime would sort as "earlier than everything" and
-// incorrectly match LT/LTE-style comparisons, diverging from
-// internal/match.matchTemporalMeta, which already excludes on !stored.IsZero().
-func toEpochMillis(v any) (int64, bool) {
-	switch t := v.(type) {
-	case time.Time:
-		if t.IsZero() {
-			return 0, false
-		}
-		return t.UnixMilli(), true
-	case string:
-		return ParseTemporalMillis(t)
-	}
-	return 0, false
-}
-
 // timeToMicro converts a time.Time to microseconds since Unix epoch.
 // Mirrors plugins/sqlite/post_filter.go timeToMicro.
 //
@@ -269,113 +212,4 @@ func timeToMicro(t time.Time) int64 {
 		return 0
 	}
 	return t.UnixMicro()
-}
-
-// compareFilterValues orders two raw values. Returns <0, 0, >0 like strings.Compare.
-//
-// Numeric coercion intentionally does NOT parse strings — only float64/float32/
-// int/int64/json.Number are treated as numeric (see the shared NumericFloat in
-// temporal.go). This mirrors the sqlite plugin's compareValues +
-// toFloat64 (plugins/sqlite/post_filter.go). The Match path (predicate.Condition)
-// does parse strings via operators.go toFloat64 — keep the two helpers separate
-// so the Filter path stays in lockstep with sqlite.
-func compareFilterValues(a, b any) int {
-	af, aok := NumericFloat(a)
-	bf, bok := NumericFloat(b)
-	if aok && bok {
-		switch {
-		case af < bf:
-			return -1
-		case af > bf:
-			return 1
-		default:
-			return 0
-		}
-	}
-	return strings.Compare(fmt.Sprint(a), fmt.Sprint(b))
-}
-
-// matchFilterLike mirrors the sqlite plugin's matchLike (plugins/sqlite/
-// post_filter.go) — byte-based, NOT rune-based. `_` matches a single byte;
-// `%` matches any byte sequence; `\` escapes. Multibyte characters in the
-// data string are spanned by multiple `_` pattern bytes, matching SQLite's
-// default LIKE semantics. Keep in sync with the sqlite implementation —
-// drift would silently disagree on LIKE patterns crossing multibyte chars.
-func matchFilterLike(s, pattern string) bool {
-	return matchFilterLikeHelper(s, 0, pattern, 0)
-}
-
-func matchFilterLikeHelper(s string, si int, pattern string, pi int) bool {
-	for pi < len(pattern) {
-		ch := pattern[pi]
-		switch {
-		case ch == '\\' && pi+1 < len(pattern):
-			pi++
-			if si >= len(s) || s[si] != pattern[pi] {
-				return false
-			}
-			si++
-			pi++
-		case ch == '%':
-			for pi < len(pattern) && pattern[pi] == '%' {
-				pi++
-			}
-			if pi == len(pattern) {
-				return true
-			}
-			for si <= len(s) {
-				if matchFilterLikeHelper(s, si, pattern, pi) {
-					return true
-				}
-				si++
-			}
-			return false
-		case ch == '_':
-			if si >= len(s) {
-				return false
-			}
-			si++
-			pi++
-		default:
-			if si >= len(s) || s[si] != ch {
-				return false
-			}
-			si++
-			pi++
-		}
-	}
-	return si == len(s)
-}
-
-// toGjsonResult wraps a raw value in a gjson.Result for reuse of the
-// opMatchesPattern regex helper (which takes gjson.Result). This is a thin
-// shim — we encode the value as JSON, parse it, and let gjson surface it as
-// a Result. Used only for regex leaf evaluation, where the per-entity cost
-// is dominated by regex compile anyway.
-func toGjsonResult(v any) gjson.Result {
-	b, err := json.Marshal(v)
-	if err != nil {
-		// Fall back to a string-typed Result via fmt.Sprint.
-		return gjson.Parse(fmt.Sprintf("%q", fmt.Sprint(v)))
-	}
-	return gjson.ParseBytes(b)
-}
-
-// opIsNull reports whether a gjson.Result represents a missing or JSON-null
-// value. Ported from internal/match/operators.go — used only by
-// opMatchesPattern below.
-func opIsNull(actual gjson.Result) bool {
-	return !actual.Exists() || actual.Type == gjson.Null
-}
-
-// opMatchesPattern reports whether actual's string representation matches
-// the regex pattern in expected. Ported verbatim from
-// internal/match/operators.go (the MATCHES_PATTERN operator), which
-// evalLeafFilter's FilterMatchesRegex case delegates to.
-func opMatchesPattern(actual gjson.Result, expected any) (bool, error) {
-	if opIsNull(actual) {
-		return false, nil
-	}
-	pattern := fmt.Sprintf("%v", expected)
-	return regexp.MatchString(pattern, actual.String())
 }

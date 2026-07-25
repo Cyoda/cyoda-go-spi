@@ -245,6 +245,15 @@ func TestMatchFilter_StringOps(t *testing.T) {
 		{"like hit", spi.FilterLike, "Cy%Go", true},
 		{"like underscore", spi.FilterLike, "Cyoda_Go", true},
 		{"like miss", spi.FilterLike, "Zzz%", false},
+		{"not_contains miss (matches, so non-match)", spi.FilterNotContains, "oda", false},
+		{"not_contains hit (does not match, so match)", spi.FilterNotContains, "zzz", true},
+		{"not_contains case-sensitive -> match (case differs)", spi.FilterNotContains, "ODA", true},
+		{"not_starts_with miss (matches, so non-match)", spi.FilterNotStartsWith, "Cy", false},
+		{"not_starts_with hit (does not match, so match)", spi.FilterNotStartsWith, "Go", true},
+		{"not_starts_with case-sensitive -> match (case differs)", spi.FilterNotStartsWith, "CY", true},
+		{"not_ends_with miss (matches, so non-match)", spi.FilterNotEndsWith, "Go", false},
+		{"not_ends_with hit (does not match, so match)", spi.FilterNotEndsWith, "Cy", true},
+		{"not_ends_with case-sensitive -> match (case differs)", spi.FilterNotEndsWith, "GO", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -414,6 +423,9 @@ func TestMatchFilter_NegativeOnNull_NonMatch(t *testing.T) {
 		{"inot_contains absent", spi.FilterINotContains},
 		{"inot_starts_with absent", spi.FilterINotStartsWith},
 		{"inot_ends_with absent", spi.FilterINotEndsWith},
+		{"not_contains absent", spi.FilterNotContains},
+		{"not_starts_with absent", spi.FilterNotStartsWith},
+		{"not_ends_with absent", spi.FilterNotEndsWith},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -76,23 +76,36 @@ func ClassifyDecimal(d Decimal) DataType {
 	if precision <= doubleMaxPrecision && absScale <= doubleMaxAbsScale {
 		return Double
 	}
-	// BIG_DECIMAL definite fit.
-	if scale <= bigDecimalMaxScale &&
-		precision <= bigDecimalDefinitePrec &&
-		(precision-scale) <= bigDecimalDefiniteExp {
+	if isInt128Decimal(d) {
 		return BigDecimal
 	}
-	// BIG_DECIMAL loose fit.
-	if scale <= bigDecimalMaxScale &&
-		precision <= bigDecimalLoosePrec &&
-		(precision-scale) <= bigDecimalLooseExp {
-		// Verify the unscaled-at-scale-18 representation fits Int128.
+	return UnboundDecimal
+}
+
+// isInt128Decimal reports whether d (assumed StripTrailingZeros'd already)
+// fits Trino's fixed-scale-18 BIG_DECIMAL Int128 envelope — either the
+// "definite" precision/exponent bound or the "loose" bound, verified by an
+// actual SetScale(18) + IsInt128 check. Shared by ClassifyDecimal and
+// ParseStringOrNull's BigDecimal branch (DataType.kt:140-143,
+// ParserFunctions.kt:35-59).
+func isInt128Decimal(d Decimal) bool {
+	precision := d.Precision()
+	scale := int(d.scale)
+	if scale > bigDecimalMaxScale {
+		return false
+	}
+	// Definite fit.
+	if precision <= bigDecimalDefinitePrec && (precision-scale) <= bigDecimalDefiniteExp {
+		return true
+	}
+	// Loose fit — verify the unscaled-at-scale-18 representation fits Int128.
+	if precision <= bigDecimalLoosePrec && (precision-scale) <= bigDecimalLooseExp {
 		aligned, err := d.SetScale(18)
 		if err == nil && aligned.IsInt128() {
-			return BigDecimal
+			return true
 		}
 	}
-	return UnboundDecimal
+	return false
 }
 
 // wideningLattice is the reachability map ported from

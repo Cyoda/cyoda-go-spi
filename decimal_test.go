@@ -340,3 +340,76 @@ func TestDecimal_IsInt128(t *testing.T) {
 		})
 	}
 }
+
+// mustDecimal parses s or fails the test.
+func mustDecimal(t *testing.T, s string) Decimal {
+	t.Helper()
+	d, err := ParseDecimal(s)
+	if err != nil {
+		t.Fatalf("ParseDecimal(%q): %v", s, err)
+	}
+	return d
+}
+
+func TestRoundToScale(t *testing.T) {
+	cases := []struct {
+		in       string
+		scale    int32
+		mode     roundingMode
+		want     string
+		wantMode string // label for message
+	}{
+		// Sign-aware CEILING/FLOOR to integer (scale 0).
+		{"12.78", 0, roundCeiling, "13", "ceil"},
+		{"12.78", 0, roundFloor, "12", "floor"},
+		{"-12.78", 0, roundCeiling, "-12", "ceil"},
+		{"-12.78", 0, roundFloor, "-13", "floor"},
+		// Exact values never adjust in either direction.
+		{"13.0", 0, roundCeiling, "13", "ceil"},
+		{"13.0", 0, roundFloor, "13", "floor"},
+		{"-13.0", 0, roundCeiling, "-13", "ceil"},
+		{"-13.0", 0, roundFloor, "-13", "floor"},
+		// Reduce to a positive scale.
+		{"12.78", 1, roundCeiling, "12.8", "ceil"},
+		{"12.78", 1, roundFloor, "12.7", "floor"},
+		{"-12.78", 1, roundCeiling, "-12.7", "ceil"},
+		{"-12.78", 1, roundFloor, "-12.8", "floor"},
+		// Upward rescale is exact — mode irrelevant (trailing zeros grow the scale).
+		{"12.78", 4, roundCeiling, "12.7800", "ceil"},
+		{"12.78", 2, roundFloor, "12.78", "floor"},
+		// Whole with negative source scale, rescaled up.
+		{"1.2e3", 0, roundFloor, "1200", "floor"},
+	}
+	for _, c := range cases {
+		in := mustDecimal(t, c.in)
+		got := in.roundToScale(c.scale, c.mode)
+		if got.Canonical() != c.want {
+			t.Errorf("roundToScale(%s, %d, %s): got %s, want %s",
+				c.in, c.scale, c.wantMode, got.Canonical(), c.want)
+		}
+	}
+}
+
+func TestRoundToPrecision(t *testing.T) {
+	cases := []struct {
+		in   string
+		prec int
+		mode roundingMode
+		want string
+	}{
+		// 17 significant digits reduced to 15; 16th digit is 6.
+		{"1.2345678901234567", 15, roundCeiling, "1.23456789012346"},
+		{"1.2345678901234567", 15, roundFloor, "1.23456789012345"},
+		// Already within precision — no change.
+		{"1.5", 15, roundCeiling, "1.5"},
+		{"123", 15, roundFloor, "123"},
+	}
+	for _, c := range cases {
+		in := mustDecimal(t, c.in)
+		got := in.roundToPrecision(c.prec, c.mode)
+		if got.Canonical() != c.want {
+			t.Errorf("roundToPrecision(%s, %d): got %s, want %s",
+				c.in, c.prec, got.Canonical(), c.want)
+		}
+	}
+}

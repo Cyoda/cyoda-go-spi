@@ -209,6 +209,79 @@ func (d Decimal) SetScale(newScale int32) (Decimal, error) {
 	return Decimal{unscaled: q, scale: newScale}, nil
 }
 
+// roundingMode selects the direction for the integer/scale rounding
+// helpers below. SetScale is exact-only (errors on precision loss); these
+// helpers add the rounding that the numeric-bucket engine needs.
+type roundingMode int
+
+const (
+	// roundCeiling rounds toward +∞.
+	roundCeiling roundingMode = iota
+	// roundFloor rounds toward -∞.
+	roundFloor
+)
+
+// roundToScale returns d rounded to newScale using mode.
+//
+// Upward rescale (newScale >= d.scale) is exact and never rounds — it
+// delegates to SetScale. Downward rescale divides the unscaled value by
+// 10^(d.scale-newScale) via big.Int QuoRem, which truncates toward zero;
+// the remainder therefore carries the sign of the dividend. The sign-aware
+// adjustment below turns that truncation into a true CEILING (+∞) or FLOOR
+// (-∞): for CEILING bump the quotient up only when the dropped part is
+// positive; for FLOOR bump it down only when the dropped part is negative.
+func (d Decimal) roundToScale(newScale int32, mode roundingMode) Decimal {
+	if d.unscaled == nil {
+		return Decimal{unscaled: new(big.Int), scale: newScale}
+	}
+	if newScale >= d.scale {
+		r, err := d.SetScale(newScale) // exact upward — never loses precision
+		if err != nil {
+			panic(fmt.Sprintf("roundToScale: upward SetScale failed: %v", err))
+		}
+		return r
+	}
+	factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(d.scale)-int64(newScale)), nil)
+	q := new(big.Int)
+	rem := new(big.Int)
+	q.QuoRem(d.unscaled, factor, rem)
+	if rem.Sign() != 0 {
+		switch mode {
+		case roundCeiling:
+			if rem.Sign() > 0 {
+				q.Add(q, big.NewInt(1))
+			}
+		case roundFloor:
+			if rem.Sign() < 0 {
+				q.Sub(q, big.NewInt(1))
+			}
+		}
+	}
+	return Decimal{unscaled: q, scale: newScale}
+}
+
+// roundToPrecision rounds d to at most maxPrec significant digits using
+// mode. It mirrors Java BigDecimal.round(MathContext(maxPrec, mode)) for
+// the cases the DOUBLE bucket needs: when the current precision already
+// fits it is a no-op, otherwise it rounds at the scale that leaves maxPrec
+// significant digits.
+//
+// Carry that would grow the result past maxPrec digits (e.g. 9.99 → 10) is
+// not specially renormalized. The DOUBLE bucket's 15-digit precision limit
+// makes that boundary unreachable for the values routed here.
+func (d Decimal) roundToPrecision(maxPrec int, mode roundingMode) Decimal {
+	p := d.Precision()
+	if p <= maxPrec {
+		u := new(big.Int)
+		if d.unscaled != nil {
+			u.Set(d.unscaled)
+		}
+		return Decimal{unscaled: u, scale: d.scale}
+	}
+	drop := int32(p - maxPrec)
+	return d.roundToScale(d.scale-drop, mode)
+}
+
 // int128Min = -2^127, int128Max = 2^127 - 1.
 // Pre-computed once at package init to avoid recomputing per call.
 var int128Min = new(big.Int).Neg(new(big.Int).Lsh(big.NewInt(1), 127))

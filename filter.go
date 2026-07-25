@@ -67,4 +67,8 @@ type Filter struct {
 	Values   []any
 	Children []Filter
 	Coercion FilterCoercion // temporal comparison routing (zero = CoerceNone)
+	// Declared holds the leaf field's declared model DataTypes, stamped by the
+	// domain layer from the model schema; the kernel uses them for
+	// type-directed comparison. Empty for as-yet-unstamped or non-typed leaves.
+	Declared []DataType
 }

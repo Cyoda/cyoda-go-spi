@@ -114,9 +114,24 @@ func oracleRows() []evalRow {
 		{"precise long eq beyond 2^53 -> match", FilterEq, "9007199254740993", nil, []DataType{Long}, strp("9007199254740993"), true},
 		{"precise long eq beyond 2^53 -> off-by-one", FilterEq, "9007199254740992", nil, []DataType{Long}, strp("9007199254740993"), false},
 
+		// --- 20-digit precision, both ends (operand string AND stored raw
+		// JSON text survive to the compare without float64 truncation) -------
+		{"20-digit precise eq -> match", FilterEq, "12345678901234567890", nil, []DataType{BigInteger}, strp("12345678901234567890"), true},
+		{"20-digit precise eq -> off-by-one at the 20th digit -> non-match", FilterEq, "12345678901234567890", nil, []DataType{BigInteger}, strp("12345678901234567891"), false},
+
 		// --- void (parses to a type but no surviving bucket) → non-match ----
 		{"void: [INT] eq 12.5 stored 12 -> non-match", FilterEq, "12.5", nil, []DataType{Integer}, strp("12"), false},
 		{"void: [INT] eq 12.5 stored 13 -> non-match", FilterEq, "12.5", nil, []DataType{Integer}, strp("13"), false},
+
+		// --- out-of-range numeric bucket → NOT_NULL degenerate (entity-search.md
+		// §6 Step 2 / worked example `[BYTE], LESS_THAN "300" -> NotNull`; cyoda-go
+		// has no BYTE bucket (design §4), so INTEGER — the narrowest int bucket —
+		// carries the same ABOVE-ceiling/BELOW-floor semantics: the bucket
+		// degenerates to "any stored value of that type", matching regardless of
+		// magnitude or sign). ---------------------------------------------------
+		{"int lt above-ceiling -> NOT_NULL (matches any stored int, positive)", FilterLt, "5000000000", nil, []DataType{Integer}, strp("999999"), true},
+		{"int lt above-ceiling -> NOT_NULL (matches any stored int, negative)", FilterLt, "5000000000", nil, []DataType{Integer}, strp("-999999"), true},
+		{"int gt below-floor -> NOT_NULL (matches any stored int)", FilterGt, "-5000000000", nil, []DataType{Integer}, strp("0"), true},
 
 		// --- string ordering (monomorphic String, comparables) -------------
 		{"str gt -> lexicographic", FilterGt, "abc", nil, []DataType{String}, strp(`"abd"`), true},
@@ -142,6 +157,30 @@ func oracleRows() []evalRow {
 		// (floored to 2024-01-01), so stored 2024 is NOT >= and must not match.
 		{"year gte 2024-09-09 (mutated gt) -> stored 2024", FilterGte, "2024-09-09", nil, []DataType{Year}, strp(`"2024"`), false},
 		{"year gte 2024-09-09 (mutated gt) -> stored 2025", FilterGte, "2024-09-09", nil, []DataType{Year}, strp(`"2025"`), true},
+
+		// --- temporal imprecise EQUALS dropped (entity-search.md section 6
+		// Step 3: "EQUALS on an imprecise value -> dropped", the temporal
+		// analogue of the numeric imprecise-EQUALS void rule above). A YEAR
+		// bucket cannot precisely hold a day-of-year, so EQUALS against it is
+		// void regardless of the stored value. -------------------------------
+		{"year eq 2024-09-09 imprecise -> dropped (void, non-match)", FilterEq, "2024-09-09", nil, []DataType{Year}, strp(`"2024"`), false},
+
+		// --- entity-search.md section 6 worked example (literal): [YEAR,
+		// LOCAL_DATE], GREATER_OR_EQUAL "2024-09-09" ->
+		// OR(localDates>=2024-09-09, years>2024). Combines the identity
+		// LOCAL_DATE branch with the imprecise-downscaled, op-mutated YEAR
+		// branch in a single polymorphic declared set. -----------------------
+		{"poly year|local_date gte 2024-09-09 -> stored local_date same day", FilterGte, "2024-09-09", nil, []DataType{Year, LocalDate}, strp(`"2024-09-09"`), true},
+		{"poly year|local_date gte 2024-09-09 -> stored local_date earlier", FilterGte, "2024-09-09", nil, []DataType{Year, LocalDate}, strp(`"2024-09-08"`), false},
+		{"poly year|local_date gte 2024-09-09 -> stored year 2024 (not > floor)", FilterGte, "2024-09-09", nil, []DataType{Year, LocalDate}, strp(`"2024"`), false},
+		{"poly year|local_date gte 2024-09-09 -> stored year 2025", FilterGte, "2024-09-09", nil, []DataType{Year, LocalDate}, strp(`"2025"`), true},
+
+		// --- meta temporal coarse operand (design spec section 4 / coverage
+		// matrix: meta fields are monomorphic ZONED_DATE_TIME but accept a
+		// coarse operand like "2024", classified as YEAR then upscaled to the
+		// instant at start-of-year UTC; op is never mutated on upscale). ------
+		{"meta zdt gte coarse year 2024 -> stored later in year", FilterGte, "2024", nil, []DataType{ZonedDateTime}, strp(`"2024-06-01T00:00:00Z"`), true},
+		{"meta zdt gte coarse year 2024 -> stored prior year", FilterGte, "2024", nil, []DataType{ZonedDateTime}, strp(`"2023-12-31T23:59:59Z"`), false},
 
 		// --- polymorphic false-positive guard (type-slot exact match) -------
 		// [YEAR, ZONED_DATE_TIME] gte a ZDT operand: the YEAR branch floors to
@@ -251,7 +290,10 @@ func TestExpandLeaf_TemporalDownscaleOpMutation(t *testing.T) {
 }
 
 func TestLikeToRegex_Grammar(t *testing.T) {
-	cases := []struct{ pattern, in string; want bool }{
+	cases := []struct {
+		pattern, in string
+		want        bool
+	}{
 		{"foo%", "foobar", true},
 		{"foo%", "foo", true},
 		{"foo%", "xfoo", false},

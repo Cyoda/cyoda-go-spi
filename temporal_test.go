@@ -46,6 +46,12 @@ func TestCompareTemporal(t *testing.T) {
 		{FilterLte, 1000, true, 1000, 0, true, true},
 		{FilterBetween, 1000, true, 900, 1100, true, true},
 		{FilterBetween, 1000, true, 1001, 1100, true, false},
+		// BETWEEN_INCLUSIVE: stored exactly on a bound must match (the
+		// boundary difference from BETWEEN, which excludes it).
+		{FilterBetweenInclusive, 1000, true, 1000, 1100, true, true},
+		{FilterBetweenInclusive, 1000, true, 900, 1000, true, true},
+		{FilterBetweenInclusive, 1000, true, 1001, 1100, true, false},
+		{FilterBetweenInclusive, 1000, true, 900, 999, true, false},
 		// stored not convertible -> exclude for positive, vacuous-true for NE
 		{FilterEq, 0, false, 1000, 0, true, false},
 		{FilterGt, 0, false, 1000, 0, true, false},

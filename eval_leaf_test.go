@@ -98,6 +98,19 @@ func oracleRows() []evalRow {
 		{"between 10..20 exclusive hi -> 20", FilterBetween, "", []string{"10", "20"}, []DataType{Integer}, strp("20"), false},
 		{"between 10..20 -> 25", FilterBetween, "", []string{"10", "20"}, []DataType{Integer}, strp("25"), false},
 
+		// --- BETWEEN_INCLUSIVE (same range, inclusive bounds) ---------------
+		{"between_inclusive 10..20 -> inclusive lo 10", FilterBetweenInclusive, "", []string{"10", "20"}, []DataType{Integer}, strp("10"), true},
+		{"between_inclusive 10..20 -> 15", FilterBetweenInclusive, "", []string{"10", "20"}, []DataType{Integer}, strp("15"), true},
+		{"between_inclusive 10..20 -> inclusive hi 20", FilterBetweenInclusive, "", []string{"10", "20"}, []DataType{Integer}, strp("20"), true},
+		{"between_inclusive 10..20 -> below range 9", FilterBetweenInclusive, "", []string{"10", "20"}, []DataType{Integer}, strp("9"), false},
+		{"between_inclusive 10..20 -> above range 21", FilterBetweenInclusive, "", []string{"10", "20"}, []DataType{Integer}, strp("21"), false},
+
+		// --- string BETWEEN / BETWEEN_INCLUSIVE (lexicographic bounds) ------
+		{"str between abc..abe -> exclusive lo abc", FilterBetween, "", []string{"abc", "abe"}, []DataType{String}, strp(`"abc"`), false},
+		{"str between abc..abe -> inside abd", FilterBetween, "", []string{"abc", "abe"}, []DataType{String}, strp(`"abd"`), true},
+		{"str between_inclusive abc..abe -> inclusive lo abc", FilterBetweenInclusive, "", []string{"abc", "abe"}, []DataType{String}, strp(`"abc"`), true},
+		{"str between_inclusive abc..abe -> inclusive hi abe", FilterBetweenInclusive, "", []string{"abc", "abe"}, []DataType{String}, strp(`"abe"`), true},
+
 		{"is_null on absent -> true", FilterIsNull, "", nil, []DataType{Integer}, nil, true},
 		{"is_null on null -> true", FilterIsNull, "", nil, []DataType{Integer}, strp("null"), true},
 		{"is_null on present -> false", FilterIsNull, "", nil, []DataType{Integer}, strp("5"), false},
@@ -194,6 +207,12 @@ func oracleRows() []evalRow {
 		{"local_date between exclusive lo", FilterBetween, "", []string{"2024-03-01", "2024-09-01"}, []DataType{LocalDate}, strp(`"2024-03-01"`), false},
 		{"local_date between -> below range", FilterBetween, "", []string{"2024-03-01", "2024-09-01"}, []DataType{LocalDate}, strp(`"2023-12-31"`), false},
 
+		// --- temporal BETWEEN_INCLUSIVE: same bounds, boundary values now match
+		{"local_date between_inclusive -> inclusive lo", FilterBetweenInclusive, "", []string{"2024-03-01", "2024-09-01"}, []DataType{LocalDate}, strp(`"2024-03-01"`), true},
+		{"local_date between_inclusive -> inclusive hi", FilterBetweenInclusive, "", []string{"2024-03-01", "2024-09-01"}, []DataType{LocalDate}, strp(`"2024-09-01"`), true},
+		{"local_date between_inclusive -> inside", FilterBetweenInclusive, "", []string{"2024-03-01", "2024-09-01"}, []DataType{LocalDate}, strp(`"2024-06-15"`), true},
+		{"local_date between_inclusive -> below range", FilterBetweenInclusive, "", []string{"2024-03-01", "2024-09-01"}, []DataType{LocalDate}, strp(`"2023-12-31"`), false},
+
 		// --- UnboundDecimal fast-path oracle rows (dual-path identity) ------
 		{"ubd eq -> match", FilterEq, "3.14", nil, []DataType{UnboundDecimal}, strp("3.14"), true},
 		{"ubd eq -> non-match", FilterEq, "3.14", nil, []DataType{UnboundDecimal}, strp("3.15"), false},
@@ -265,9 +284,11 @@ func TestExpandLeaf_Void(t *testing.T) {
 }
 
 func TestExpandLeaf_BetweenArity(t *testing.T) {
-	for _, vals := range [][]string{nil, {"1"}, {"1", "2", "3"}} {
-		if _, err := ExpandLeaf(FilterBetween, "", vals, []DataType{Integer}); err == nil {
-			t.Errorf("expected arity error for between with %d values", len(vals))
+	for _, op := range []FilterOp{FilterBetween, FilterBetweenInclusive} {
+		for _, vals := range [][]string{nil, {"1"}, {"1", "2", "3"}} {
+			if _, err := ExpandLeaf(op, "", vals, []DataType{Integer}); err == nil {
+				t.Errorf("expected arity error for %s with %d values", op, len(vals))
+			}
 		}
 	}
 }

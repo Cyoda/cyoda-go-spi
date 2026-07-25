@@ -23,9 +23,11 @@ func ParseTemporalMillis(s string) (int64, bool) {
 // CompareTemporal is the single per-operator temporal decision, shared by both
 // Go evaluators. storedOK=false (stored value not a valid instant) →
 // excluded for positive ops, vacuously true for NE. loMs is the (single) operand
-// for non-BETWEEN ops; loMs..hiMs are the inclusive bounds for BETWEEN. loHiOK is
-// false only if an operand failed to parse (validation makes this unreachable for
-// validated callers; evaluators still degrade safely).
+// for non-BETWEEN ops; loMs..hiMs are the bounds for BETWEEN / BETWEEN_INCLUSIVE
+// (both inclusive here — eval_leaf.go's own precise-range BETWEEN path is
+// exclusive and does not route through this helper). loHiOK is false only if an
+// operand failed to parse (validation makes this unreachable for validated
+// callers; evaluators still degrade safely).
 func CompareTemporal(op FilterOp, storedMs int64, storedOK bool, loMs, hiMs int64, loHiOK bool) bool {
 	if !storedOK || !loHiOK {
 		return op == FilterNe // vacuous-true for NE, exclude otherwise
@@ -44,6 +46,8 @@ func CompareTemporal(op FilterOp, storedMs int64, storedOK bool, loMs, hiMs int6
 	case FilterLte:
 		return storedMs <= loMs
 	case FilterBetween:
+		return storedMs >= loMs && storedMs <= hiMs
+	case FilterBetweenInclusive:
 		return storedMs >= loMs && storedMs <= hiMs
 	}
 	return false

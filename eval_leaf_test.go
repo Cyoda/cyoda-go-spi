@@ -127,6 +127,40 @@ func oracleRows() []evalRow {
 		{"zdt gte -> earlier instant", FilterGte, "2024-09-09T00:00:00Z", nil, []DataType{ZonedDateTime}, strp(`"2024-01-01T00:00:00Z"`), false},
 		{"zdt eq -> same instant", FilterEq, "2024-09-09T12:00:00Z", nil, []DataType{ZonedDateTime}, strp(`"2024-09-09T12:00:00Z"`), true},
 		{"zdt ne -> absent (null rule)", FilterNe, "2024-09-09T12:00:00Z", nil, []DataType{ZonedDateTime}, nil, false},
+
+		// --- temporal coarse subtypes (stored-side type-slot discipline) ----
+		// A LocalDate stored value is offset-less/date-only: ParseTemporalMillis
+		// cannot read it, so it must be classified to its natural subtype and
+		// matched only against the LOCAL_DATE sub-condition.
+		{"local_date gte -> same date", FilterGte, "2024-09-09", nil, []DataType{LocalDate}, strp(`"2024-09-09"`), true},
+		{"local_date gte -> earlier date", FilterGte, "2024-09-09", nil, []DataType{LocalDate}, strp(`"2024-09-08"`), false},
+		{"local_date gte -> later date", FilterGte, "2024-09-09", nil, []DataType{LocalDate}, strp(`"2024-09-10"`), true},
+		{"year gte 2024 -> stored 2024", FilterGte, "2024", nil, []DataType{Year}, strp(`"2024"`), true},
+		{"year gte 2024 -> stored 2023", FilterGte, "2024", nil, []DataType{Year}, strp(`"2023"`), false},
+		{"year gte 2024 -> stored 2025", FilterGte, "2024", nil, []DataType{Year}, strp(`"2025"`), true},
+		// Op-mutation: LocalDate operand downscaled to YEAR turns gte into gt
+		// (floored to 2024-01-01), so stored 2024 is NOT >= and must not match.
+		{"year gte 2024-09-09 (mutated gt) -> stored 2024", FilterGte, "2024-09-09", nil, []DataType{Year}, strp(`"2024"`), false},
+		{"year gte 2024-09-09 (mutated gt) -> stored 2025", FilterGte, "2024-09-09", nil, []DataType{Year}, strp(`"2025"`), true},
+
+		// --- polymorphic false-positive guard (type-slot exact match) -------
+		// [YEAR, ZONED_DATE_TIME] gte a ZDT operand: the YEAR branch floors to
+		// {YEAR gt 2024-01-01}. A stored ZonedDateTime must compare ONLY against
+		// the ZDT sub-condition, never spuriously satisfy the YEAR branch.
+		{"poly year|zdt gte -> stored zdt earlier (no false positive)", FilterGte, "2024-09-09T00:00:00Z", nil, []DataType{Year, ZonedDateTime}, strp(`"2024-06-01T00:00:00Z"`), false},
+		{"poly year|zdt gte -> stored zdt later", FilterGte, "2024-09-09T00:00:00Z", nil, []DataType{Year, ZonedDateTime}, strp(`"2024-12-01T00:00:00Z"`), true},
+
+		// --- temporal BETWEEN on a coarse (non-ZonedDateTime) subtype -------
+		{"local_date between -> inside", FilterBetween, "", []string{"2024-03-01", "2024-09-01"}, []DataType{LocalDate}, strp(`"2024-06-15"`), true},
+		{"local_date between exclusive lo", FilterBetween, "", []string{"2024-03-01", "2024-09-01"}, []DataType{LocalDate}, strp(`"2024-03-01"`), false},
+		{"local_date between -> below range", FilterBetween, "", []string{"2024-03-01", "2024-09-01"}, []DataType{LocalDate}, strp(`"2023-12-31"`), false},
+
+		// --- UnboundDecimal fast-path oracle rows (dual-path identity) ------
+		{"ubd eq -> match", FilterEq, "3.14", nil, []DataType{UnboundDecimal}, strp("3.14"), true},
+		{"ubd eq -> non-match", FilterEq, "3.14", nil, []DataType{UnboundDecimal}, strp("3.15"), false},
+		{"ubd gt -> match", FilterGt, "3.14", nil, []DataType{UnboundDecimal}, strp("3.15"), true},
+		{"ubd lte -> match", FilterLte, "100", nil, []DataType{UnboundDecimal}, strp("99.5"), true},
+		{"ubd gte precise beyond 2^53", FilterGte, "9007199254740993", nil, []DataType{UnboundDecimal}, strp("9007199254740993"), true},
 	}
 }
 

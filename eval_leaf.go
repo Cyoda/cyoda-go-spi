@@ -61,8 +61,11 @@ type otherCond struct {
 }
 
 // tempRange is one resolved temporal BETWEEN sub-condition: floored lo/hi
-// epoch-millis for a single declared subtype.
+// epoch-millis for a single declared subtype. typ is that subtype — the stored
+// value is matched against this range only when its own natural subtype equals
+// typ (temporal subtypes are exact-match slots, not a widening lattice).
 type tempRange struct {
+	typ    DataType
 	lo, hi int64
 }
 
@@ -238,7 +241,7 @@ func expandBetween(op FilterOp, values []string, declared []DataType) (Expansion
 				hiMs, ok2 := resolveTemporalMillis(values[1], t)
 				if ok1 && ok2 {
 					engaged = true
-					e.tempRanges = append(e.tempRanges, tempRange{lo: loMs, hi: hiMs})
+					e.tempRanges = append(e.tempRanges, tempRange{typ: t, lo: loMs, hi: hiMs})
 				}
 			}
 		}
@@ -339,10 +342,23 @@ func (e Expansion) evalCompare(stored gjson.Result) bool {
 	case gjson.String:
 		s := stored.String()
 		if len(e.temporal) > 0 {
-			ms, ok := ParseTemporalMillis(s)
-			for _, tc := range e.temporal {
-				if CompareTemporal(tc.Op, ms, ok, tc.Millis, 0, true) {
-					return true
+			// Stored-side type-slot discipline: classify the stored ISO string to
+			// its own natural subtype S (floored to epoch-millis), then compare it
+			// only against the sub-condition declared for S. A coarse stored value
+			// (LocalDate, Year, …) is offset-less and ParseTemporalMillis cannot
+			// read it; and matching a ZonedDateTime instant against a YEAR branch
+			// would be a spurious cross-subtype hit. Both are avoided by the
+			// exact-subtype gate (temporal subtypes are not in the numeric widening
+			// lattice, so this is equality, not IsAssignableTo).
+			if src, ok := parseNatural(s); ok {
+				storedMs := src.Millis()
+				for _, tc := range e.temporal {
+					if tc.Type != src.Type {
+						continue
+					}
+					if CompareTemporal(tc.Op, storedMs, true, tc.Millis, 0, true) {
+						return true
+					}
 				}
 			}
 		}
@@ -408,8 +424,15 @@ func (e Expansion) evalBetween(stored gjson.Result) bool {
 	case gjson.String:
 		s := stored.String()
 		if len(e.tempRanges) > 0 {
-			if ms, ok := ParseTemporalMillis(s); ok {
+			// Same stored-side type-slot discipline as evalCompare: classify the
+			// stored ISO string to its natural subtype and test it only against the
+			// range declared for that exact subtype.
+			if src, ok := parseNatural(s); ok {
+				ms := src.Millis()
 				for _, tr := range e.tempRanges {
+					if tr.typ != src.Type {
+						continue
+					}
 					if tr.lo < ms && ms < tr.hi {
 						return true
 					}

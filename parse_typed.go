@@ -101,11 +101,7 @@ func parseDecimalType(operand string, t DataType) (any, bool) {
 
 	switch t {
 	case Double:
-		absScale := int(d.Scale())
-		if absScale < 0 {
-			absScale = -absScale
-		}
-		if d.Precision() <= doubleMaxPrecision && absScale <= doubleMaxAbsScale {
+		if isDoubleEnvelope(d) {
 			return d, true
 		}
 	case BigDecimal:

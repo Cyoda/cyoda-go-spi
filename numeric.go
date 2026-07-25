@@ -66,20 +66,27 @@ func ClassifyInteger(v *big.Int) DataType {
 //     AND scale ≤ 18 AND SetScale(18).Unscaled().IsInt128().
 //   - Otherwise UNBOUND_DECIMAL.
 func ClassifyDecimal(d Decimal) DataType {
-	precision := d.Precision()
-	scale := int(d.scale)
-	absScale := scale
-	if absScale < 0 {
-		absScale = -absScale
-	}
-	// DOUBLE envelope.
-	if precision <= doubleMaxPrecision && absScale <= doubleMaxAbsScale {
+	if isDoubleEnvelope(d) {
 		return Double
 	}
 	if isInt128Decimal(d) {
 		return BigDecimal
 	}
 	return UnboundDecimal
+}
+
+// isDoubleEnvelope reports whether d (assumed StripTrailingZeros'd already)
+// fits the DOUBLE envelope: precision ≤ 15 AND |scale| ≤ 292. Shared by
+// ClassifyDecimal and ParseStringOrNull's Double branch (DataType.kt:140-143,
+// ParserFunctions.kt:35-59).
+func isDoubleEnvelope(d Decimal) bool {
+	precision := d.Precision()
+	scale := int(d.scale)
+	absScale := scale
+	if absScale < 0 {
+		absScale = -absScale
+	}
+	return precision <= doubleMaxPrecision && absScale <= doubleMaxAbsScale
 }
 
 // isInt128Decimal reports whether d (assumed StripTrailingZeros'd already)

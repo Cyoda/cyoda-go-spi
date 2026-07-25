@@ -25,6 +25,7 @@ func TestParseStringOrNull(t *testing.T) {
 		{"TRUE", Boolean, false}, {"yes", Boolean, false},
 		{"hello", String, true}, {"", String, true},
 		{"a", Character, true}, {"ab", Character, false},
+		{"é", Character, true}, {"éé", Character, false}, // multibyte rune counts as one Character; two multibyte runes don't
 		{"12345678-1234-1234-1234-123456789abc", UUIDType, true},
 		{"abc", Integer, false},
 
@@ -70,6 +71,51 @@ func TestParseStringOrNullCharacterValue(t *testing.T) {
 	v, ok := ParseStringOrNull("a", Character)
 	if !ok || v != rune('a') {
 		t.Errorf(`ParseStringOrNull("a", Character) = (%v, %v), want ('a', true)`, v, ok)
+	}
+}
+
+// TestParseStringOrNullNumericValues asserts the actual Decimal value
+// returned for each numeric family, not just ok — parseWholeType /
+// parseDecimalType apply StripTrailingZeros + SetScale(0) normalization
+// (parse_typed.go:57-68) that ok-only assertions cannot catch.
+func TestParseStringOrNullNumericValues(t *testing.T) {
+	mustDecimal := func(s string) Decimal {
+		d, err := ParseDecimal(s)
+		if err != nil {
+			t.Fatalf("ParseDecimal(%q) failed: %v", s, err)
+		}
+		return d
+	}
+
+	cases := []struct {
+		name    string
+		operand string
+		typ     DataType
+		want    string // canonical decimal string the parsed value must equal
+	}{
+		// "1E2" strips to unscaled=1, scale=-2, then SetScale(0) normalizes
+		// to unscaled=100, scale=0 — the value is 100, not 1.
+		{"Integer scientific notation", "1E2", Integer, "100"},
+		{"Double", "12.78", Double, "12.78"},
+		{"BigDecimal", "123456789012345.67", BigDecimal, "123456789012345.67"},
+		{"Long boundary", "9223372036854775807", Long, "9223372036854775807"},
+		{"BigInteger boundary", "170141183460469231731687303715884105727", BigInteger, "170141183460469231731687303715884105727"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			v, ok := ParseStringOrNull(c.operand, c.typ)
+			if !ok {
+				t.Fatalf("ParseStringOrNull(%q,%v) ok=false, want true", c.operand, c.typ)
+			}
+			d, isDecimal := v.(Decimal)
+			if !isDecimal {
+				t.Fatalf("ParseStringOrNull(%q,%v) returned %T, want Decimal", c.operand, c.typ, v)
+			}
+			want := mustDecimal(c.want)
+			if d.Cmp(want) != 0 {
+				t.Errorf("ParseStringOrNull(%q,%v) value = %s, want %s", c.operand, c.typ, d.Canonical(), want.Canonical())
+			}
+		})
 	}
 }
 

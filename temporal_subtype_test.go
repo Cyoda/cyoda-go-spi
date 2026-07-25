@@ -29,9 +29,17 @@ func TestTemporalParseSubtype_Acceptance(t *testing.T) {
 		{"2024-09-09T10:30:00+01:00", ZonedDateTime, true},
 		{"2024-09-09T10:30:00Z", ZonedDateTime, true},
 
+		// Seconds-optional forms (Java ISO_ZONED_DATE_TIME / ISO_DATE_TIME
+		// parity — seconds are optional, unlike RFC3339Nano).
+		{"2024-09-09T10:30+01:00", ZonedDateTime, true},
+		{"2024-09-09T10:30Z", ZonedDateTime, true},
+		{"2024-09-09T10:30", LocalDateTime, true},
+		{"2024-09-09T10:30+01:00", LocalDateTime, true},
+
 		// ZONED_DATE_TIME REQUIRES an offset — offset-less input must fail
-		// (the data-field offset-mandatory rule).
+		// (the data-field offset-mandatory rule), seconds-present or not.
 		{"2024-09-09T10:30:00", ZonedDateTime, false},
+		{"2024-09-09T10:30", ZonedDateTime, false},
 
 		// Cross-type rejections: a coarse string must not parse as a finer type.
 		{"2024", YearMonth, false},
@@ -66,6 +74,49 @@ func TestTemporalParseSubtype_Millis(t *testing.T) {
 	tv, ok = ParseTemporalSubtype("2024-09-09T10:30:00+01:00", ZonedDateTime)
 	if !ok || tv.Millis() != utcMillis(2024, time.September, 9, 9, 30, 0) {
 		t.Fatalf("ZDT millis: ok=%v millis=%d", ok, tv.Millis())
+	}
+}
+
+// TestTemporalParseSubtype_SecondsOptional pins the Java ISO_ZONED_DATE_TIME /
+// ISO_DATE_TIME parity fix: seconds are optional, unlike time.RFC3339Nano
+// which mandates them. A seconds-absent operand must parse to the same
+// instant/wall-clock as its seconds-present (":00") equivalent, and
+// ZonedDateTime must still require an explicit offset.
+func TestTemporalParseSubtype_SecondsOptional(t *testing.T) {
+	// ZonedDateTime, offset present, seconds absent: same instant as the
+	// seconds-present form (seconds default to :00).
+	withSecs, ok := ParseTemporalSubtype("2024-09-09T10:30:00+01:00", ZonedDateTime)
+	if !ok {
+		t.Fatalf("seconds-present ZDT operand failed to parse")
+	}
+	noSecs, ok := ParseTemporalSubtype("2024-09-09T10:30+01:00", ZonedDateTime)
+	if !ok {
+		t.Fatalf("ParseTemporalSubtype(%q, ZonedDateTime) ok=false, want true", "2024-09-09T10:30+01:00")
+	}
+	if noSecs.Millis() != withSecs.Millis() {
+		t.Fatalf("seconds-optional ZDT millis mismatch: got %d, want %d (from seconds-present form)",
+			noSecs.Millis(), withSecs.Millis())
+	}
+
+	// LocalDateTime, offset absent, seconds absent: same wall-clock as the
+	// seconds-present form.
+	withSecsLDT, ok := ParseTemporalSubtype("2024-09-09T10:30:00", LocalDateTime)
+	if !ok {
+		t.Fatalf("seconds-present LocalDateTime operand failed to parse")
+	}
+	noSecsLDT, ok := ParseTemporalSubtype("2024-09-09T10:30", LocalDateTime)
+	if !ok {
+		t.Fatalf("ParseTemporalSubtype(%q, LocalDateTime) ok=false, want true", "2024-09-09T10:30")
+	}
+	if noSecsLDT.Millis() != withSecsLDT.Millis() {
+		t.Fatalf("seconds-optional LocalDateTime millis mismatch: got %d, want %d (from seconds-present form)",
+			noSecsLDT.Millis(), withSecsLDT.Millis())
+	}
+
+	// ZonedDateTime still REQUIRES an offset: a bare seconds-optional string
+	// must not parse as ZonedDateTime, only as LocalDateTime.
+	if _, ok := ParseTemporalSubtype("2024-09-09T10:30", ZonedDateTime); ok {
+		t.Fatalf("ParseTemporalSubtype(%q, ZonedDateTime) ok=true, want false (offset still required)", "2024-09-09T10:30")
 	}
 }
 

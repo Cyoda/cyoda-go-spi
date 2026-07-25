@@ -72,6 +72,17 @@ var localDateTimeLayouts = []string{
 	"2006-01-02T15:04",
 }
 
+// zonedDateTimeLayouts are the offset-bearing ISO_ZONED_DATE_TIME shapes we
+// accept beyond time.RFC3339Nano (which already covers every seconds-present
+// form, fractional or not): the seconds-optional form. Java's
+// ISO_ZONED_DATE_TIME / ISO_DATE_TIME treat the seconds field as optional;
+// RFC3339 does not, so this fills that gap. The offset designator is
+// mandatory in this layout — it is never used to accept an offset-less
+// string.
+var zonedDateTimeLayouts = []string{
+	"2006-01-02T15:04Z07:00",
+}
+
 var localTimeLayouts = []string{
 	"15:04:05.999999999",
 	"15:04:05",
@@ -121,10 +132,18 @@ func ParseTemporalSubtype(operand string, t DataType) (TemporalValue, bool) {
 		return TemporalValue{}, false
 
 	case LocalDateTime:
-		// ISO_DATE_TIME accepts an optional offset; honour that by trying an
-		// offset-bearing parse first and keeping only the wall-clock fields.
+		// ISO_DATE_TIME accepts an optional offset and an optional seconds
+		// field; honour the offset case by trying offset-bearing parses first
+		// (seconds-present via RFC3339Nano, then seconds-optional) and
+		// keeping only the wall-clock fields, then fall back to the
+		// offset-less layouts (which are themselves seconds-optional).
 		if tt, err := time.Parse(time.RFC3339Nano, operand); err == nil {
 			return zoneLess(LocalDateTime, wallOf(tt)), true
+		}
+		for _, layout := range zonedDateTimeLayouts {
+			if tt, err := time.Parse(layout, operand); err == nil {
+				return zoneLess(LocalDateTime, wallOf(tt)), true
+			}
 		}
 		for _, layout := range localDateTimeLayouts {
 			if tt, err := time.Parse(layout, operand); err == nil {
@@ -134,9 +153,17 @@ func ParseTemporalSubtype(operand string, t DataType) (TemporalValue, bool) {
 		return TemporalValue{}, false
 
 	case ZonedDateTime:
-		// Requires an explicit offset. RFC3339 mandates one, so an offset-less
-		// string fails here.
+		// Requires an explicit offset. RFC3339Nano covers every
+		// seconds-present form; fall back to the seconds-optional layout for
+		// ISO_ZONED_DATE_TIME parity. An offset-less string fails both.
 		tt, err := time.Parse(time.RFC3339Nano, operand)
+		if err != nil {
+			for _, layout := range zonedDateTimeLayouts {
+				if tt, err = time.Parse(layout, operand); err == nil {
+					break
+				}
+			}
+		}
 		if err != nil {
 			return TemporalValue{}, false
 		}

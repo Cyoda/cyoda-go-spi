@@ -1,6 +1,7 @@
 package predicate
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 )
@@ -45,6 +46,15 @@ func parseConditionWithDepth(body []byte, depth int) (Condition, error) {
 	}
 }
 
+// unmarshalNumberAware decodes body into v with JSON numbers preserved as
+// json.Number (lossless) rather than coerced to float64. Search operands
+// must survive beyond float64 precision (§3.5).
+func unmarshalNumberAware(body []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	return dec.Decode(v)
+}
+
 // coalesce returns the first non-empty string.
 func coalesce(values ...string) string {
 	for _, v := range values {
@@ -63,7 +73,7 @@ func parseSimple(body []byte) (*SimpleCondition, error) {
 		Operation    string `json:"operation"` // legacy alias (backwards compat)
 		Value        any    `json:"value"`
 	}
-	if err := json.Unmarshal(body, &raw); err != nil {
+	if err := unmarshalNumberAware(body, &raw); err != nil {
 		return nil, fmt.Errorf("failed to parse simple condition: %w", err)
 	}
 	op := coalesce(raw.OperatorType, raw.Operator, raw.Operation)
@@ -82,7 +92,7 @@ func parseLifecycle(body []byte) (*LifecycleCondition, error) {
 		Operation    string `json:"operation"` // legacy alias (backwards compat)
 		Value        any    `json:"value"`
 	}
-	if err := json.Unmarshal(body, &raw); err != nil {
+	if err := unmarshalNumberAware(body, &raw); err != nil {
 		return nil, fmt.Errorf("failed to parse lifecycle condition: %w", err)
 	}
 	op := coalesce(raw.OperatorType, raw.Operator, raw.Operation)
@@ -121,7 +131,7 @@ func parseArray(body []byte) (*ArrayCondition, error) {
 		JsonPath string `json:"jsonPath"`
 		Values   []any  `json:"values"`
 	}
-	if err := json.Unmarshal(body, &raw); err != nil {
+	if err := unmarshalNumberAware(body, &raw); err != nil {
 		return nil, fmt.Errorf("failed to parse array condition: %w", err)
 	}
 	return &ArrayCondition{

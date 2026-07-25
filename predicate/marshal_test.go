@@ -13,7 +13,7 @@ func TestRoundTrip_SimpleCondition(t *testing.T) {
 	original := &SimpleCondition{
 		JsonPath:     "$.price",
 		OperatorType: "EQUALS",
-		Value:        float64(100),
+		Value:        json.Number("100"),
 	}
 	roundTripCondition(t, original)
 }
@@ -39,12 +39,12 @@ func TestRoundTrip_GroupCondition_Nested(t *testing.T) {
 	original := &GroupCondition{
 		Operator: "AND",
 		Conditions: []Condition{
-			&SimpleCondition{JsonPath: "$.price", OperatorType: "EQUALS", Value: float64(100)},
+			&SimpleCondition{JsonPath: "$.price", OperatorType: "EQUALS", Value: json.Number("100")},
 			&LifecycleCondition{Field: "state", OperatorType: "EQUALS", Value: "APPROVED"},
 			&GroupCondition{
 				Operator: "OR",
 				Conditions: []Condition{
-					&SimpleCondition{JsonPath: "$.amount", OperatorType: "GREATER_THAN", Value: float64(50)},
+					&SimpleCondition{JsonPath: "$.amount", OperatorType: "GREATER_THAN", Value: json.Number("50")},
 				},
 			},
 		},

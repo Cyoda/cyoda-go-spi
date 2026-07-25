@@ -161,6 +161,35 @@ func TestMatchFilter_IsNullAndNotNull(t *testing.T) {
 	}
 }
 
+// TestMatchFilter_MetaIsNullAndNotNull mirrors TestMatchFilter_IsNullAndNotNull
+// for a SourceMeta leaf, exercising the meta->gjson bridge's absent-value path:
+// a present-but-unset zero time.Time meta field yields a non-existent Result
+// (IS_NULL true), while a populated one bridges to a present gjson value
+// (NOT_NULL true).
+func TestMatchFilter_MetaIsNullAndNotNull(t *testing.T) {
+	withDate := spi.EntityMeta{CreationDate: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)}
+	withoutDate := spi.EntityMeta{} // zero-value CreationDate — absent meta value
+
+	missing := spi.Filter{Op: spi.FilterIsNull, Path: "creationDate", Source: spi.SourceMeta}
+	if !spi.MatchFilter(missing, nil, withoutDate) {
+		t.Fatalf("expected IsNull true for absent meta field")
+	}
+
+	present := spi.Filter{Op: spi.FilterIsNull, Path: "creationDate", Source: spi.SourceMeta}
+	if spi.MatchFilter(present, nil, withDate) {
+		t.Fatalf("expected IsNull false for present meta field")
+	}
+
+	notNull := spi.Filter{Op: spi.FilterNotNull, Path: "creationDate", Source: spi.SourceMeta}
+	if !spi.MatchFilter(notNull, nil, withDate) {
+		t.Fatalf("expected NotNull true for present meta field")
+	}
+	missingNotNull := spi.Filter{Op: spi.FilterNotNull, Path: "creationDate", Source: spi.SourceMeta}
+	if spi.MatchFilter(missingNotNull, nil, withoutDate) {
+		t.Fatalf("expected NotNull false for absent meta field")
+	}
+}
+
 func TestMatchFilter_AndGroup(t *testing.T) {
 	data := mustJSONFilter(t, map[string]any{"variantId": "v1", "qty": 5})
 	f := spi.Filter{
@@ -297,7 +326,7 @@ func TestMatchFilter_EmptyOrGroupIsFalse(t *testing.T) {
 }
 
 // --- Additional coverage for ops not exercised above: Between, case-insensitive
-// variants, and MatchesRegex (which exercises the ported opMatchesPattern helper). ---
+// variants, and MatchesRegex (which now routes through the EvalLeaf kernel). ---
 
 func TestMatchFilter_Between(t *testing.T) {
 	data := mustJSONFilter(t, map[string]any{"qty": 42})

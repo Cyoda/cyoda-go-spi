@@ -413,3 +413,43 @@ func TestRoundToPrecision(t *testing.T) {
 		}
 	}
 }
+
+// TestRoundToPrecision_CarryRenormalizes covers the boundary where rounding
+// carries a digit past maxPrec (e.g. 9.999999999999999 → 10 at 15 significant
+// digits): the underlying roundToScale step produces a precision-16 result
+// (999999999999999 + 1 = 1000000000000000), which must be renormalized back
+// to precision maxPrec — mirroring Java BigDecimal.round(MathContext)'s
+// renormalization. The two representations are numerically equal, so we
+// assert via Cmp rather than Canonical() string equality.
+func TestRoundToPrecision_CarryRenormalizes(t *testing.T) {
+	ten := mustDecimal(t, "10")
+	negTen := mustDecimal(t, "-10")
+	cases := []struct {
+		name string
+		in   string
+		prec int
+		mode roundingMode
+		want Decimal
+	}{
+		// CEILING on a positive value: rounding toward +∞ carries the
+		// trailing 9s into a leading 1, growing precision to maxPrec+1.
+		{"ceiling carry", "9.999999999999999", 15, roundCeiling, ten},
+		// FLOOR on a negative value: rounding toward -∞ increases the
+		// magnitude, carrying the same way as the CEILING case above.
+		{"floor carry", "-9.999999999999999", 15, roundFloor, negTen},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := mustDecimal(t, c.in)
+			got := in.roundToPrecision(c.prec, c.mode)
+			if got.Cmp(c.want) != 0 {
+				t.Errorf("roundToPrecision(%s, %d): got %s, want numerically equal to %s",
+					c.in, c.prec, got.Canonical(), c.want.Canonical())
+			}
+			if got.Precision() > c.prec {
+				t.Errorf("roundToPrecision(%s, %d): got precision %d, want <= %d",
+					c.in, c.prec, got.Precision(), c.prec)
+			}
+		})
+	}
+}

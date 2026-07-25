@@ -266,9 +266,13 @@ func (d Decimal) roundToScale(newScale int32, mode roundingMode) Decimal {
 // fits it is a no-op, otherwise it rounds at the scale that leaves maxPrec
 // significant digits.
 //
-// Carry that would grow the result past maxPrec digits (e.g. 9.99 → 10) is
-// not specially renormalized. The DOUBLE bucket's 15-digit precision limit
-// makes that boundary unreachable for the values routed here.
+// A carry can grow the rounded result past maxPrec digits (e.g. 9.99 → 10 —
+// the dropped-digit rounding turns a run of 9s into a leading 1, adding one
+// digit of precision). When that happens the result is renormalized back to
+// maxPrec digits by reducing its scale by one more via an exact SetScale —
+// exact because the carry that caused the overflow always leaves the
+// unscaled value ending in a zero. This mirrors the renormalization Java's
+// BigDecimal.round(MathContext) performs at the same boundary.
 func (d Decimal) roundToPrecision(maxPrec int, mode roundingMode) Decimal {
 	p := d.Precision()
 	if p <= maxPrec {
@@ -279,7 +283,15 @@ func (d Decimal) roundToPrecision(maxPrec int, mode roundingMode) Decimal {
 		return Decimal{unscaled: u, scale: d.scale}
 	}
 	drop := int32(p - maxPrec)
-	return d.roundToScale(d.scale-drop, mode)
+	result := d.roundToScale(d.scale-drop, mode)
+	if result.Precision() > maxPrec {
+		renorm, err := result.SetScale(result.scale - 1)
+		if err != nil {
+			panic(fmt.Sprintf("roundToPrecision: renormalize carry failed: %v", err))
+		}
+		result = renorm
+	}
+	return result
 }
 
 // int128Min = -2^127, int128Max = 2^127 - 1.

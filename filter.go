@@ -30,10 +30,13 @@ const (
 	FilterINe            FilterOp = "ine"
 	FilterIContains      FilterOp = "icontains"
 	FilterINotContains   FilterOp = "inot_contains"
+	FilterNotContains    FilterOp = "not_contains"
 	FilterIStartsWith    FilterOp = "istarts_with"
 	FilterINotStartsWith FilterOp = "inot_starts_with"
+	FilterNotStartsWith  FilterOp = "not_starts_with"
 	FilterIEndsWith      FilterOp = "iends_with"
 	FilterINotEndsWith   FilterOp = "inot_ends_with"
+	FilterNotEndsWith    FilterOp = "not_ends_with"
 )
 
 // FieldSource indicates whether a filter path refers to entity data or metadata.

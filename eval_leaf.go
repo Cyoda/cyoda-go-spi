@@ -133,6 +133,7 @@ func ExpandLeaf(op FilterOp, operand string, values []string, declared []DataTyp
 		return Expansion{kind: kindUnary, op: op}, nil
 
 	case FilterContains, FilterStartsWith, FilterEndsWith, FilterLike, FilterMatchesRegex,
+		FilterNotContains, FilterNotStartsWith, FilterNotEndsWith,
 		FilterIEq, FilterINe, FilterIContains, FilterINotContains, FilterIStartsWith,
 		FilterINotStartsWith, FilterIEndsWith, FilterINotEndsWith:
 		e := Expansion{kind: kindStringOp, op: op, strOperand: operand}
@@ -487,6 +488,12 @@ func evalStringOp(e Expansion, s string) bool {
 		return strings.HasPrefix(s, op)
 	case FilterEndsWith:
 		return strings.HasSuffix(s, op)
+	case FilterNotContains:
+		return !strings.Contains(s, op)
+	case FilterNotStartsWith:
+		return !strings.HasPrefix(s, op)
+	case FilterNotEndsWith:
+		return !strings.HasSuffix(s, op)
 	case FilterLike, FilterMatchesRegex:
 		return e.strRegex != nil && e.strRegex.MatchString(s)
 	case FilterIEq:

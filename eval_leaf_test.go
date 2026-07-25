@@ -80,6 +80,29 @@ func oracleRows() []evalRow {
 		{"inot_contains xyz on hello -> match", FilterINotContains, "xyz", nil, []DataType{String}, strp(`"hello"`), true},
 		{"contains on non-textual bool -> non-match", FilterContains, "true", nil, []DataType{Boolean}, strp("true"), false},
 
+		// --- case-sensitive negatives: NOT_CONTAINS / NOT_STARTS_WITH /
+		// NOT_ENDS_WITH (null-uniform: absent/null -> non-match, not !positive) --
+		{"not_contains on absent -> non-match", FilterNotContains, "x", nil, []DataType{String}, nil, false},
+		{"not_contains on null -> non-match", FilterNotContains, "x", nil, []DataType{String}, strp("null"), false},
+		{"not_contains ell on hello -> non-match (contains)", FilterNotContains, "ell", nil, []DataType{String}, strp(`"hello"`), false},
+		{"not_contains xyz on hello -> match (does not contain)", FilterNotContains, "xyz", nil, []DataType{String}, strp(`"hello"`), true},
+		{"not_contains ABC case-sensitive on abc -> match (case differs)", FilterNotContains, "ABC", nil, []DataType{String}, strp(`"abc"`), true},
+		{"not_contains on non-textual numeric -> non-match", FilterNotContains, "5", nil, []DataType{Integer}, strp("55"), false},
+
+		{"not_starts_with on absent -> non-match", FilterNotStartsWith, "x", nil, []DataType{String}, nil, false},
+		{"not_starts_with on null -> non-match", FilterNotStartsWith, "x", nil, []DataType{String}, strp("null"), false},
+		{"not_starts_with he on hello -> non-match (starts with)", FilterNotStartsWith, "he", nil, []DataType{String}, strp(`"hello"`), false},
+		{"not_starts_with xy on hello -> match (does not start with)", FilterNotStartsWith, "xy", nil, []DataType{String}, strp(`"hello"`), true},
+		{"not_starts_with HE case-sensitive on hello -> match (case differs)", FilterNotStartsWith, "HE", nil, []DataType{String}, strp(`"hello"`), true},
+		{"not_starts_with on non-textual numeric -> non-match", FilterNotStartsWith, "5", nil, []DataType{Integer}, strp("55"), false},
+
+		{"not_ends_with on absent -> non-match", FilterNotEndsWith, "x", nil, []DataType{String}, nil, false},
+		{"not_ends_with on null -> non-match", FilterNotEndsWith, "x", nil, []DataType{String}, strp("null"), false},
+		{"not_ends_with lo on hello -> non-match (ends with)", FilterNotEndsWith, "lo", nil, []DataType{String}, strp(`"hello"`), false},
+		{"not_ends_with xy on hello -> match (does not end with)", FilterNotEndsWith, "xy", nil, []DataType{String}, strp(`"hello"`), true},
+		{"not_ends_with LO case-sensitive on hello -> match (case differs)", FilterNotEndsWith, "LO", nil, []DataType{String}, strp(`"hello"`), true},
+		{"not_ends_with on non-textual numeric -> non-match", FilterNotEndsWith, "5", nil, []DataType{Integer}, strp("55"), false},
+
 		{"like foo% -> foobar", FilterLike, "foo%", nil, []DataType{String}, strp(`"foobar"`), true},
 		{"like foo% anchored -> xfoobar", FilterLike, "foo%", nil, []DataType{String}, strp(`"xfoobar"`), false},
 		{"like a_c -> abc", FilterLike, "a_c", nil, []DataType{String}, strp(`"abc"`), true},

@@ -20,35 +20,30 @@ func ParseTemporalMillis(s string) (int64, bool) {
 	return t.UnixMilli(), true
 }
 
-// CompareTemporal is the single per-operator temporal decision, shared by both
-// Go evaluators. storedOK=false (stored value not a valid instant) →
-// excluded for positive ops, vacuously true for NE. loMs is the (single) operand
-// for non-BETWEEN ops; loMs..hiMs are the bounds for BETWEEN / BETWEEN_INCLUSIVE
-// (both inclusive here — eval_leaf.go's own precise-range BETWEEN path is
-// exclusive and does not route through this helper). loHiOK is false only if an
-// operand failed to parse (validation makes this unreachable for validated
-// callers; evaluators still degrade safely).
-func CompareTemporal(op FilterOp, storedMs int64, storedOK bool, loMs, hiMs int64, loHiOK bool) bool {
-	if !storedOK || !loHiOK {
+// CompareTemporal is the single per-operator temporal decision for the
+// single-sided comparison ops, shared by both Go evaluators. storedOK=false
+// (stored value not a valid instant) → excluded for positive ops, vacuously
+// true for NE. cmpMs is the operand instant; cmpOK is false only if the operand
+// failed to parse (validation makes this unreachable for validated callers;
+// evaluators still degrade safely). Range ops (BETWEEN / BETWEEN_INCLUSIVE) do
+// not route through this helper — eval_leaf.go's precise-range path handles them.
+func CompareTemporal(op FilterOp, storedMs int64, storedOK bool, cmpMs int64, cmpOK bool) bool {
+	if !storedOK || !cmpOK {
 		return op == FilterNe // vacuous-true for NE, exclude otherwise
 	}
 	switch op {
 	case FilterEq:
-		return storedMs == loMs
+		return storedMs == cmpMs
 	case FilterNe:
-		return storedMs != loMs
+		return storedMs != cmpMs
 	case FilterGt:
-		return storedMs > loMs
+		return storedMs > cmpMs
 	case FilterLt:
-		return storedMs < loMs
+		return storedMs < cmpMs
 	case FilterGte:
-		return storedMs >= loMs
+		return storedMs >= cmpMs
 	case FilterLte:
-		return storedMs <= loMs
-	case FilterBetween:
-		return storedMs >= loMs && storedMs <= hiMs
-	case FilterBetweenInclusive:
-		return storedMs >= loMs && storedMs <= hiMs
+		return storedMs <= cmpMs
 	}
 	return false
 }

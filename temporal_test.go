@@ -26,40 +26,31 @@ func TestParseTemporalMillis(t *testing.T) {
 }
 
 func TestCompareTemporal(t *testing.T) {
-	const a = int64(1000) // stored
-	// op, stored, storedOK, lo, hi, loHiOK -> want
+	// op, stored, storedOK, cmp, cmpOK -> want. Range ops (BETWEEN) do not route
+	// through CompareTemporal — eval_leaf.go's precise-range path handles them.
 	type c struct {
 		op        FilterOp
 		stored    int64
 		sok       bool
-		lo, hi    int64
-		lok, want bool
+		cmp       int64
+		cok, want bool
 	}
 	cases := []c{
-		{FilterEq, 1000, true, 1000, 0, true, true},
-		{FilterEq, 1000, true, 1001, 0, true, false},
-		{FilterNe, 1000, true, 1000, 0, true, false},
-		{FilterNe, 1000, true, 1001, 0, true, true},
-		{FilterGt, 1000, true, 999, 0, true, true},
-		{FilterGte, 1000, true, 1000, 0, true, true},
-		{FilterLt, 1000, true, 1000, 0, true, false},
-		{FilterLte, 1000, true, 1000, 0, true, true},
-		{FilterBetween, 1000, true, 900, 1100, true, true},
-		{FilterBetween, 1000, true, 1001, 1100, true, false},
-		// BETWEEN_INCLUSIVE: stored exactly on a bound must match (the
-		// boundary difference from BETWEEN, which excludes it).
-		{FilterBetweenInclusive, 1000, true, 1000, 1100, true, true},
-		{FilterBetweenInclusive, 1000, true, 900, 1000, true, true},
-		{FilterBetweenInclusive, 1000, true, 1001, 1100, true, false},
-		{FilterBetweenInclusive, 1000, true, 900, 999, true, false},
+		{FilterEq, 1000, true, 1000, true, true},
+		{FilterEq, 1000, true, 1001, true, false},
+		{FilterNe, 1000, true, 1000, true, false},
+		{FilterNe, 1000, true, 1001, true, true},
+		{FilterGt, 1000, true, 999, true, true},
+		{FilterGte, 1000, true, 1000, true, true},
+		{FilterLt, 1000, true, 1000, true, false},
+		{FilterLte, 1000, true, 1000, true, true},
 		// stored not convertible -> exclude for positive, vacuous-true for NE
-		{FilterEq, 0, false, 1000, 0, true, false},
-		{FilterGt, 0, false, 1000, 0, true, false},
-		{FilterNe, 0, false, 1000, 0, true, true},
+		{FilterEq, 0, false, 1000, true, false},
+		{FilterGt, 0, false, 1000, true, false},
+		{FilterNe, 0, false, 1000, true, true},
 	}
-	_ = a
 	for i, tc := range cases {
-		got := CompareTemporal(tc.op, tc.stored, tc.sok, tc.lo, tc.hi, tc.lok)
+		got := CompareTemporal(tc.op, tc.stored, tc.sok, tc.cmp, tc.cok)
 		if got != tc.want {
 			t.Errorf("case %d: CompareTemporal(%v,...) = %v want %v", i, tc.op, got, tc.want)
 		}

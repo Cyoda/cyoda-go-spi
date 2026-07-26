@@ -232,6 +232,20 @@ func parseNatural(operand string) (TemporalValue, bool) {
 	return TemporalValue{}, false
 }
 
+// ClassifyTemporalString reports the most specific temporal DataType the given
+// string parses as (per the natural-subtype precedence), or false if it is not
+// a temporal value. Model discovery uses this to classify a data field's
+// ISO-8601 string values as a temporal subtype, matching exactly how the leaf
+// kernel classifies stored temporal values — so a field discovered as a
+// temporal type evaluates with the same subtype the stored value carries.
+func ClassifyTemporalString(s string) (DataType, bool) {
+	v, ok := parseNatural(s)
+	if !ok {
+		return Null, false
+	}
+	return v.Type, true
+}
+
 // ---------------------------------------------------------------------------
 // Resolution graph (PolymorphicTemporalConversions.kt)
 // ---------------------------------------------------------------------------

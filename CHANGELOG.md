@@ -12,6 +12,41 @@ MAINTAINING.md.
 
 ## [Unreleased]
 
+### Breaking
+
+- `Searcher.Search` is bounded-or-fail. `SearchOptions.Limit > 0` is a cap
+  on the matched set, not a page size: an implementation that matches more
+  than `Limit` MUST return `ErrSearchResultLimitExceeded` and MUST NOT
+  return a truncated prefix. Exactly-at-limit succeeds. `Limit <= 0` means
+  unbounded and an implementation MUST NOT substitute a default of its own —
+  the calling engine resolves the direct-search default before invoking.
+- `MergePage` becomes `MergeBounded`: same k-way merge, but it raises
+  `ErrSearchResultLimitExceeded` instead of truncating, and the `offset`
+  parameter is gone.
+- `SearchOptions.Offset` is removed. Direct search does not paginate — no
+  transport exposes an offset, and async search paginates over its own
+  persisted result-ID list instead.
+
+**Migration.** A plugin that previously truncated at `Limit` must now fail
+instead:
+
+1. Change `spi.MergePage(next, adds, deleted, order, offset, limit)` to
+   `spi.MergeBounded(next, adds, deleted, order, limit)` — it already
+   returns `ErrSearchResultLimitExceeded` for you, so propagate its error
+   rather than discarding it.
+2. Find every other branch that slices a result down to `Limit` by hand
+   (typically the non-transaction and point-in-time paths, which do not go
+   through the merge) and make each raise `ErrSearchResultLimitExceeded`
+   when the matched set is larger than `Limit`. Returning the prefix
+   alongside the error still violates the contract — return no entities.
+3. Drop every read of `opts.Offset`; there is no replacement, and no caller
+   set a non-zero value.
+4. Leave `Limit <= 0` alone: do not clamp it, and do not substitute a
+   default. It is a deliberate request for the complete matched set.
+
+The new `spitest` `Searcher` group asserts all of this and is the check that
+a migration is complete.
+
 ### Added
 
 - Follow-on-action attribution: `Principal` / `PrincipalKind`
@@ -43,33 +78,6 @@ MAINTAINING.md.
   Backends whose `EntityStore` does not implement the optional `Searcher`
   interface skip the group automatically; no `Harness.Skip` entry is needed
   or wanted.
-
-### Changed
-
-- **Breaking.** `Searcher.Search` is bounded-or-fail.
-  `SearchOptions.Limit > 0` is a cap on the matched set, not a page size:
-  an implementation that matches more than `Limit` MUST return
-  `ErrSearchResultLimitExceeded` and MUST NOT return a truncated prefix.
-  Exactly-at-limit succeeds. `Limit <= 0` means unbounded and an
-  implementation MUST NOT substitute a default of its own — the calling
-  engine resolves the direct-search default before invoking.
-- **Breaking.** `MergePage` becomes `MergeBounded`: same k-way merge, but
-  it raises `ErrSearchResultLimitExceeded` instead of truncating, and the
-  `offset` parameter is gone.
-
-### Removed
-
-- **Breaking.** `SearchOptions.Offset`. Direct search does not paginate —
-  no transport exposes an offset, and async search paginates over its own
-  persisted result-ID list instead.
-
-### Notes for consumers
-
-- A plugin that previously truncated at `Limit` now needs to fail instead.
-  Switching a `MergePage` call site to `MergeBounded` gets the merge path;
-  any branch that slices the result to `Limit` by hand must raise
-  `ErrSearchResultLimitExceeded` when the matched set is larger. The new
-  `spitest` `Searcher` group is the check.
 
 ## [0.8.1] - 2026-06-23
 

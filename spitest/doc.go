@@ -12,6 +12,13 @@
 // returns, every subsequent timestamp the plugin assigns strictly
 // dominates every timestamp assigned before the call. d > 0.
 //
+// A few SPI interfaces are optional (spi.Searcher, for example). The harness
+// detects an absent optional interface by type assertion and skips that whole
+// group: a backend that does not implement it is conformant, not broken. Do
+// NOT add a Harness.Skip entry for such a group — StoreFactoryConformance
+// reports every Skip key that never matched as an error, so the entry would
+// turn a conformant backend red.
+//
 // Error assertions use errors.Is against spi sentinel errors
 // (spi.ErrNotFound, spi.ErrConflict). Plugins MUST wrap backend-native
 // errors at the SPI boundary.

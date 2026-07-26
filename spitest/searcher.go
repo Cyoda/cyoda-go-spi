@@ -10,31 +10,56 @@ import (
 	spi "github.com/cyoda-platform/cyoda-go-spi"
 )
 
+// searcherSeedOrder is the order in which the bounded-or-fail subtests create
+// their entities: true is a match for the conformance predicate, false a
+// non-matching decoy. Seven entities total — deliberately tiny, because every
+// backend runs this suite, including ones where each save is a network
+// round-trip.
+//
+// The decoys are INTERLEAVED, and that placement is the point. newID returns
+// v1 UUIDs, so creation order is id order, and the default sort is entity id
+// ascending; decoys appended after the matches would therefore always sort
+// last, and a backend that bounds its SCAN rather than the matched set would
+// still return all five matches and pass. Interleaved, a scan-level bound of
+// five takes {decoy, match, match, decoy, match} and loses two matches, so
+// AtLimitSucceeds fails. This is what makes the predicate load-bearing rather
+// than decorative.
+//
+// The tail beyond searcherCommittedN must be all matches — the in-tx variant
+// stages exactly that tail inside the searching transaction.
+var searcherSeedOrder = []bool{false, true, true, false, true, true, true}
+
+// searcherMatchN is the number of matches in searcherSeedOrder, derived rather
+// than declared so the two can never drift apart.
+var searcherMatchN = countSearcherMatches(searcherSeedOrder)
+
 const (
-	// searcherMatchN is the size of the match-set the bounded-or-fail
-	// subtests seed. Deliberately tiny: every backend runs this suite,
-	// including ones where each save is a network round-trip.
-	searcherMatchN = 5
-
-	// searcherTxStagedN is how many of the searcherMatchN matches the in-tx
-	// variant leaves uncommitted inside the searching transaction. The rest
-	// are committed beforehand, so the bound is held over a merge of the
+	// searcherCommittedN is how many of searcherSeedOrder the in-tx variant
+	// commits before searching. The tail is staged uncommitted inside the
+	// searching transaction, so the bound is held over a merge of the
 	// committed side with the transaction's own write-set rather than over
-	// the committed side alone.
-	searcherTxStagedN = 2
+	// the committed side alone. The non-tx variant commits all of it.
+	searcherCommittedN = 5
 
-	// searcherDecoyN is the number of non-matching entities seeded alongside
-	// the match set. They make the predicate load-bearing: a backend that
-	// bounds the scan instead of the matched set fails AtLimitSucceeds.
-	searcherDecoyN = 2
-
-	// searcherMatchValue is the data value the conformance predicate selects on.
+	// searcherMatchValue is the data value the conformance predicate selects
+	// on; searcherDecoyValue is what the decoys carry instead.
 	searcherMatchValue = "match"
+	searcherDecoyValue = "no-match"
 
 	// searcherModel is the model every Searcher subtest seeds into. Each
 	// subtest gets a fresh tenant, so a fixed name is collision-free.
 	searcherModel = "searcher-bounded"
 )
+
+func countSearcherMatches(order []bool) int {
+	n := 0
+	for _, isMatch := range order {
+		if isMatch {
+			n++
+		}
+	}
+	return n
+}
 
 // runSearcherSuite exercises the optional spi.Searcher contract.
 //
@@ -68,30 +93,28 @@ func testSearcherBoundedOrFailInTx(t *testing.T, h Harness) {
 	searcherBoundedOrFail(t, h, true)
 }
 
-// searcherBoundedOrFail seeds searcherMatchN matching entities (plus decoys)
-// and holds the backend to the Searcher doc's contract: a positive Limit is a
-// cap on the matched set, so exceeding it fails with
-// ErrSearchResultLimitExceeded rather than returning a truncated prefix,
-// exactly-at-limit succeeds, and a non-positive Limit is unbounded — the
-// implementation must not substitute a default of its own.
+// searcherBoundedOrFail seeds searcherSeedOrder and holds the backend to the
+// Searcher doc's contract: a positive Limit is a cap on the matched set, so
+// exceeding it fails with ErrSearchResultLimitExceeded rather than returning a
+// truncated prefix, exactly-at-limit succeeds, and a non-positive Limit is
+// unbounded — the implementation must not substitute a default of its own.
 //
-// When inTx is set the assertions run inside a live transaction with part of
-// the match set staged but uncommitted, so each backend's read-your-own-writes
-// overlay is held to the same bound as its committed path.
+// When inTx is set the assertions run inside a live transaction with the tail
+// of the match set staged but uncommitted, so each backend's
+// read-your-own-writes overlay is held to the same bound as its committed path.
 func searcherBoundedOrFail(t *testing.T, h Harness, inTx bool) {
 	t.Helper()
 	ctx := tenantContext(h.NewTenant())
 
-	committedN := searcherMatchN
+	committed, staged := searcherSeedOrder, []bool(nil)
 	if inTx {
-		committedN = searcherMatchN - searcherTxStagedN
+		committed, staged = searcherSeedOrder[:searcherCommittedN], searcherSeedOrder[searcherCommittedN:]
 	}
 
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
 		require.NoError(t, err)
-		seedSearcherEntities(t, es, txCtx, committedN, searcherMatchValue)
-		seedSearcherEntities(t, es, txCtx, searcherDecoyN, "no-match")
+		seedSearcherEntities(t, txCtx, es, committed)
 	})
 
 	filter := spi.Filter{
@@ -110,7 +133,7 @@ func searcherBoundedOrFail(t *testing.T, h Harness, inTx bool) {
 	}
 
 	// search runs one bounded search. Out of transaction it hits the
-	// committed path directly. In transaction it stages the remaining matches
+	// committed path directly. In transaction it stages the tail of the seed
 	// as uncommitted own-writes, searches over the overlay, then rolls back so
 	// every case starts from the same committed baseline.
 	search := func(t *testing.T, limit int) ([]*spi.Entity, error) {
@@ -127,7 +150,7 @@ func searcherBoundedOrFail(t *testing.T, h Harness, inTx bool) {
 		defer func() { _ = tm.Rollback(txCtx, txID) }()
 		es, err := h.Factory.EntityStore(txCtx)
 		require.NoError(t, err)
-		seedSearcherEntities(t, es, txCtx, searcherTxStagedN, searcherMatchValue)
+		seedSearcherEntities(t, txCtx, es, staged)
 		return es.(spi.Searcher).Search(txCtx, filter, opts(limit))
 	}
 
@@ -160,11 +183,17 @@ func searcherBoundedOrFail(t *testing.T, h Harness, inTx bool) {
 	})
 }
 
-// seedSearcherEntities saves n entities into searcherModel whose "status" data
-// field is status.
-func seedSearcherEntities(t *testing.T, es spi.EntityStore, ctx context.Context, n int, status string) {
+// seedSearcherEntities saves one entity into searcherModel per element of
+// order, in that order — a match for true, a decoy for false. Creation order
+// is preserved as id order, which is what makes the interleaving meaningful
+// (see searcherSeedOrder).
+func seedSearcherEntities(t *testing.T, ctx context.Context, es spi.EntityStore, order []bool) {
 	t.Helper()
-	for i := 0; i < n; i++ {
+	for _, isMatch := range order {
+		status := searcherDecoyValue
+		if isMatch {
+			status = searcherMatchValue
+		}
 		_, err := es.Save(ctx, newEntity(t, searcherModel, newID(), map[string]any{"status": status}))
 		require.NoError(t, err)
 	}

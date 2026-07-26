@@ -35,6 +35,41 @@ MAINTAINING.md.
   dereferencing `Entity`).
 - `scheduled_task_store_conformance.go`: `ArmedBy` round-trip through
   `Upsert`/`Get`, plus the legacy-row (zero `ArmedBy`) case.
+- `spitest/searcher.go`: `Searcher/BoundedOrFail` and
+  `Searcher/BoundedOrFail/InTx` conformance subtests holding every backend
+  to the bounded-or-fail contract — over the limit fails, exactly at the
+  limit succeeds, zero and negative limits are unbounded — on both the
+  committed path and the in-transaction read-your-own-writes overlay.
+  Backends whose `EntityStore` does not implement the optional `Searcher`
+  interface skip the group automatically; no `Harness.Skip` entry is needed
+  or wanted.
+
+### Changed
+
+- **Breaking.** `Searcher.Search` is bounded-or-fail.
+  `SearchOptions.Limit > 0` is a cap on the matched set, not a page size:
+  an implementation that matches more than `Limit` MUST return
+  `ErrSearchResultLimitExceeded` and MUST NOT return a truncated prefix.
+  Exactly-at-limit succeeds. `Limit <= 0` means unbounded and an
+  implementation MUST NOT substitute a default of its own — the calling
+  engine resolves the direct-search default before invoking.
+- **Breaking.** `MergePage` becomes `MergeBounded`: same k-way merge, but
+  it raises `ErrSearchResultLimitExceeded` instead of truncating, and the
+  `offset` parameter is gone.
+
+### Removed
+
+- **Breaking.** `SearchOptions.Offset`. Direct search does not paginate —
+  no transport exposes an offset, and async search paginates over its own
+  persisted result-ID list instead.
+
+### Notes for consumers
+
+- A plugin that previously truncated at `Limit` now needs to fail instead.
+  Switching a `MergePage` call site to `MergeBounded` gets the merge path;
+  any branch that slices the result to `Limit` by hand must raise
+  `ErrSearchResultLimitExceeded` when the matched set is larger. The new
+  `spitest` `Searcher` group is the check.
 
 ## [0.8.1] - 2026-06-23
 

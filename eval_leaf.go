@@ -362,7 +362,7 @@ func (e Expansion) evalCompare(stored gjson.Result) bool {
 					if tc.Type != src.Type {
 						continue
 					}
-					if CompareTemporal(tc.Op, storedMs, true, tc.Millis, 0, true) {
+					if CompareTemporal(tc.Op, storedMs, true, tc.Millis, true) {
 						return true
 					}
 				}

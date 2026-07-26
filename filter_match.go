@@ -79,7 +79,7 @@ func evalFilter(f Filter, data []byte, meta EntityMeta) bool {
 // non-match rather than propagated: matched && err == nil.
 func evalLeafFilter(f Filter, data []byte, meta EntityMeta) bool {
 	stored := filterStoredResult(f, data, meta)
-	matched, err := EvalLeafString(f.Op, operandString(f.Value), valuesToStrings(f.Values), f.Declared, stored)
+	matched, err := EvalLeafString(f.Op, OperandString(f.Value), valuesToStrings(f.Values), f.Declared, stored)
 	return matched && err == nil
 }
 
@@ -123,11 +123,11 @@ func metaGjsonResult(path string, meta EntityMeta) (gjson.Result, bool) {
 	return gjson.ParseBytes(b), true
 }
 
-// operandString normalizes a filter operand to its Cloud .asText() string form,
+// OperandString normalizes a filter operand to its Cloud .asText() string form,
 // the shape ExpandLeaf parses. A json.Number keeps its exact lexical form; a
 // nil operand becomes the empty string (a genuinely-null binary operand was
 // rejected at the search boundary).
-func operandString(v any) string {
+func OperandString(v any) string {
 	switch x := v.(type) {
 	case nil:
 		return ""
@@ -145,14 +145,14 @@ func operandString(v any) string {
 	}
 }
 
-// valuesToStrings maps each range/list operand through operandString.
+// valuesToStrings maps each range/list operand through OperandString.
 func valuesToStrings(vs []any) []string {
 	if len(vs) == 0 {
 		return nil
 	}
 	out := make([]string, len(vs))
 	for i, v := range vs {
-		out[i] = operandString(v)
+		out[i] = OperandString(v)
 	}
 	return out
 }

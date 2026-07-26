@@ -10,25 +10,43 @@ import (
 // implement Searcher get native query execution; those that don't
 // fall back to in-memory filtering.
 //
+// Search is bounded-or-fail. SearchOptions.Limit > 0 is a cap on the matched
+// set, not a page size: an implementation that finds more matches than Limit
+// MUST return ErrSearchResultLimitExceeded and MUST NOT return a truncated
+// prefix — a silently truncated result is a wrong answer the caller cannot
+// distinguish from a complete one. Exactly-at-limit succeeds.
+//
+// Limit <= 0 means unbounded, and an implementation MUST NOT substitute a
+// default of its own: the engine resolves the direct-search default before
+// calling, so a non-positive Limit is a deliberate request for the complete
+// matched set (scoped delete, async snapshot) and capping it silently
+// truncates that caller's result.
+//
 // Search MUST honour an active transaction (read-your-own-writes): with no
 // transaction active it is a committed pushdown; with a transaction active it
 // overlays the transaction's write-set so the result is identical to what
 // GetAll + in-memory match would produce. In-transaction point-in-time reads
 // are committed-only — they never see the transaction's own uncommitted
 // writes for the PIT dimension. Returned entities enter the transaction's
-// read-set only when SearchOptions.TrackingRead is set.
+// read-set only when SearchOptions.TrackingRead is set; under bounded-or-fail
+// that is exactly the matched set, since there is no page smaller than it.
 type Searcher interface {
 	Search(ctx context.Context, filter Filter, opts SearchOptions) ([]*Entity, error)
 }
 
-// SearchOptions configures pagination, ordering, and scoping for a search.
+// SearchOptions configures bounding, ordering, and scoping for a search.
+// There is no Offset: direct search does not paginate (async search does,
+// over its persisted result-ID list).
 type SearchOptions struct {
 	ModelName    string
 	ModelVersion string
 	PointInTime  *time.Time
-	Limit        int
-	Offset       int
-	OrderBy      []OrderSpec
+
+	// Limit is a bounded-or-fail cap on the matched set when > 0, and means
+	// unbounded when <= 0. See the Searcher doc comment — both halves of that
+	// contract are load-bearing.
+	Limit   int
+	OrderBy []OrderSpec
 
 	// TrackingRead, when true and a transaction is active, records the
 	// entities this search returns into the transaction's read-set, so

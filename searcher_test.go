@@ -1,6 +1,19 @@
 package spi
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
+
+// TestSearchOptions_NoOffset pins the removal of the Offset field. Direct
+// search exposes no offset on any transport, and a bounded-or-fail search has
+// no page to offset into. If someone re-adds it, this stops compiling.
+func TestSearchOptions_NoOffset(t *testing.T) {
+	typ := reflect.TypeOf(SearchOptions{})
+	if _, found := typ.FieldByName("Offset"); found {
+		t.Fatal("SearchOptions.Offset must not exist: direct search does not paginate")
+	}
+}
 
 func TestOrderKind_ZeroValueIsText(t *testing.T) {
 	var k OrderKind

@@ -7,7 +7,7 @@ import (
 
 // TestSearchOptions_NoOffset pins the removal of the Offset field. Direct
 // search exposes no offset on any transport, and a bounded-or-fail search has
-// no page to offset into. If someone re-adds it, this stops compiling.
+// no page to offset into. If someone re-adds it, this stops passing.
 func TestSearchOptions_NoOffset(t *testing.T) {
 	typ := reflect.TypeOf(SearchOptions{})
 	if _, found := typ.FieldByName("Offset"); found {

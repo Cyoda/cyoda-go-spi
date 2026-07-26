@@ -14,6 +14,13 @@ The harness covers the full SPI surface: entity persistence, audit,
 async search, transactions, workflow plugin contracts, and key/value
 extension hooks.
 
+Groups that cover an *optional* interface — `Searcher`, for example —
+skip themselves when your store does not implement it, by type
+assertion. That is a conformant result, not a gap. Do not add a
+`Harness.Skip` entry for such a group: `StoreFactoryConformance` treats
+any `Skip` key that never matched as an error, so the entry would fail
+your run.
+
 ## Conformance against latest SPI HEAD (recommended for plugin authors)
 
 If you maintain a third-party storage plugin, add a nightly job to your

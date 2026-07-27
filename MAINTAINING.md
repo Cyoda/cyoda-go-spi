@@ -62,19 +62,20 @@ evolves:
 
 **Pre-1.0 (current era):**
 
-- Minor versions are **additive-only by default**. New methods, types, or
-  options can be added in any minor release.
-- Breaking changes are permitted in a minor release iff:
+- Both minor and patch releases may add to the public surface. New methods,
+  types, or options can ship in either.
+- Breaking changes are permitted in **any** pre-1.0 release, minor or patch,
+  iff:
   - The change is called out in `CHANGELOG.md` under `### Breaking` with
     explicit migration notes.
   - Where feasible, deprecated symbols carry `// Deprecated: <reason>`
-    comments for at least one prior minor release before removal.
+    comments for at least one prior release before removal.
   - Each consumer listed in `KNOWN_CONSUMERS.md` has been notified
     before the breaking PR is merged. The notification is linked from
     the PR description.
-- Patch versions (`vX.Y.Z` where `Z > 0`) are reserved for fixes and
-  metadata-only changes (e.g. updated README, security advisories).
-  Patch versions never change the public surface.
+- The version component is therefore not a breakage signal pre-1.0 — the
+  `### Breaking` changelog section is. Consumers must read it on every bump
+  rather than inferring safety from the number.
 
 **Post-1.0:**
 

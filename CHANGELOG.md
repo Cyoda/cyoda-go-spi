@@ -12,6 +12,57 @@ MAINTAINING.md.
 
 ## [Unreleased]
 
+### Added
+
+- Search-filter translation relocated into the SPI, completing the v0.8.3
+  type-core relocation: `ConditionToFilter` (with `FieldDescriptor`,
+  `ClassifyType`, `ClassifyTypesFold`, `MetaField`, `ResolveMetaField`,
+  `IsTemporalMetaField`, `MapOperator`), plus the read-side model tree
+  behind `FieldsMapFromSchema`.
+
+  `ConditionToFilter` is the only supported way to build a `Filter` the
+  leaf-comparison kernel evaluates correctly, and it previously lived in
+  cyoda-go's `internal/domain/search`, unreachable from a plugin. A backend
+  that self-executes a search — one receiving a serialized condition rather
+  than a ready-made `Filter` — therefore had to ship a second evaluator,
+  which then drifts and answers the same query differently. Everything the
+  translator needs was already here (`predicate`, `Filter`, `DataType`,
+  `OrderKind`); only `FieldDescriptor` had to move, and its `Types` field
+  was already `[]DataType`.
+
+  **`ConditionToFilter(cond, nil)` is not a safe degraded mode.** An empty
+  declared type set does not degrade every leaf alike, because the kernel
+  only consults declared types where it needs a type slot to compare in.
+  Comparison and ordering leaves (`EQUALS`, `NOT_EQUAL`, `<`, `<=`, `>`,
+  `>=`, `BETWEEN`, `IS_NULL`) annihilate to false — `ExpandLeaf` engages no
+  bucket, errors, and `evalLeafFilter` swallows that into a non-match —
+  while string, substring and presence leaves (`CONTAINS`, `STARTS_WITH`,
+  `ENDS_WITH`, `LIKE`, `MATCHES_PATTERN`, `NOT_NULL`) evaluate normally,
+  having never needed a type.
+
+  The resulting filter is therefore internally inconsistent rather than
+  merely empty: under `AND` a dropped comparison removes rows that should
+  have matched, and under `OR` a surviving string disjunct admits rows the
+  failed comparison was meant to exclude. Both silently. Callers that
+  cannot supply declared types should refuse the query rather than proceed.
+  Meta leaves are unaffected; their types come from the static meta
+  vocabulary.
+
+  The FILTER and SORT classifications stay deliberately distinct:
+  `ClassifyType` keeps temporal subtypes as `OrderTemporal`, while a sort
+  path folding them onto `OrderText` composes via `ClassifyTypesFold`
+  rather than by changing the filter classifier.
+
+## [0.8.3] - 2026-07-26
+
+> Recorded retroactively. The v0.8.3 release did not carry out
+> [MAINTAINING.md](MAINTAINING.md)'s release step 2 (rename `[Unreleased]`
+> to the version being cut), so this section's contents sat under
+> `[Unreleased]` after the tag had already shipped. The entries are
+> unchanged; only the heading is corrected. There is no `[0.8.2]` section —
+> that release shipped with an empty `[Unreleased]` and its changes were
+> never recorded; they are not reconstructed here rather than guessed at.
+
 ### Breaking
 
 - `Searcher.Search` is bounded-or-fail. `SearchOptions.Limit > 0` is a cap

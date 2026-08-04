@@ -681,42 +681,83 @@ func TestConditionToFilter_Array_DeclaredNilWhenUnresolvable(t *testing.T) {
 // change makes undeclared leaves uniformly fail-closed, these expectations
 // move — deliberately, not by accident.
 func TestConditionToFilter_NilFields_DegradesInconsistently(t *testing.T) {
-	data := []byte(`{"name":"Alice"}`)
+	// Each op is checked by COMPARING the nil-fields answer against the
+	// correctly-declared answer over three documents. That comparison is what
+	// makes the test discriminating: asserting a hardcoded boolean would pass
+	// coincidentally whenever false happens to be the correct answer anyway
+	// (IS_NULL over a present field is exactly that trap), and would keep
+	// passing through a refactor that changed the mechanism entirely.
+	docs := map[string][]byte{
+		"present": []byte(`{"name":"Alice"}`),
+		"null":    []byte(`{"name":null}`),
+		"absent":  []byte(`{}`),
+	}
 
 	cases := []struct {
-		op        string
-		value     any
-		wantMatch bool
-		why       string
+		op string
+		// value is the operand; for the range ops it is the two bounds.
+		value any
+		// annihilates records whether an empty declared set changes the
+		// answer. True for leaves that need a type slot to compare in.
+		annihilates bool
 	}{
-		// Need a type slot -> ExpandLeaf engages no bucket -> non-match.
-		{"EQUALS", "Alice", false, "comparison leaf annihilates without declared types"},
-		{"NOT_EQUAL", "Bob", false, "comparison leaf annihilates without declared types"},
-		{"GREATER_THAN", "A", false, "ordering leaf annihilates without declared types"},
-		{"IS_NULL", nil, false, "null-check routes through the compare path"},
-		// Never needed a type -> evaluated normally, declared types ignored.
-		{"CONTAINS", "lic", true, "substring leaf ignores declared types"},
-		{"STARTS_WITH", "Ali", true, "substring leaf ignores declared types"},
-		{"ENDS_WITH", "ice", true, "substring leaf ignores declared types"},
-		{"LIKE", "Al%", true, "pattern leaf ignores declared types"},
-		{"MATCHES_PATTERN", "^Ali.*$", true, "regex leaf ignores declared types"},
-		{"NOT_NULL", nil, true, "presence leaf ignores declared types"},
+		{"EQUALS", "Alice", true},
+		{"NOT_EQUAL", "Bob", true},
+		{"GREATER_THAN", "A", true},
+		{"GREATER_OR_EQUAL", "A", true},
+		{"LESS_THAN", "z", true},
+		{"LESS_OR_EQUAL", "z", true},
+		{"BETWEEN", []any{"A", "B"}, true},
+		{"BETWEEN_INCLUSIVE", []any{"A", "B"}, true},
+
+		// Presence leaves are decided from the stored value alone. They are
+		// NOT comparisons despite the null operand — ExpandLeaf returns on
+		// its kindUnary arm before declared is ever read.
+		{"IS_NULL", nil, false},
+		{"NOT_NULL", nil, false},
+
+		// String and pattern leaves never needed a declared type.
+		{"CONTAINS", "lic", false},
+		{"STARTS_WITH", "Ali", false},
+		{"ENDS_WITH", "ice", false},
+		{"LIKE", "Al%", false},
+		{"MATCHES_PATTERN", "^Ali.*$", false},
+	}
+
+	fields := map[string]spi.FieldDescriptor{
+		"$.name": {Path: "$.name", Types: []spi.DataType{spi.String}},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.op, func(t *testing.T) {
 			c := &predicate.SimpleCondition{JsonPath: "$.name", OperatorType: tc.op, Value: tc.value}
-			f, err := spi.ConditionToFilter(c, nil)
+
+			bare, err := spi.ConditionToFilter(c, nil)
 			if err != nil {
-				t.Fatalf("ConditionToFilter: %v", err)
+				t.Fatalf("ConditionToFilter(nil fields): %v", err)
 			}
-			// No error is returned for any of them — that is what makes the
-			// inconsistency silent.
-			if f.Declared != nil {
-				t.Fatalf("Declared = %v, want nil with a nil fields map", f.Declared)
+			typed, err := spi.ConditionToFilter(c, fields)
+			if err != nil {
+				t.Fatalf("ConditionToFilter(with fields): %v", err)
 			}
-			if got := spi.MatchFilter(f, data, spi.EntityMeta{}); got != tc.wantMatch {
-				t.Errorf("MatchFilter = %v, want %v (%s)", got, tc.wantMatch, tc.why)
+			if bare.Declared != nil {
+				t.Fatalf("Declared = %v, want nil with a nil fields map", bare.Declared)
+			}
+
+			diverged := false
+			for name, doc := range docs {
+				gotBare := spi.MatchFilter(bare, doc, spi.EntityMeta{})
+				gotTyped := spi.MatchFilter(typed, doc, spi.EntityMeta{})
+				if gotBare != gotTyped {
+					diverged = true
+					if !tc.annihilates {
+						t.Errorf("doc %s: nil-declared=%v but typed=%v — this op must not depend on declared types",
+							name, gotBare, gotTyped)
+					}
+				}
+			}
+			if tc.annihilates && !diverged {
+				t.Errorf("expected an empty declared set to change the answer for %s, but it did not on any document", tc.op)
 			}
 		})
 	}
@@ -731,11 +772,20 @@ func TestConditionToFilter_NilFields_DegradesInconsistently(t *testing.T) {
 				&predicate.SimpleCondition{JsonPath: "$.name", OperatorType: "EQUALS", Value: "Alice"},
 			},
 		}
-		f, err := spi.ConditionToFilter(cond, nil)
+		doc := docs["present"]
+
+		bare, err := spi.ConditionToFilter(cond, nil)
 		if err != nil {
 			t.Fatalf("ConditionToFilter: %v", err)
 		}
-		if spi.MatchFilter(f, data, spi.EntityMeta{}) {
+		typed, err := spi.ConditionToFilter(cond, fields)
+		if err != nil {
+			t.Fatalf("ConditionToFilter: %v", err)
+		}
+		if !spi.MatchFilter(typed, doc, spi.EntityMeta{}) {
+			t.Fatal("setup invariant: the document must match when declared types are supplied")
+		}
+		if spi.MatchFilter(bare, doc, spi.EntityMeta{}) {
 			t.Error("MatchFilter = true; expected the annihilated EQUALS conjunct to drop a document that genuinely satisfies both leaves")
 		}
 	})
@@ -890,4 +940,56 @@ func TestConditionToFilter_EmptyGroupIdentityEncodings(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLookupOperator pins the safe operator-validation form callers are told
+// to use before ConditionToFilter.
+//
+// The hazard it exists to close: MapOperator maps ANY unrecognised name to
+// FilterMatchesRegex, so a misspelling translates without error and then
+// evaluates as a regular expression. The engine never sees this because it
+// validates conditions first; a self-executing backend calling the SPI
+// directly has no such gate, which is exactly the caller this relocation
+// serves.
+func TestLookupOperator(t *testing.T) {
+	t.Run("KnownOperatorsResolve", func(t *testing.T) {
+		for _, op := range []string{
+			"EQUALS", "NOT_EQUAL", "GREATER_THAN", "LESS_THAN",
+			"GREATER_OR_EQUAL", "LESS_OR_EQUAL", "CONTAINS", "STARTS_WITH",
+			"ENDS_WITH", "LIKE", "IS_NULL", "NOT_NULL", "BETWEEN",
+			"BETWEEN_INCLUSIVE", "MATCHES_PATTERN", "IEQUALS", "INOT_EQUAL",
+			"ICONTAINS", "INOT_CONTAINS", "NOT_CONTAINS", "ISTARTS_WITH",
+			"INOT_STARTS_WITH", "NOT_STARTS_WITH", "IENDS_WITH",
+			"INOT_ENDS_WITH", "NOT_ENDS_WITH",
+		} {
+			got, ok := spi.LookupOperator(op)
+			if !ok {
+				t.Errorf("LookupOperator(%q) reported unknown", op)
+			}
+			if want := spi.MapOperator(op); got != want {
+				t.Errorf("LookupOperator(%q) = %s, want %s (must agree with MapOperator)", op, got, want)
+			}
+		}
+	})
+
+	t.Run("MATCHES_PATTERN_IsNotMistakenForTheFallback", func(t *testing.T) {
+		got, ok := spi.LookupOperator("MATCHES_PATTERN")
+		if !ok {
+			t.Error("MATCHES_PATTERN must be recognised — it is a real operator, not the unknown-op fallback")
+		}
+		if got != spi.FilterMatchesRegex {
+			t.Errorf("got %s, want matches_regex", got)
+		}
+	})
+
+	t.Run("UnknownOperatorsRejected", func(t *testing.T) {
+		// NOT_EQUALS is the dangerous one: a plausible misspelling of
+		// NOT_EQUAL that MapOperator turns into an anchored regex, inverting
+		// the caller's intended polarity.
+		for _, op := range []string{"NOT_EQUALS", "REGEX_MATCH", "EQUAL", "", "'; DROP", "IS_CHANGED"} {
+			if _, ok := spi.LookupOperator(op); ok {
+				t.Errorf("LookupOperator(%q) reported known; unknown names must be rejected so callers do not evaluate them as regexes", op)
+			}
+		}
+	})
 }

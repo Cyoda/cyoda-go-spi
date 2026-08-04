@@ -33,12 +33,15 @@ MAINTAINING.md.
   **`ConditionToFilter(cond, nil)` is not a safe degraded mode.** An empty
   declared type set does not degrade every leaf alike, because the kernel
   only consults declared types where it needs a type slot to compare in.
-  Comparison and ordering leaves (`EQUALS`, `NOT_EQUAL`, `<`, `<=`, `>`,
-  `>=`, `BETWEEN`, `IS_NULL`) annihilate to false — `ExpandLeaf` engages no
-  bucket, errors, and `evalLeafFilter` swallows that into a non-match —
-  while string, substring and presence leaves (`CONTAINS`, `STARTS_WITH`,
-  `ENDS_WITH`, `LIKE`, `MATCHES_PATTERN`, `NOT_NULL`) evaluate normally,
-  having never needed a type.
+  The eight comparison and ordering leaves (`EQUALS`, `NOT_EQUAL`,
+  `GREATER_THAN`, `GREATER_OR_EQUAL`, `LESS_THAN`, `LESS_OR_EQUAL`,
+  `BETWEEN`, `BETWEEN_INCLUSIVE`) annihilate to false — `ExpandLeaf`
+  engages no bucket, errors, and `evalLeafFilter` swallows that into a
+  non-match. Presence and string/pattern leaves (`IS_NULL`, `NOT_NULL`,
+  `CONTAINS`, `STARTS_WITH`, `ENDS_WITH`, `LIKE`, `MATCHES_PATTERN`)
+  evaluate normally, having never needed a type — `IS_NULL`/`NOT_NULL`
+  decide purely on whether the stored value is present and non-null,
+  despite the null operand.
 
   The resulting filter is therefore internally inconsistent rather than
   merely empty: under `AND` a dropped comparison removes rows that should

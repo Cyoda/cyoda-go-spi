@@ -33,12 +33,16 @@ import (
 // only consults declared types for the leaves that need a type slot to
 // compare in:
 //
-//   - Comparison and ordering leaves (EQUALS, NOT_EQUAL, <, <=, >, >=,
-//     BETWEEN, IS_NULL) ANNIHILATE to false. ExpandLeaf engages no type
-//     bucket, errors, and evalLeafFilter swallows that into a non-match.
-//   - String, substring and presence leaves (CONTAINS, STARTS_WITH,
-//     ENDS_WITH, LIKE, MATCHES_PATTERN, NOT_NULL) evaluate NORMALLY, because
-//     they never needed a declared type.
+//   - COMPARISON AND ORDERING leaves ANNIHILATE to false: EQUALS, NOT_EQUAL,
+//     GREATER_THAN, GREATER_OR_EQUAL, LESS_THAN, LESS_OR_EQUAL, BETWEEN,
+//     BETWEEN_INCLUSIVE. ExpandLeaf engages no type bucket, errors, and
+//     evalLeafFilter swallows that into a non-match.
+//   - PRESENCE and STRING/PATTERN leaves evaluate NORMALLY, because they
+//     never needed a declared type: IS_NULL, NOT_NULL, CONTAINS,
+//     STARTS_WITH, ENDS_WITH, LIKE, MATCHES_PATTERN. IS_NULL and NOT_NULL
+//     are decided purely from whether the stored value is present and
+//     non-null (see ExpandLeaf's kindUnary arm, which returns before
+//     declared is read) — they are NOT comparisons despite the null operand.
 //
 // So a condition mixing the two kinds yields wrong answers in a
 // structure-dependent direction, not merely fewer: under AND a dropped
@@ -53,6 +57,21 @@ import (
 //
 // Meta leaves are unaffected: their types come from the static meta
 // vocabulary, not from fields, so a nil map does not degrade them at all.
+//
+// # Callers MUST validate operator names first
+//
+// ConditionToFilter does not reject an unrecognised OperatorType. It routes
+// through [MapOperator], whose fallback is FilterMatchesRegex, so a
+// misspelled or hostile operator produces a filter that translates without
+// error and then EVALUATES — with the operand treated as a regular
+// expression. `NOT_EQUALS` (a misspelling of NOT_EQUAL) inverts the intended
+// polarity; an operand of ".*" matches every row.
+//
+// The engine is safe from this only because it runs a condition validator
+// before translating. A caller that reaches ConditionToFilter directly —
+// which is precisely the self-executing backend this function exists for —
+// has no such gate. Validate operator names with [LookupOperator] and reject
+// anything it reports as unknown BEFORE calling this function.
 func ConditionToFilter(cond predicate.Condition, fields map[string]FieldDescriptor) (Filter, error) {
 	if cond == nil {
 		return Filter{}, fmt.Errorf("condition is nil")
@@ -278,11 +297,27 @@ func stripDollarDot(path string) (string, error) {
 	return stripped, nil
 }
 
+// LookupOperator translates a domain operator string to a [FilterOp],
+// reporting whether the name was recognised.
+//
+// This is the form callers should use. [MapOperator] silently maps an unknown
+// name to FilterMatchesRegex, which is safe only behind a validator; this one
+// lets the caller reject the name instead. Validating with LookupOperator
+// before calling [ConditionToFilter] is the documented caller obligation.
+func LookupOperator(op string) (FilterOp, bool) {
+	f := MapOperator(op)
+	if f == FilterMatchesRegex && op != "MATCHES_PATTERN" {
+		return f, false
+	}
+	return f, true
+}
+
 // MapOperator translates a domain operator string to a [FilterOp].
 //
 // It is exported because the engine's condition type-soundness validator maps
 // operators independently of translation and must not keep a second copy of
-// this table.
+// this table. Prefer [LookupOperator] unless you specifically want the
+// unknown-operator fallback.
 //
 // # The unknown-operator fallback is a trap for direct callers
 //

@@ -201,3 +201,56 @@ func TestIsTemporalMetaField(t *testing.T) {
 		}
 	}
 }
+
+// TestMetaFieldNames pins the enumeration accessor against the point lookup.
+// The vocabulary is a closed set that other code must agree with — a runtime
+// matcher, a validator, a diagnostic — and each of those needs the whole set.
+// Without a published enumeration they keep private copies that drift.
+func TestMetaFieldNames(t *testing.T) {
+	names := spi.MetaFieldNames()
+
+	t.Run("AgreesWithResolveMetaField", func(t *testing.T) {
+		for _, n := range names {
+			if _, ok := spi.ResolveMetaField(n); !ok {
+				t.Errorf("MetaFieldNames lists %q but ResolveMetaField rejects it", n)
+			}
+		}
+	})
+
+	t.Run("CoversTheKnownVocabulary", func(t *testing.T) {
+		want := []string{
+			"creationDate", "id", "lastUpdateTime", "state",
+			"transactionId", "transitionForLatestSave",
+		}
+		if len(names) != len(want) {
+			t.Fatalf("MetaFieldNames = %v, want %v", names, want)
+		}
+		for i := range want {
+			if names[i] != want[i] {
+				t.Errorf("MetaFieldNames[%d] = %q, want %q (sorted order)", i, names[i], want[i])
+			}
+		}
+	})
+
+	// previousTransition is a client-facing alias canonicalized during
+	// translation, not a vocabulary member. A caller validating raw client
+	// input has to admit it separately, so its absence here is contract.
+	t.Run("ExcludesThePreviousTransitionAlias", func(t *testing.T) {
+		for _, n := range names {
+			if n == "previousTransition" {
+				t.Error("MetaFieldNames includes the previousTransition alias; it is not a vocabulary member")
+			}
+		}
+		if _, ok := spi.ResolveMetaField("previousTransition"); ok {
+			t.Error("ResolveMetaField resolves the alias; ConditionToFilter is supposed to canonicalize it first")
+		}
+	})
+
+	t.Run("ReturnsAFreshSliceCallersCanMutate", func(t *testing.T) {
+		a := spi.MetaFieldNames()
+		a[0] = "MUTATED"
+		if b := spi.MetaFieldNames(); b[0] == "MUTATED" {
+			t.Error("MetaFieldNames leaks state between calls")
+		}
+	})
+}

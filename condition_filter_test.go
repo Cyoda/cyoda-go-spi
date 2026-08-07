@@ -2,6 +2,7 @@ package spi_test
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	spi "github.com/cyoda-platform/cyoda-go-spi"
@@ -989,6 +990,178 @@ func TestLookupOperator(t *testing.T) {
 		for _, op := range []string{"NOT_EQUALS", "REGEX_MATCH", "EQUAL", "", "'; DROP", "IS_CHANGED"} {
 			if _, ok := spi.LookupOperator(op); ok {
 				t.Errorf("LookupOperator(%q) reported known; unknown names must be rejected so callers do not evaluate them as regexes", op)
+			}
+		}
+	})
+
+	// The careless call form `op, _ := LookupOperator(name)` must not hand
+	// back the regex fallback, or the safe function is as dangerous as the
+	// unsafe one for anyone who drops the ok.
+	t.Run("UnknownReturnsZeroOpNotTheRegexFallback", func(t *testing.T) {
+		for _, op := range []string{"NOT_EQUALS", "REGEX_MATCH", ""} {
+			got, _ := spi.LookupOperator(op)
+			if got == spi.FilterMatchesRegex {
+				t.Errorf("LookupOperator(%q) returned the regex fallback; a caller ignoring ok would evaluate the operand as a regex", op)
+			}
+			if got != spi.FilterOp("") {
+				t.Errorf("LookupOperator(%q) = %q, want the zero FilterOp", op, got)
+			}
+		}
+	})
+}
+
+// TestOperatorNames_MatchesMapOperator is the drift guard between the
+// enumerable name list and the MapOperator type switch, which Go cannot
+// enumerate. Without it the two are free to disagree silently — which is the
+// state the engine's own copy of this table is in today.
+func TestOperatorNames_MatchesMapOperator(t *testing.T) {
+	names := spi.OperatorNames()
+
+	t.Run("EveryNameIsRecognised", func(t *testing.T) {
+		for _, n := range names {
+			if _, ok := spi.LookupOperator(n); !ok {
+				t.Errorf("OperatorNames lists %q but LookupOperator rejects it", n)
+			}
+		}
+	})
+
+	t.Run("SortedAndDeduplicated", func(t *testing.T) {
+		seen := make(map[string]bool, len(names))
+		for i, n := range names {
+			if seen[n] {
+				t.Errorf("OperatorNames repeats %q", n)
+			}
+			seen[n] = true
+			if i > 0 && names[i-1] >= n {
+				t.Errorf("OperatorNames not sorted at index %d: %q >= %q", i, names[i-1], n)
+			}
+		}
+	})
+
+	// A change detector: adding a case to MapOperator without adding the name
+	// here (or vice versa) is caught by the count, since nothing else can
+	// compare a slice against a type switch.
+	t.Run("CountMatchesTheOperatorTable", func(t *testing.T) {
+		if len(names) != 26 {
+			t.Errorf("OperatorNames has %d entries, want 26 — if you added an operator to MapOperator, add it here too", len(names))
+		}
+	})
+
+	t.Run("ReturnsAFreshSliceCallersCanMutate", func(t *testing.T) {
+		a := spi.OperatorNames()
+		a[0] = "MUTATED"
+		if b := spi.OperatorNames(); b[0] == "MUTATED" {
+			t.Error("OperatorNames leaks its backing array; a caller mutating the result corrupts the table")
+		}
+	})
+}
+
+func TestValidateConditionOperators(t *testing.T) {
+	t.Run("AcceptsAValidNestedTree", func(t *testing.T) {
+		cond := &predicate.GroupCondition{
+			Operator: "AND",
+			Conditions: []predicate.Condition{
+				&predicate.SimpleCondition{JsonPath: "$.name", OperatorType: "EQUALS", Value: "Alice"},
+				&predicate.GroupCondition{
+					Operator: "OR",
+					Conditions: []predicate.Condition{
+						&predicate.LifecycleCondition{Field: "state", OperatorType: "NOT_EQUAL", Value: "draft"},
+						&predicate.ArrayCondition{JsonPath: "$.tags", Values: []any{"a", nil}},
+					},
+				},
+			},
+		}
+		if err := spi.ValidateConditionOperators(cond); err != nil {
+			t.Errorf("ValidateConditionOperators: %v", err)
+		}
+	})
+
+	// The whole point: the bad operator is buried, not at the root.
+	t.Run("RejectsAnUnknownOperatorNestedInAGroup", func(t *testing.T) {
+		cond := &predicate.GroupCondition{
+			Operator: "AND",
+			Conditions: []predicate.Condition{
+				&predicate.SimpleCondition{JsonPath: "$.a", OperatorType: "EQUALS", Value: 1},
+				&predicate.SimpleCondition{JsonPath: "$.b", OperatorType: "NOT_EQUALS", Value: 2},
+			},
+		}
+		err := spi.ValidateConditionOperators(cond)
+		if err == nil {
+			t.Fatal("ValidateConditionOperators accepted NOT_EQUALS; it translates to an anchored regex and inverts the caller's polarity")
+		}
+		if !strings.Contains(err.Error(), "NOT_EQUALS") {
+			t.Errorf("error %q does not name the offending operator", err)
+		}
+		if !strings.Contains(err.Error(), "NOT_EQUAL,") && !strings.Contains(err.Error(), "NOT_EQUAL ") {
+			t.Errorf("error %q does not list the canonical set the caller needs to self-correct", err)
+		}
+	})
+
+	t.Run("RejectsAnEmptyOperatorOnBothLeafKinds", func(t *testing.T) {
+		for _, cond := range []predicate.Condition{
+			&predicate.SimpleCondition{JsonPath: "$.a", OperatorType: ""},
+			&predicate.LifecycleCondition{Field: "state", OperatorType: ""},
+		} {
+			if err := spi.ValidateConditionOperators(cond); err == nil {
+				t.Errorf("%T with an empty operatorType was accepted", cond)
+			}
+		}
+	})
+
+	t.Run("NilAndOperatorlessNodesPass", func(t *testing.T) {
+		for _, cond := range []predicate.Condition{
+			nil,
+			&predicate.ArrayCondition{JsonPath: "$.tags", Values: []any{"a"}},
+			&predicate.FunctionCondition{},
+		} {
+			if err := spi.ValidateConditionOperators(cond); err != nil {
+				t.Errorf("%T carries no operator but was rejected: %v", cond, err)
+			}
+		}
+	})
+
+	// A programmatically built tree bypasses the parser's own depth cap, so
+	// the walker must not recurse until the stack blows.
+	t.Run("DepthCapped", func(t *testing.T) {
+		var cond predicate.Condition = &predicate.SimpleCondition{
+			JsonPath: "$.a", OperatorType: "EQUALS", Value: 1,
+		}
+		for i := 0; i < spi.MaxConditionDepth+10; i++ {
+			cond = &predicate.GroupCondition{Operator: "AND", Conditions: []predicate.Condition{cond}}
+		}
+		err := spi.ValidateConditionOperators(cond)
+		if err == nil {
+			t.Fatal("a tree deeper than MaxConditionDepth was accepted")
+		}
+		if !strings.Contains(err.Error(), "depth") {
+			t.Errorf("error %q does not identify the depth cap as the cause", err)
+		}
+	})
+}
+
+func TestNormalisePath(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"name", "$.name"},
+		{"$.name", "$.name"},
+		{"  name  ", "$.name"},
+		{"$name", "$name"},
+		{"a.b.c", "$.a.b.c"},
+		{"$.tags[*]", "$.tags[*]"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := spi.NormalisePath(c.in); got != c.want {
+			t.Errorf("NormalisePath(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	// Idempotence is the property callers rely on when assembling fields-map
+	// keys from paths of unknown provenance.
+	t.Run("Idempotent", func(t *testing.T) {
+		for _, c := range cases {
+			once := spi.NormalisePath(c.in)
+			if twice := spi.NormalisePath(once); twice != once {
+				t.Errorf("NormalisePath(%q) not idempotent: %q then %q", c.in, once, twice)
 			}
 		}
 	})

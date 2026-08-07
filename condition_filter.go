@@ -33,16 +33,24 @@ import (
 // only consults declared types for the leaves that need a type slot to
 // compare in:
 //
-//   - COMPARISON AND ORDERING leaves ANNIHILATE to false: EQUALS, NOT_EQUAL,
-//     GREATER_THAN, GREATER_OR_EQUAL, LESS_THAN, LESS_OR_EQUAL, BETWEEN,
-//     BETWEEN_INCLUSIVE. ExpandLeaf engages no type bucket, errors, and
-//     evalLeafFilter swallows that into a non-match.
-//   - PRESENCE and STRING/PATTERN leaves evaluate NORMALLY, because they
-//     never needed a declared type: IS_NULL, NOT_NULL, CONTAINS,
-//     STARTS_WITH, ENDS_WITH, LIKE, MATCHES_PATTERN. IS_NULL and NOT_NULL
-//     are decided purely from whether the stored value is present and
-//     non-null (see ExpandLeaf's kindUnary arm, which returns before
-//     declared is read) — they are NOT comparisons despite the null operand.
+//   - The EIGHT COMPARISON AND ORDERING leaves ANNIHILATE to false: EQUALS,
+//     NOT_EQUAL, GREATER_THAN, GREATER_OR_EQUAL, LESS_THAN, LESS_OR_EQUAL,
+//     BETWEEN, BETWEEN_INCLUSIVE. ExpandLeaf engages no type bucket, errors,
+//     and evalLeafFilter swallows that into a non-match.
+//   - The OTHER EIGHTEEN evaluate NORMALLY, because they never needed a
+//     declared type. Presence: IS_NULL, NOT_NULL — decided purely from
+//     whether the stored value is present and non-null (see ExpandLeaf's
+//     kindUnary arm, which returns before declared is read), so they are NOT
+//     comparisons despite the null operand. String and pattern: CONTAINS,
+//     NOT_CONTAINS, STARTS_WITH, NOT_STARTS_WITH, ENDS_WITH, NOT_ENDS_WITH,
+//     LIKE, MATCHES_PATTERN, and the case-insensitive family IEQUALS,
+//     INOT_EQUAL, ICONTAINS, INOT_CONTAINS, ISTARTS_WITH, INOT_STARTS_WITH,
+//     IENDS_WITH, INOT_ENDS_WITH — all handled by ExpandLeaf's kindStringOp
+//     arm, which compares stringified forms and never reads declared.
+//
+// The negated and case-insensitive string operators are easy to overlook
+// here: ICONTAINS resembles a comparison but is not one, and it keeps
+// evaluating against a nil declared set exactly as CONTAINS does.
 //
 // So a condition mixing the two kinds yields wrong answers in a
 // structure-dependent direction, not merely fewer: under AND a dropped
@@ -58,20 +66,37 @@ import (
 // Meta leaves are unaffected: their types come from the static meta
 // vocabulary, not from fields, so a nil map does not degrade them at all.
 //
-// # Callers MUST validate operator names first
+// # Callers MUST validate the condition first
 //
-// ConditionToFilter does not reject an unrecognised OperatorType. It routes
-// through [MapOperator], whose fallback is FilterMatchesRegex, so a
-// misspelled or hostile operator produces a filter that translates without
-// error and then EVALUATES — with the operand treated as a regular
-// expression. `NOT_EQUALS` (a misspelling of NOT_EQUAL) inverts the intended
-// polarity; an operand of ".*" matches every row.
+// ConditionToFilter translates; it does not validate. The engine is safe only
+// because it runs a condition validator before translating. A caller that
+// reaches ConditionToFilter directly — which is precisely the self-executing
+// backend this function exists for — has no such gate, and inherits every one
+// of these obligations:
 //
-// The engine is safe from this only because it runs a condition validator
-// before translating. A caller that reaches ConditionToFilter directly —
-// which is precisely the self-executing backend this function exists for —
-// has no such gate. Validate operator names with [LookupOperator] and reject
-// anything it reports as unknown BEFORE calling this function.
+//   - UNRECOGNISED OPERATOR NAMES. Translation routes through [MapOperator],
+//     whose fallback is FilterMatchesRegex, so a misspelled or hostile
+//     operator translates without error and then EVALUATES with the operand
+//     treated as a regular expression. `NOT_EQUALS` (a misspelling of
+//     NOT_EQUAL) inverts the intended polarity; an operand of ".*" matches
+//     every row. Use [ValidateConditionOperators], or [LookupOperator] on
+//     each leaf.
+//   - OBJECT OPERANDS. A leaf value that is an object denotes no scalar any
+//     operator could compare against. Left unchecked it reaches the kernel,
+//     which stringifies it via fmt.Sprint and compares the literal text
+//     "map[a:1]". Reject a map-typed operand outright.
+//   - BETWEEN ARITY. BETWEEN / BETWEEN_INCLUSIVE require exactly a two-element
+//     [lo, hi] operand. Anything else leaves Filter.Values nil, ExpandLeaf
+//     errors, and the leaf silently no-matches. Check the arity before
+//     translating rather than diagnosing an empty result set afterwards.
+//   - PATTERN COMPILABILITY. An uncompilable MATCHES_PATTERN operand leaves
+//     the compiled program nil and the leaf silently returns false. Note the
+//     kernel compiles the ANCHORED form while a naive caller-side check would
+//     compile the raw operand, so the two accept sets are not identical.
+//
+// Every one of these fails SILENTLY — an under- or wrongly-populated result
+// set, not an error. That is why they are the caller's obligation and not a
+// best-effort tolerance inside this function.
 func ConditionToFilter(cond predicate.Condition, fields map[string]FieldDescriptor) (Filter, error) {
 	if cond == nil {
 		return Filter{}, fmt.Errorf("condition is nil")
@@ -248,15 +273,22 @@ func arrayToFilter(c *predicate.ArrayCondition, fields map[string]FieldDescripto
 // both the "$." prefix and the "[*]" suffix, tolerating callers that already
 // supply either.
 func arrayElementPath(rawPath string) string {
-	p := normalisePath(rawPath)
+	p := NormalisePath(rawPath)
 	if strings.HasSuffix(p, "[*]") {
 		return p
 	}
 	return p + "[*]"
 }
 
-// normalisePath returns raw in the "$."-prefixed convention, idempotently.
-func normalisePath(raw string) string {
+// NormalisePath returns raw in the "$."-prefixed convention, idempotently.
+//
+// It is exported because the "$."-prefixed form is the fields-map key
+// convention: [FieldsMapFromSchema] emits keys in it, and a lookup that
+// misses returns a zero [FieldDescriptor] with no declared types, which
+// annihilates comparison leaves rather than erroring. A caller assembling
+// fields-map keys must produce the same form this function does, so it is
+// published rather than reimplemented per plugin.
+func NormalisePath(raw string) string {
 	p := strings.TrimSpace(raw)
 	if p == "" {
 		return p
@@ -297,19 +329,115 @@ func stripDollarDot(path string) (string, error) {
 	return stripped, nil
 }
 
+// MaxConditionDepth caps recursion in [ValidateConditionOperators] to defend
+// against stack exhaustion from a deeply nested predicate tree. Client-facing
+// parsers cap incoming requests at a smaller depth, but a programmatically
+// constructed tree bypasses that and can otherwise nest arbitrarily. 256 is
+// well above any realistic query and well below the stack-blow threshold.
+const MaxConditionDepth = 256
+
 // LookupOperator translates a domain operator string to a [FilterOp],
 // reporting whether the name was recognised.
 //
 // This is the form callers should use. [MapOperator] silently maps an unknown
 // name to FilterMatchesRegex, which is safe only behind a validator; this one
-// lets the caller reject the name instead. Validating with LookupOperator
-// before calling [ConditionToFilter] is the documented caller obligation.
+// lets the caller reject the name instead.
+//
+// On an unrecognised name it returns the zero FilterOp, NOT the regex
+// fallback: a caller writing `op, _ := LookupOperator(name)` would otherwise
+// be handed the very filter this function exists to prevent, making the
+// careless form of the safe call indistinguishable from the unsafe one. The
+// zero value is not a valid leaf operator and [ExpandLeaf] rejects it.
 func LookupOperator(op string) (FilterOp, bool) {
 	f := MapOperator(op)
 	if f == FilterMatchesRegex && op != "MATCHES_PATTERN" {
-		return f, false
+		return "", false
 	}
 	return f, true
+}
+
+// canonicalOperatorNames is the closed set of operator names [MapOperator]
+// recognises, held separately because a Go type switch cannot be enumerated.
+// TestOperatorNames_MatchesMapOperator pins the two against each other.
+// Byte-order sorted (note ISTARTS_WITH precedes IS_NULL: '_' > 'T').
+var canonicalOperatorNames = []string{
+	"BETWEEN", "BETWEEN_INCLUSIVE", "CONTAINS", "ENDS_WITH",
+	"EQUALS", "GREATER_OR_EQUAL", "GREATER_THAN", "ICONTAINS",
+	"IENDS_WITH", "IEQUALS", "INOT_CONTAINS", "INOT_ENDS_WITH",
+	"INOT_EQUAL", "INOT_STARTS_WITH", "ISTARTS_WITH", "IS_NULL",
+	"LESS_OR_EQUAL", "LESS_THAN", "LIKE", "MATCHES_PATTERN",
+	"NOT_CONTAINS", "NOT_ENDS_WITH", "NOT_EQUAL", "NOT_NULL",
+	"NOT_STARTS_WITH", "STARTS_WITH",
+}
+
+// OperatorNames returns the sorted set of operator names [MapOperator]
+// recognises, as a fresh slice the caller may retain or mutate.
+//
+// It exists so a caller can render a "valid operators are…" diagnostic, or
+// validate membership, without maintaining a second copy of the table — a
+// copy that would drift silently, since nothing would compare the two.
+func OperatorNames() []string {
+	out := make([]string, len(canonicalOperatorNames))
+	copy(out, canonicalOperatorNames)
+	return out
+}
+
+// ValidateConditionOperators walks a condition tree and returns an error
+// naming the first unrecognised operator it finds. The error text lists the
+// canonical set so a caller can self-correct.
+//
+// It exists so that every self-executing backend does not write the same
+// recursion over the condition types — a second implementation surface of
+// exactly the kind relocating [ConditionToFilter] here was meant to remove.
+//
+// This covers ONLY operator names. The other caller obligations documented on
+// [ConditionToFilter] — object operands, BETWEEN arity, pattern
+// compilability — are deliberately not folded in: the first two are cheap
+// local checks a caller can apply while walking its own input, and the third
+// depends on a pattern-cost bound that is not settled in this module yet.
+// Passing this function is not the same as having validated the condition.
+func ValidateConditionOperators(cond predicate.Condition) error {
+	return validateOperatorsAtDepth(cond, 0)
+}
+
+func validateOperatorsAtDepth(cond predicate.Condition, depth int) error {
+	if cond == nil {
+		return nil
+	}
+	if depth >= MaxConditionDepth {
+		return fmt.Errorf("condition depth exceeded (max %d)", MaxConditionDepth)
+	}
+	switch c := cond.(type) {
+	case *predicate.SimpleCondition:
+		return checkOperator(c.OperatorType)
+	case *predicate.LifecycleCondition:
+		return checkOperator(c.OperatorType)
+	case *predicate.GroupCondition:
+		for _, child := range c.Conditions {
+			if err := validateOperatorsAtDepth(child, depth+1); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *predicate.ArrayCondition:
+		// Carries no operator — each positional value becomes an equality
+		// leaf in arrayToFilter. Nothing to check.
+		return nil
+	default:
+		// Including FunctionCondition, which carries no operator either.
+		// ConditionToFilter rejects it on its own terms.
+		return nil
+	}
+}
+
+func checkOperator(op string) error {
+	if op == "" {
+		return fmt.Errorf("missing operatorType; valid: %s", strings.Join(canonicalOperatorNames, ", "))
+	}
+	if _, ok := LookupOperator(op); !ok {
+		return fmt.Errorf("unknown operatorType %q; valid: %s", op, strings.Join(canonicalOperatorNames, ", "))
+	}
+	return nil
 }
 
 // MapOperator translates a domain operator string to a [FilterOp].

@@ -1,6 +1,9 @@
 package spi
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
 
 // ClassifyType returns the single canonical ordering class for a leaf's
 // declared types, used by the FILTER path ([ConditionToFilter]) to route
@@ -110,6 +113,29 @@ var sortableMetaFields = map[string]MetaField{
 func ResolveMetaField(name string) (MetaField, bool) {
 	mf, ok := sortableMetaFields[name]
 	return mf, ok
+}
+
+// MetaFieldNames returns the sorted canonical meta-field names, as a fresh
+// slice the caller may retain or mutate.
+//
+// Enumeration is published alongside the [ResolveMetaField] point lookup
+// because the vocabulary is a CLOSED set whose membership other code must
+// agree with — a runtime matcher deciding which names address metadata, a
+// validator rejecting the rest, a diagnostic listing the valid ones. Each of
+// those needs the set, not a single lookup, and without this they keep their
+// own copy: a silent drift surface, since nothing would compare the copies.
+//
+// Note "previousTransition" is absent. It is a client-facing alias for
+// "transitionForLatestSave", not a vocabulary member, and
+// [ConditionToFilter] canonicalizes it before any lookup. A caller
+// validating raw client input must admit the alias itself.
+func MetaFieldNames() []string {
+	out := make([]string, 0, len(sortableMetaFields))
+	for name := range sortableMetaFields {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // IsTemporalMetaField reports whether the given already-canonicalized meta

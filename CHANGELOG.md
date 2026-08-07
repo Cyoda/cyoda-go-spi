@@ -17,8 +17,20 @@ MAINTAINING.md.
 - Search-filter translation relocated into the SPI, completing the v0.8.3
   type-core relocation: `ConditionToFilter` (with `FieldDescriptor`,
   `ClassifyType`, `ClassifyTypesFold`, `MetaField`, `ResolveMetaField`,
-  `IsTemporalMetaField`, `MapOperator`), plus the read-side model tree
-  behind `FieldsMapFromSchema`.
+  `IsTemporalMetaField`, `MapOperator`, `NormalisePath`), plus the read-side
+  model tree behind `FieldsMapFromSchema` (`ModelNode`, `NodeKind`,
+  `UnmarshalModelNode`, and the node constructors/accessors).
+
+  Two closed vocabularies ship with enumeration accessors, not just point
+  lookups: `OperatorNames` alongside `MapOperator`/`LookupOperator`, and
+  `MetaFieldNames` alongside `ResolveMetaField`. A caller needing the SET —
+  to validate membership, or to render a "valid values are…" diagnostic —
+  would otherwise keep a private copy, which is a silent drift surface
+  because nothing compares the copies.
+
+  `ValidateConditionOperators` walks a condition tree rejecting unrecognised
+  operator names, so a self-executing backend does not write that recursion
+  itself. `MaxConditionDepth` caps it.
 
   `ConditionToFilter` is the only supported way to build a `Filter` the
   leaf-comparison kernel evaluates correctly, and it previously lived in
@@ -37,11 +49,15 @@ MAINTAINING.md.
   `GREATER_THAN`, `GREATER_OR_EQUAL`, `LESS_THAN`, `LESS_OR_EQUAL`,
   `BETWEEN`, `BETWEEN_INCLUSIVE`) annihilate to false — `ExpandLeaf`
   engages no bucket, errors, and `evalLeafFilter` swallows that into a
-  non-match. Presence and string/pattern leaves (`IS_NULL`, `NOT_NULL`,
-  `CONTAINS`, `STARTS_WITH`, `ENDS_WITH`, `LIKE`, `MATCHES_PATTERN`)
-  evaluate normally, having never needed a type — `IS_NULL`/`NOT_NULL`
-  decide purely on whether the stored value is present and non-null,
-  despite the null operand.
+  non-match. The other eighteen evaluate normally, having never needed a
+  type: `IS_NULL`/`NOT_NULL` decide purely on whether the stored value is
+  present and non-null despite the null operand, and the string family —
+  `CONTAINS`, `NOT_CONTAINS`, `STARTS_WITH`, `NOT_STARTS_WITH`,
+  `ENDS_WITH`, `NOT_ENDS_WITH`, `LIKE`, `MATCHES_PATTERN`, `IEQUALS`,
+  `INOT_EQUAL`, `ICONTAINS`, `INOT_CONTAINS`, `ISTARTS_WITH`,
+  `INOT_STARTS_WITH`, `IENDS_WITH`, `INOT_ENDS_WITH` — compares
+  stringified forms. The negated and case-insensitive members are the easy
+  ones to misjudge: `ICONTAINS` resembles a comparison but is not one.
 
   The resulting filter is therefore internally inconsistent rather than
   merely empty: under `AND` a dropped comparison removes rows that should
@@ -55,6 +71,28 @@ MAINTAINING.md.
   `ClassifyType` keeps temporal subtypes as `OrderTemporal`, while a sort
   path folding them onto `OrderText` composes via `ClassifyTypesFold`
   rather than by changing the filter classifier.
+
+  **`ConditionToFilter` translates; it does not validate.** The engine is
+  safe only because it runs a condition validator first, and a direct caller
+  inherits four obligations, each of which fails silently — a wrong or empty
+  result set, never an error. Unrecognised operator names translate to an
+  anchored regex (`NOT_EQUALS`, a misspelling of `NOT_EQUAL`, inverts the
+  intended polarity; an operand of `.*` matches every row). An object operand
+  reaches the kernel and is compared as the literal text `map[a:1]`. A
+  malformed `BETWEEN` arity leaves `Values` nil and the leaf no-matches. An
+  uncompilable pattern leaves the compiled program nil and the leaf returns
+  false. `ValidateConditionOperators` covers the first; the other three are
+  documented on `ConditionToFilter` and remain the caller's.
+
+  `LookupOperator` returns the zero `FilterOp` on an unrecognised name
+  rather than the regex fallback, so `op, _ := LookupOperator(name)` cannot
+  quietly hand back the very filter the function exists to prevent.
+
+### Fixed
+
+- `UnmarshalModelNode` rejects a JSON-null child node with an error. The
+  equivalent decoder this was derived from dereferences the nil and panics,
+  which is reachable from persisted bytes.
 
 ## [0.8.3] - 2026-07-26
 

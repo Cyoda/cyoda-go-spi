@@ -1,6 +1,7 @@
 package spi_test
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -118,23 +119,83 @@ func TestConditionToFilter_AllSimpleOperators(t *testing.T) {
 	}
 }
 
+// TestConditionToFilter_UnknownOperator pins the rejection that replaced the
+// old regex fallback.
+//
+// The fallback mapped any unrecognised name to FilterMatchesRegex, on the
+// theory that a pattern leaf is never pushed down and so "degrades to
+// post-filtering". Not pushing down does not mean not evaluating: the kernel
+// compiles the operand as an anchored pattern and matches it. So the leaf
+// degraded to a DIFFERENT predicate rather than a slower one, and
+// "NOT_EQUALS" — the obvious misspelling of NOT_EQUAL — became ^value$ and
+// returned precisely the rows the caller meant to exclude.
 func TestConditionToFilter_UnknownOperator(t *testing.T) {
-	cond := &predicate.SimpleCondition{
-		JsonPath:     "$.field",
-		OperatorType: "SOME_UNKNOWN_OP",
-		Value:        "val",
-	}
-	f, err := spi.ConditionToFilter(cond, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Unknown operators map to matches_regex to force post-filtering.
-	if f.Op != spi.FilterMatchesRegex {
-		t.Errorf("Op = %s, want matches_regex for unknown op", f.Op)
-	}
-	if got := spi.MapOperator("SOME_UNKNOWN_OP"); got != spi.FilterMatchesRegex {
-		t.Errorf("MapOperator(unknown) = %s, want matches_regex", got)
-	}
+	t.Run("SimpleConditionRejected", func(t *testing.T) {
+		cond := &predicate.SimpleCondition{
+			JsonPath:     "$.field",
+			OperatorType: "SOME_UNKNOWN_OP",
+			Value:        "val",
+		}
+		_, err := spi.ConditionToFilter(cond, nil)
+		if err == nil {
+			t.Fatal("unknown operator translated without error")
+		}
+		if !errors.Is(err, spi.ErrUnknownOperator) {
+			t.Errorf("error %v does not wrap ErrUnknownOperator; callers cannot map it to 400", err)
+		}
+		if !strings.Contains(err.Error(), "SOME_UNKNOWN_OP") {
+			t.Errorf("error %q does not name the offending operator", err)
+		}
+	})
+
+	t.Run("LifecycleConditionRejected", func(t *testing.T) {
+		cond := &predicate.LifecycleCondition{
+			Field:        "state",
+			OperatorType: "SOME_UNKNOWN_OP",
+			Value:        "val",
+		}
+		if _, err := spi.ConditionToFilter(cond, nil); !errors.Is(err, spi.ErrUnknownOperator) {
+			t.Errorf("meta leaf: got %v, want ErrUnknownOperator", err)
+		}
+	})
+
+	// The specific misspelling that motivated the change: under the old
+	// fallback this produced an anchored regex behaving as EQUALS, inverting
+	// the caller's polarity with no diagnostic.
+	t.Run("NOT_EQUALS_MisspellingRejected", func(t *testing.T) {
+		cond := &predicate.SimpleCondition{
+			JsonPath:     "$.status",
+			OperatorType: "NOT_EQUALS",
+			Value:        "draft",
+		}
+		if _, err := spi.ConditionToFilter(cond, nil); !errors.Is(err, spi.ErrUnknownOperator) {
+			t.Errorf("got %v, want ErrUnknownOperator", err)
+		}
+	})
+
+	// A nested bad leaf must not be masked by the surrounding group.
+	t.Run("RejectionPropagatesOutOfAGroup", func(t *testing.T) {
+		cond := &predicate.GroupCondition{
+			Operator: "AND",
+			Conditions: []predicate.Condition{
+				&predicate.SimpleCondition{JsonPath: "$.a", OperatorType: "EQUALS", Value: 1},
+				&predicate.SimpleCondition{JsonPath: "$.b", OperatorType: "NOPE", Value: 2},
+			},
+		}
+		if _, err := spi.ConditionToFilter(cond, nil); !errors.Is(err, spi.ErrUnknownOperator) {
+			t.Errorf("got %v, want ErrUnknownOperator", err)
+		}
+	})
+
+	t.Run("MapOperatorReturnsZeroNotTheRegexOp", func(t *testing.T) {
+		got := spi.MapOperator("SOME_UNKNOWN_OP")
+		if got == spi.FilterMatchesRegex {
+			t.Error("MapOperator still routes unknown names to the pattern operator")
+		}
+		if got != spi.FilterOp("") {
+			t.Errorf("MapOperator(unknown) = %q, want the zero FilterOp", got)
+		}
+	})
 }
 
 func TestConditionToFilter_Lifecycle(t *testing.T) {
@@ -513,10 +574,10 @@ func TestConditionToFilter_SimpleBetweenInclusive_PopulatesValues(t *testing.T) 
 
 // TestConditionToFilter_NotContains_RoutesToKernelOp verifies that a
 // NOT_CONTAINS SimpleCondition translates to a spi.Filter with
-// Op: spi.FilterNotContains — NOT a matches_regex leaf. A regression here
-// makes the case-sensitive negatives fall through MapOperator's default case
-// to FilterMatchesRegex, silently mistranslating the condition into a regex
-// match on Searcher (sqlite/postgres) backends.
+// Op: spi.FilterNotContains. Dropping the case-sensitive negatives from
+// MapOperator's table would now surface as ErrUnknownOperator rather than the
+// silent regex mistranslation it once caused, but the leaf must route to the
+// kernel operator, not merely avoid being rejected.
 func TestConditionToFilter_NotContains_RoutesToKernelOp(t *testing.T) {
 	c := &predicate.SimpleCondition{
 		JsonPath:     "$.name",
@@ -943,15 +1004,9 @@ func TestConditionToFilter_EmptyGroupIdentityEncodings(t *testing.T) {
 	}
 }
 
-// TestLookupOperator pins the safe operator-validation form callers are told
-// to use before ConditionToFilter.
-//
-// The hazard it exists to close: MapOperator maps ANY unrecognised name to
-// FilterMatchesRegex, so a misspelling translates without error and then
-// evaluates as a regular expression. The engine never sees this because it
-// validates conditions first; a self-executing backend calling the SPI
-// directly has no such gate, which is exactly the caller this relocation
-// serves.
+// TestLookupOperator pins the up-front operator-validation form, for callers
+// that want to reject a whole request before any partial translation work
+// rather than take ConditionToFilter's ErrUnknownOperator mid-tree.
 func TestLookupOperator(t *testing.T) {
 	t.Run("KnownOperatorsResolve", func(t *testing.T) {
 		for _, op := range []string{

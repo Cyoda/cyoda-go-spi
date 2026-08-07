@@ -66,21 +66,28 @@ import (
 // Meta leaves are unaffected: their types come from the static meta
 // vocabulary, not from fields, so a nil map does not degrade them at all.
 //
-// # Callers MUST validate the condition first
+// # An unrecognised operator is an error, not a fallback
 //
-// ConditionToFilter translates; it does not validate. The engine is safe only
-// because it runs a condition validator before translating. A caller that
-// reaches ConditionToFilter directly — which is precisely the self-executing
-// backend this function exists for — has no such gate, and inherits every one
-// of these obligations:
+// A leaf whose OperatorType is outside the closed set [OperatorNames] reports
+// fails with [ErrUnknownOperator]. Callers should map that to a client error
+// (400 INVALID_CONDITION); it means the input was invalid, unlike the other
+// failures here, which mean a well-formed predicate is not expressible as a
+// pushdown filter.
 //
-//   - UNRECOGNISED OPERATOR NAMES. Translation routes through [MapOperator],
-//     whose fallback is FilterMatchesRegex, so a misspelled or hostile
-//     operator translates without error and then EVALUATES with the operand
-//     treated as a regular expression. `NOT_EQUALS` (a misspelling of
-//     NOT_EQUAL) inverts the intended polarity; an operand of ".*" matches
-//     every row. Use [ValidateConditionOperators], or [LookupOperator] on
-//     each leaf.
+// This is worth stating because the obvious alternative is actively harmful.
+// Mapping an unrecognised name onto a real operator does not make it
+// unevaluable — the kernel evaluates whatever it is given — so it silently
+// answers a DIFFERENT question. Routing to a pattern match is the worst
+// choice available: "NOT_EQUALS", the obvious misspelling of NOT_EQUAL,
+// becomes an anchored regex that behaves as EQUALS and returns exactly the
+// rows the caller meant to exclude.
+//
+// # Three obligations that remain the caller's
+//
+// ConditionToFilter validates operator names and path shape. It does not
+// validate operands, and each of these fails SILENTLY — an under- or
+// wrongly-populated result set, never an error:
+//
 //   - OBJECT OPERANDS. A leaf value that is an object denotes no scalar any
 //     operator could compare against. Left unchecked it reaches the kernel,
 //     which stringifies it via fmt.Sprint and compares the literal text
@@ -93,10 +100,6 @@ import (
 //     the compiled program nil and the leaf silently returns false. Note the
 //     kernel compiles the ANCHORED form while a naive caller-side check would
 //     compile the raw operand, so the two accept sets are not identical.
-//
-// Every one of these fails SILENTLY — an under- or wrongly-populated result
-// set, not an error. That is why they are the caller's obligation and not a
-// best-effort tolerance inside this function.
 func ConditionToFilter(cond predicate.Condition, fields map[string]FieldDescriptor) (Filter, error) {
 	if cond == nil {
 		return Filter{}, fmt.Errorf("condition is nil")
@@ -106,7 +109,7 @@ func ConditionToFilter(cond predicate.Condition, fields map[string]FieldDescript
 	case *predicate.SimpleCondition:
 		return simpleToFilter(c, fields)
 	case *predicate.LifecycleCondition:
-		return lifecycleToFilter(c), nil
+		return lifecycleToFilter(c)
 	case *predicate.GroupCondition:
 		return groupToFilter(c, fields)
 	case *predicate.ArrayCondition:
@@ -125,7 +128,10 @@ func simpleToFilter(c *predicate.SimpleCondition, fields map[string]FieldDescrip
 	if err != nil {
 		return Filter{}, err
 	}
-	op := MapOperator(c.OperatorType)
+	op, ok := LookupOperator(c.OperatorType)
+	if !ok {
+		return Filter{}, unknownOperatorError(c.OperatorType)
+	}
 	return Filter{
 		Op:       op,
 		Path:     stripped,
@@ -135,6 +141,17 @@ func simpleToFilter(c *predicate.SimpleCondition, fields map[string]FieldDescrip
 		Coercion: dataCoercion(c.JsonPath, fields),
 		Declared: fields[c.JsonPath].Types,
 	}, nil
+}
+
+// unknownOperatorError reports an operatorType outside the closed set,
+// listing the valid names so a caller can self-correct.
+func unknownOperatorError(op string) error {
+	if op == "" {
+		return fmt.Errorf("%w: missing operatorType; valid: %s",
+			ErrUnknownOperator, strings.Join(canonicalOperatorNames, ", "))
+	}
+	return fmt.Errorf("%w: %q; valid: %s",
+		ErrUnknownOperator, op, strings.Join(canonicalOperatorNames, ", "))
 }
 
 // betweenValues returns the two BETWEEN / BETWEEN_INCLUSIVE bounds as a []any
@@ -185,7 +202,7 @@ func dataCoercion(jsonPath string, fields map[string]FieldDescriptor) FilterCoer
 // NOT drawn from the model fields map: temporal meta leaves declare
 // [ZonedDateTime], every other meta leaf declares [String]. This is why meta
 // filters keep working with a nil fields map while data filters do not.
-func lifecycleToFilter(c *predicate.LifecycleCondition) Filter {
+func lifecycleToFilter(c *predicate.LifecycleCondition) (Filter, error) {
 	field := c.Field
 	if field == "previousTransition" {
 		field = "transitionForLatestSave"
@@ -196,7 +213,10 @@ func lifecycleToFilter(c *predicate.LifecycleCondition) Filter {
 		co = CoerceTemporal
 		declared = []DataType{ZonedDateTime}
 	}
-	op := MapOperator(c.OperatorType)
+	op, ok := LookupOperator(c.OperatorType)
+	if !ok {
+		return Filter{}, unknownOperatorError(c.OperatorType)
+	}
 	return Filter{
 		Op:       op,
 		Path:     field,
@@ -205,7 +225,7 @@ func lifecycleToFilter(c *predicate.LifecycleCondition) Filter {
 		Values:   betweenValues(op, c.Value),
 		Coercion: co,
 		Declared: declared,
-	}
+	}, nil
 }
 
 // groupToFilter translates a GroupCondition to a Filter with AND/OR children.
@@ -339,21 +359,13 @@ const MaxConditionDepth = 256
 // LookupOperator translates a domain operator string to a [FilterOp],
 // reporting whether the name was recognised.
 //
-// This is the form callers should use. [MapOperator] silently maps an unknown
-// name to FilterMatchesRegex, which is safe only behind a validator; this one
-// lets the caller reject the name instead.
-//
-// On an unrecognised name it returns the zero FilterOp, NOT the regex
-// fallback: a caller writing `op, _ := LookupOperator(name)` would otherwise
-// be handed the very filter this function exists to prevent, making the
-// careless form of the safe call indistinguishable from the unsafe one. The
-// zero value is not a valid leaf operator and [ExpandLeaf] rejects it.
+// Use it to validate an operator name ahead of translation when you want to
+// reject the whole request with your own diagnostic. It is not a safety
+// requirement: [ConditionToFilter] rejects an unrecognised operator on its
+// own.
 func LookupOperator(op string) (FilterOp, bool) {
 	f := MapOperator(op)
-	if f == FilterMatchesRegex && op != "MATCHES_PATTERN" {
-		return "", false
-	}
-	return f, true
+	return f, f != ""
 }
 
 // canonicalOperatorNames is the closed set of operator names [MapOperator]
@@ -383,19 +395,23 @@ func OperatorNames() []string {
 }
 
 // ValidateConditionOperators walks a condition tree and returns an error
-// naming the first unrecognised operator it finds. The error text lists the
-// canonical set so a caller can self-correct.
+// naming the first unrecognised operator it finds, wrapping
+// [ErrUnknownOperator]. The error text lists the canonical set so a caller can
+// self-correct.
 //
-// It exists so that every self-executing backend does not write the same
-// recursion over the condition types — a second implementation surface of
-// exactly the kind relocating [ConditionToFilter] here was meant to remove.
+// It is a convenience, not a safety requirement: [ConditionToFilter] rejects
+// an unrecognised operator on its own. Use this to reject the whole request up
+// front, before any partial work, and to report the problem at the request
+// boundary rather than mid-translation. It exists so that a backend wanting
+// that does not write the recursion over the condition types itself — a second
+// implementation surface of the kind relocating [ConditionToFilter] here was
+// meant to remove.
 //
-// This covers ONLY operator names. The other caller obligations documented on
-// [ConditionToFilter] — object operands, BETWEEN arity, pattern
-// compilability — are deliberately not folded in: the first two are cheap
-// local checks a caller can apply while walking its own input, and the third
-// depends on a pattern-cost bound that is not settled in this module yet.
-// Passing this function is not the same as having validated the condition.
+// It covers ONLY operator names. The three operand obligations documented on
+// [ConditionToFilter] are deliberately not folded in: two are cheap local
+// checks a caller can apply while walking its own input, and the third depends
+// on a pattern-cost bound this module has not settled. Passing this function
+// is not the same as having validated the condition.
 func ValidateConditionOperators(cond predicate.Condition) error {
 	return validateOperatorsAtDepth(cond, 0)
 }
@@ -431,35 +447,23 @@ func validateOperatorsAtDepth(cond predicate.Condition, depth int) error {
 }
 
 func checkOperator(op string) error {
-	if op == "" {
-		return fmt.Errorf("missing operatorType; valid: %s", strings.Join(canonicalOperatorNames, ", "))
-	}
 	if _, ok := LookupOperator(op); !ok {
-		return fmt.Errorf("unknown operatorType %q; valid: %s", op, strings.Join(canonicalOperatorNames, ", "))
+		return unknownOperatorError(op)
 	}
 	return nil
 }
 
-// MapOperator translates a domain operator string to a [FilterOp].
+// MapOperator translates a domain operator string to a [FilterOp], returning
+// the zero FilterOp for a name outside the closed set [OperatorNames] reports.
 //
-// It is exported because the engine's condition type-soundness validator maps
-// operators independently of translation and must not keep a second copy of
-// this table. Prefer [LookupOperator] unless you specifically want the
-// unknown-operator fallback.
+// It is exported because a caller may need to map operators independently of
+// translation — the engine's condition type-soundness validator does — and
+// should not keep a second copy of this table. Use [LookupOperator] where the
+// recognised/unrecognised distinction matters.
 //
-// # The unknown-operator fallback is a trap for direct callers
-//
-// An unrecognised operator maps to FilterMatchesRegex. In the engine that is
-// safe by construction: a MATCHES_PATTERN leaf is not pushed down, so it
-// degrades to post-filtering. There is no such stage here. A caller that maps
-// an unknown operator with this function and then EVALUATES the result gets
-// the operand interpreted as a regular expression — "Alice" then behaves like
-// equality, and ".*" matches every row.
-//
-// Direct callers must therefore validate the operator string before mapping
-// it, or treat a FilterMatchesRegex result for an operator that was not
-// literally "MATCHES_PATTERN" as an error. The fallback exists to force
-// post-filtering, not to make arbitrary input evaluable.
+// The zero FilterOp is not a valid leaf operator: [ExpandLeaf] rejects it and
+// [ConditionToFilter] refuses to build a filter around it. An unrecognised
+// name therefore cannot become an evaluable predicate by accident.
 func MapOperator(op string) FilterOp {
 	switch op {
 	case "EQUALS":
@@ -515,6 +519,6 @@ func MapOperator(op string) FilterOp {
 	case "NOT_ENDS_WITH":
 		return FilterNotEndsWith
 	default:
-		return FilterMatchesRegex // forces post-filter for unknown ops
+		return ""
 	}
 }

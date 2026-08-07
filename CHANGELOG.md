@@ -72,21 +72,37 @@ MAINTAINING.md.
   path folding them onto `OrderText` composes via `ClassifyTypesFold`
   rather than by changing the filter classifier.
 
-  **`ConditionToFilter` translates; it does not validate.** The engine is
-  safe only because it runs a condition validator first, and a direct caller
-  inherits four obligations, each of which fails silently — a wrong or empty
-  result set, never an error. Unrecognised operator names translate to an
-  anchored regex (`NOT_EQUALS`, a misspelling of `NOT_EQUAL`, inverts the
-  intended polarity; an operand of `.*` matches every row). An object operand
-  reaches the kernel and is compared as the literal text `map[a:1]`. A
-  malformed `BETWEEN` arity leaves `Values` nil and the leaf no-matches. An
+  Three obligations do remain the caller's, and each fails silently — a
+  wrong or empty result set, never an error. An object operand reaches the
+  kernel and is compared as the literal text `map[a:1]`. A malformed
+  `BETWEEN` arity leaves `Values` nil and the leaf no-matches. An
   uncompilable pattern leaves the compiled program nil and the leaf returns
-  false. `ValidateConditionOperators` covers the first; the other three are
-  documented on `ConditionToFilter` and remain the caller's.
+  false. All three are documented on `ConditionToFilter`.
 
-  `LookupOperator` returns the zero `FilterOp` on an unrecognised name
-  rather than the regex fallback, so `op, _ := LookupOperator(name)` cannot
-  quietly hand back the very filter the function exists to prevent.
+### Changed
+
+- **`ConditionToFilter` now rejects an unrecognised `operatorType`** with the
+  new `ErrUnknownOperator` sentinel, instead of mapping it to
+  `FilterMatchesRegex`. `MapOperator` returns the zero `FilterOp` for such a
+  name rather than the pattern operator.
+
+  The old fallback was justified as forcing post-filtering: no backend pushes
+  a pattern leaf down, so an unknown operator would "degrade" to in-memory
+  evaluation. But not pushing down is not the same as not evaluating — the
+  kernel compiles the operand as an anchored pattern and matches it. The leaf
+  degraded to a *different predicate*, not a slower one. `NOT_EQUALS`, the
+  obvious misspelling of `NOT_EQUAL`, became `^value$`, behaved as `EQUALS`,
+  and returned exactly the rows the caller meant to exclude — silently.
+  Forcing post-filtering is a performance decision; it was being used as a
+  correctness fallback, which it never was.
+
+  Rejecting is also what the function already does with every other invalid
+  input (nil conditions, function conditions, unsupported condition types,
+  non-pushdownable paths). The unknown operator was the one case it swallowed.
+
+  No caller relied on the fallback: the in-memory matcher accepts exactly the
+  same closed set, so there was no operator it made tolerable. Callers that
+  validate first — the engine does — see no change.
 
 ### Fixed
 

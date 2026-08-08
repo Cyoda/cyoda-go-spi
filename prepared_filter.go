@@ -121,6 +121,19 @@ func (n *preparedNode) match(data []byte, meta EntityMeta) bool {
 // kernel can classify numerics and temporals precisely. Same contract as the
 // pre-split filterStoredResult: a missing data path yields a non-existent
 // Result, and SourceMeta values are bridged through metaGjsonResult.
+//
+// KNOWN DIVERGENCE, deliberately not resolved here. A temporal meta field
+// (creationDate / lastUpdateTime) bridges to an RFC3339 string, and this
+// evaluator applies a text or pattern operator to it lexically — where the
+// predicate-tree evaluator in the consuming service guards the same case to a
+// non-match on field identity. The same request therefore answers differently
+// depending on whether the query pushes down.
+//
+// Do NOT resolve this by aligning either evaluator. A text or pattern operator
+// on a temporal field is not a supported predicate, and the resolution is to
+// refuse it at the shared validation boundary, which makes both evaluators'
+// behaviour unreachable. Aligning here would specify semantics for a predicate
+// that is being withdrawn.
 func (n *preparedNode) stored(data []byte, meta EntityMeta) gjson.Result {
 	if n.source == SourceMeta {
 		r, _ := metaGjsonResult(n.path, meta)

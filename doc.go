@@ -101,24 +101,10 @@
 // and tidwall/gjson. Plugin authors depend only on this module; they do
 // not depend on cyoda-go itself.
 //
-// # Predicate AST, and translating it
+// # Predicate AST
 //
 // Submodule spi/predicate holds the search-predicate AST and JSON
-// parse/marshal helpers. Plugins with no search semantics may ignore it.
-//
-// A plugin that receives a predicate.Condition should translate it with
-// [ConditionToFilter] rather than interpreting the AST itself. The
-// resulting [Filter] is what the leaf-comparison kernel ([MatchFilter],
-// [EvalLeaf]) evaluates, and building one any other way means answering
-// the same query differently from every other backend — the comparison
-// rules are type-directed and subtle enough that an independent
-// implementation drifts rather than merely lagging. Declared types come
-// from [FieldsMapFromSchema] over ModelDescriptor.Schema; supplying a nil
-// fields map is not a safe degraded mode, and ConditionToFilter documents
-// why.
-//
-// Deciding which parts of a Filter to narrow on in the plugin's own query
-// dialect (SQL, CQL) is the separate and expected step: a planner may
-// push down what it can and leave the rest residual, because the kernel
-// re-checks every candidate.
+// parse/marshal helpers. Plugins that translate predicates to their
+// own query dialect (SQL, CQL) import spi/predicate for the types.
+// Plugins with no search semantics may ignore it.
 package spi

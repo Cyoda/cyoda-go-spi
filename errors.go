@@ -126,12 +126,3 @@ var ErrUniqueViolation = errors.New("composite unique key violation")
 // error — a partially-filled key, an over-bound numeric literal, or a
 // non-scalar value at a key path. All map to 422 INVALID_UNIQUE_KEY.
 var ErrPartialUniqueKey = errors.New("invalid composite unique key value")
-
-// ErrUnknownOperator is returned by ConditionToFilter for a condition leaf
-// whose operatorType is not in the closed set OperatorNames reports.
-//
-// It is a distinct sentinel because it means the INPUT is invalid, which a
-// caller should surface as a client error (400 INVALID_CONDITION). Other
-// translation failures mean the predicate is well-formed but not expressible
-// as a pushdown Filter, which is a different answer entirely.
-var ErrUnknownOperator = errors.New("unknown condition operator")

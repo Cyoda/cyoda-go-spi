@@ -109,6 +109,11 @@ type Expansion struct {
 // as OR-drop / AND-annihilate without re-deriving it.
 func (e Expansion) Void() bool { return e.void }
 
+// compileRegex is regexp.Compile behind a package var so an internal test can
+// count compilations and prove they happen once per query rather than once per
+// row. Production code never reassigns it.
+var compileRegex = regexp.Compile
+
 // ExpandLeaf parses operand (or, for range ops, the two bounds in values)
 // against the field's declared type set and returns the typed Expansion.
 //
@@ -139,11 +144,11 @@ func ExpandLeaf(op FilterOp, operand string, values []string, declared []DataTyp
 		e := Expansion{kind: kindStringOp, op: op, strOperand: operand}
 		switch op {
 		case FilterLike:
-			if re, err := regexp.Compile(anchor(likeToRegex(operand))); err == nil {
+			if re, err := compileRegex(anchor(likeToRegex(operand))); err == nil {
 				e.strRegex = re
 			}
 		case FilterMatchesRegex:
-			if re, err := regexp.Compile(anchor(operand)); err == nil {
+			if re, err := compileRegex(anchor(operand)); err == nil {
 				e.strRegex = re
 			}
 		}

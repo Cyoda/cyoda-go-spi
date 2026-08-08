@@ -12,6 +12,40 @@ MAINTAINING.md.
 
 ## [Unreleased]
 
+### Breaking
+
+- **`MatchFilter`, `EvalLeafString`, `evalLeafFast` and `Expansion.Void` are removed.**
+  Filter evaluation is now a prepare/execute split: build a `PreparedFilter` once
+  per query with `Prepare(Filter)`, then call `Match(data, meta)` once per row.
+
+  Migration:
+
+  ```go
+  // before — parsed the operand, bucketed types and compiled the regex per row
+  for _, e := range rows {
+      if spi.MatchFilter(f, e.Data, e.Meta) { … }
+  }
+
+  // after — all of that happens once, above the loop
+  p := spi.Prepare(f)
+  for _, e := range rows {
+      if p.Match(e.Data, e.Meta) { … }
+  }
+  ```
+
+  `Prepare` returns no error: a leaf whose operand cannot be expanded becomes a
+  leaf that never matches, exactly as the per-row evaluator did. A `PreparedFilter`
+  is immutable and safe to share across goroutines. The zero `PreparedFilter`, and
+  `Prepare(Filter{})`, both match everything.
+
+  A leaf-level `EvalLeafString` replacement is deliberately not provided: leaving
+  one would let a caller keep compiling per row while only the tree walk was forced
+  open. Use `ExpandLeaf` once and `EvalLeaf` per row if you need leaf-level control.
+
+  No one-release `// Deprecated:` grace period: removal is the mechanism that
+  forces each caller to re-site the preparation, and a shim would silently preserve
+  the defect.
+
 ### Added
 
 - Search-filter translation relocated into the SPI, completing the v0.8.3
@@ -48,8 +82,8 @@ MAINTAINING.md.
   The eight comparison and ordering leaves (`EQUALS`, `NOT_EQUAL`,
   `GREATER_THAN`, `GREATER_OR_EQUAL`, `LESS_THAN`, `LESS_OR_EQUAL`,
   `BETWEEN`, `BETWEEN_INCLUSIVE`) annihilate to false — `ExpandLeaf`
-  engages no bucket, errors, and `evalLeafFilter` swallows that into a
-  non-match. The other eighteen evaluate normally, having never needed a
+  engages no bucket, errors, and the leaf-comparison kernel swallows that
+  into a non-match. The other eighteen evaluate normally, having never needed a
   type: `IS_NULL`/`NOT_NULL` decide purely on whether the stored value is
   present and non-null despite the null operand, and the string family —
   `CONTAINS`, `NOT_CONTAINS`, `STARTS_WITH`, `NOT_STARTS_WITH`,

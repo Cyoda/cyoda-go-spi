@@ -21,14 +21,15 @@ import (
 //
 //   - ExpandLeaf parses the operand once against the field's declared type set
 //     and produces an Expansion — the typed sub-conditions (numeric / temporal /
-//     other branches) plus a Void flag or an error. This is the once-per-query
-//     work (§7).
+//     other branches) plus a void flag or an error. This is the once-per-query
+//     work, and prepared_filter.go is what makes that true: Prepare calls it
+//     once per leaf and Match never calls it at all.
 //   - EvalLeaf classifies a single stored gjson.Result and decides match/no-match
-//     against a pre-built Expansion.
+//     against a pre-built Expansion. This is the per-row work.
 //
-// EvalLeafString is a convenience for single-entity callers that expands and
-// evaluates in one call (with a result-identical fast path for the common
-// monomorphic leaf).
+// There is deliberately no fused expand-and-evaluate entry point. One existed,
+// and it is why operand parsing, type bucketing and regex compilation ran once
+// per candidate entity instead of once per query.
 //
 // Divergences from Cloud, all intentional (see the brief and entity-search.md
 // §9/§10):
@@ -73,7 +74,7 @@ type tempRange struct {
 }
 
 // Expansion is the once-per-query parse+bucket result of a single leaf. It is
-// opaque to callers — build it with ExpandLeaf and pass it to EvalLeaf. A Void
+// opaque to callers — build it with ExpandLeaf and pass it to EvalLeaf. A void
 // expansion (>=1 declared type accepted the operand but every sub-condition was
 // dropped) evaluates to non-match for any stored value.
 type Expansion struct {
@@ -101,13 +102,6 @@ type Expansion struct {
 	strOperand string
 	strRegex   *regexp.Regexp // compiled+anchored pattern for LIKE / MATCHES_PATTERN
 }
-
-// Void reports whether this expansion is the void (unsatisfiable-but-valid)
-// leaf: the operand parsed as at least one declared type, but every candidate
-// sub-condition was dropped (e.g. an imprecise EQUALS against integer-only
-// buckets). A void leaf never matches. Exposed so a group combiner can treat it
-// as OR-drop / AND-annihilate without re-deriving it.
-func (e Expansion) Void() bool { return e.void }
 
 // compileRegex is regexp.Compile behind a package var so an internal test can
 // count compilations and prove they happen once per query rather than once per
@@ -519,75 +513,6 @@ func evalStringOp(e Expansion, s string) bool {
 		return !strings.HasSuffix(fold(s), fold(op))
 	}
 	return false
-}
-
-// EvalLeafString expands and evaluates a leaf in one call, for single-entity
-// callers. It carries a result-identical fast path for the common monomorphic
-// leaf (see evalLeafFast); on any error from expansion it returns (false, err)
-// for the caller to map to a 4xx.
-func EvalLeafString(op FilterOp, operand string, values []string, declared []DataType, stored gjson.Result) (bool, error) {
-	if matched, handled := evalLeafFast(op, operand, declared, stored); handled {
-		return matched, nil
-	}
-	exp, err := ExpandLeaf(op, operand, values, declared)
-	if err != nil {
-		return false, err
-	}
-	return EvalLeaf(exp, stored), nil
-}
-
-// evalLeafFast is a strictly result-identical shortcut for the two most common
-// monomorphic leaves, avoiding the full expansion + bucket machinery:
-//
-//   - a single declared STRING under a comparable op, and
-//   - a single declared UNBOUND_DECIMAL under a comparable op (the universal
-//     numeric sink: verbatim bounds, no rounding, every numeric stored value
-//     assignable).
-//
-// Both reproduce the general path exactly. Bounded numeric types are
-// deliberately NOT fast-pathed: their bucket range/rounding/void behaviour is
-// the whole point and cannot be shortcut safely. handled=false means "not
-// eligible — use the general path".
-func evalLeafFast(op FilterOp, operand string, declared []DataType, stored gjson.Result) (matched, handled bool) {
-	if len(declared) != 1 {
-		return false, false
-	}
-	switch op {
-	case FilterEq, FilterNe, FilterGt, FilterGte, FilterLt, FilterLte:
-	default:
-		return false, false
-	}
-	// Null/absent uniformity applies uniformly here too.
-	nullish := !stored.Exists() || stored.Type == gjson.Null
-
-	switch declared[0] {
-	case String:
-		if nullish {
-			return false, true
-		}
-		if stored.Type != gjson.String {
-			return false, true // monomorphic STRING vs non-textual stored → non-match
-		}
-		return cmpResult(strings.Compare(stored.String(), operand), op), true
-
-	case UnboundDecimal:
-		opDec, err := ParseDecimal(operand)
-		if err != nil {
-			return false, false // operand not numeric → let the general path raise the mismatch
-		}
-		if nullish {
-			return false, true
-		}
-		if stored.Type != gjson.Number {
-			return false, true
-		}
-		storedDec, err := ParseDecimal(stored.Raw)
-		if err != nil {
-			return false, true
-		}
-		return cmpResult(storedDec.Cmp(opDec), op), true
-	}
-	return false, false
 }
 
 // --- small comparison helpers ---------------------------------------------

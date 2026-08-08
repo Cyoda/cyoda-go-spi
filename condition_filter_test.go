@@ -519,7 +519,7 @@ func TestConditionToFilter_SimpleBetween_PopulatesValues(t *testing.T) {
 // TestConditionToFilter_LifecycleBetween_PopulatesValues verifies that a
 // BETWEEN LifecycleCondition on a temporal meta field (creationDate)
 // populates Filter.Values with the two bounds AND stamps CoerceTemporal, so
-// storage-plugin BETWEEN pushdown and spi.MatchFilter can actually match.
+// storage-plugin BETWEEN pushdown and spi.Prepare(f).Match can actually match.
 func TestConditionToFilter_LifecycleBetween_PopulatesValues(t *testing.T) {
 	c := &predicate.LifecycleCondition{
 		Field:        "creationDate",
@@ -808,8 +808,8 @@ func TestConditionToFilter_NilFields_DegradesInconsistently(t *testing.T) {
 
 			diverged := false
 			for name, doc := range docs {
-				gotBare := spi.MatchFilter(bare, doc, spi.EntityMeta{})
-				gotTyped := spi.MatchFilter(typed, doc, spi.EntityMeta{})
+				gotBare := spi.Prepare(bare).Match(doc, spi.EntityMeta{})
+				gotTyped := spi.Prepare(typed).Match(doc, spi.EntityMeta{})
 				if gotBare != gotTyped {
 					diverged = true
 					if !tc.annihilates {
@@ -844,11 +844,11 @@ func TestConditionToFilter_NilFields_DegradesInconsistently(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ConditionToFilter: %v", err)
 		}
-		if !spi.MatchFilter(typed, doc, spi.EntityMeta{}) {
+		if !spi.Prepare(typed).Match(doc, spi.EntityMeta{}) {
 			t.Fatal("setup invariant: the document must match when declared types are supplied")
 		}
-		if spi.MatchFilter(bare, doc, spi.EntityMeta{}) {
-			t.Error("MatchFilter = true; expected the annihilated EQUALS conjunct to drop a document that genuinely satisfies both leaves")
+		if spi.Prepare(bare).Match(doc, spi.EntityMeta{}) {
+			t.Error("Prepare(f).Match = true; expected the annihilated EQUALS conjunct to drop a document that genuinely satisfies both leaves")
 		}
 	})
 }
@@ -873,12 +873,12 @@ func TestConditionToFilter_WithFields_DataLeafMatches(t *testing.T) {
 	if !reflect.DeepEqual(f.Declared, want) {
 		t.Fatalf("Declared = %v, want %v", f.Declared, want)
 	}
-	if !spi.MatchFilter(f, data, spi.EntityMeta{}) {
-		t.Error("MatchFilter = false, want true: a declared string leaf must match an equal stored value")
+	if !spi.Prepare(f).Match(data, spi.EntityMeta{}) {
+		t.Error("Prepare(f).Match = false, want true: a declared string leaf must match an equal stored value")
 	}
 	// And it still discriminates — it is not matching everything.
-	if spi.MatchFilter(f, []byte(`{"name":"Bob"}`), spi.EntityMeta{}) {
-		t.Error("MatchFilter = true for a non-equal value, want false")
+	if spi.Prepare(f).Match([]byte(`{"name":"Bob"}`), spi.EntityMeta{}) {
+		t.Error("Prepare(f).Match = true for a non-equal value, want false")
 	}
 }
 
@@ -892,11 +892,11 @@ func TestConditionToFilter_NilFields_MetaLeafStillMatches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConditionToFilter: %v", err)
 	}
-	if !spi.MatchFilter(f, []byte(`{}`), spi.EntityMeta{State: "ACTIVE"}) {
-		t.Error("MatchFilter = false, want true: a meta leaf must match with a nil fields map")
+	if !spi.Prepare(f).Match([]byte(`{}`), spi.EntityMeta{State: "ACTIVE"}) {
+		t.Error("Prepare(f).Match = false, want true: a meta leaf must match with a nil fields map")
 	}
-	if spi.MatchFilter(f, []byte(`{}`), spi.EntityMeta{State: "LOCKED"}) {
-		t.Error("MatchFilter = true for a non-equal state, want false")
+	if spi.Prepare(f).Match([]byte(`{}`), spi.EntityMeta{State: "LOCKED"}) {
+		t.Error("Prepare(f).Match = true for a non-equal state, want false")
 	}
 }
 
@@ -982,7 +982,7 @@ func TestConditionToFilter_EmptyGroupIdentityEncodings(t *testing.T) {
 		if f.Children != nil {
 			t.Errorf("Children = %#v, want nil (the all-nil array tautology)", f.Children)
 		}
-		if !spi.MatchFilter(f, []byte(`{}`), spi.EntityMeta{}) {
+		if !spi.Prepare(f).Match([]byte(`{}`), spi.EntityMeta{}) {
 			t.Error("an empty AND must be the identity (match everything), not match nothing")
 		}
 	})

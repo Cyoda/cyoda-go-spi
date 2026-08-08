@@ -108,7 +108,7 @@
 //
 // A plugin that receives a predicate.Condition should translate it with
 // [ConditionToFilter] rather than interpreting the AST itself. The
-// resulting [Filter] is what the leaf-comparison kernel ([MatchFilter],
+// resulting [Filter] is what the leaf-comparison kernel ([Prepare],
 // [EvalLeaf]) evaluates, and building one any other way means answering
 // the same query differently from every other backend — the comparison
 // rules are type-directed and subtle enough that an independent

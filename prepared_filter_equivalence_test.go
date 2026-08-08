@@ -13,6 +13,8 @@ package spi
 
 import (
 	"math/rand"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -226,11 +228,26 @@ func genMeta(r *rand.Rand) EntityMeta {
 	return metas[r.Intn(len(metas))]
 }
 
+// Corpus size and seed are overridable so a one-off widened exploration is
+// reproducible. The committed defaults ARE the standing gate; -count alone
+// widens nothing, because a fixed seed regenerates the same corpus.
+func equivCases() int  { return envInt("SPI_EQUIV_CASES", 200000) }
+func equivSeed() int64 { return int64(envInt("SPI_EQUIV_SEED", 0x30C0DE)) }
+
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
+
 // TestPrepare_EquivalentToFrozenMatchFilter is the merge gate. Exact agreement,
 // no carve-outs: the prepare/execute split changes no answers.
 func TestPrepare_EquivalentToFrozenMatchFilter(t *testing.T) {
-	const cases = 200000
-	r := rand.New(rand.NewSource(0x30C0DE))
+	cases := equivCases()
+	r := rand.New(rand.NewSource(equivSeed()))
 
 	for i := 0; i < cases; i++ {
 		f := genFilter(r, 3)

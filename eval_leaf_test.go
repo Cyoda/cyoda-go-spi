@@ -41,9 +41,8 @@ type evalRow struct {
 }
 
 // oracleRows encodes the entity-search.md worked examples (C.1, C.5, C.6, C.8)
-// plus the Cloud operator rules the brief enumerates. Every row is evaluated
-// twice — once through EvalLeafString (fast path enabled) and once through the
-// explicit ExpandLeaf+EvalLeaf pipeline — and both must equal want.
+// plus the Cloud operator rules the brief enumerates. Each row is evaluated
+// through the explicit ExpandLeaf+EvalLeaf pipeline and must equal want.
 func oracleRows() []evalRow {
 	u := "6ba7b810-9dad-11d1-80b4-00c04fd430c8" // a v1 UUID
 	return []evalRow{
@@ -236,7 +235,7 @@ func oracleRows() []evalRow {
 		{"local_date between_inclusive -> inside", FilterBetweenInclusive, "", []string{"2024-03-01", "2024-09-01"}, []DataType{LocalDate}, strp(`"2024-06-15"`), true},
 		{"local_date between_inclusive -> below range", FilterBetweenInclusive, "", []string{"2024-03-01", "2024-09-01"}, []DataType{LocalDate}, strp(`"2023-12-31"`), false},
 
-		// --- UnboundDecimal fast-path oracle rows (dual-path identity) ------
+		// --- UnboundDecimal oracle rows (verbatim bounds, no rounding) ------
 		{"ubd eq -> match", FilterEq, "3.14", nil, []DataType{UnboundDecimal}, strp("3.14"), true},
 		{"ubd eq -> non-match", FilterEq, "3.14", nil, []DataType{UnboundDecimal}, strp("3.15"), false},
 		{"ubd gt -> match", FilterGt, "3.14", nil, []DataType{UnboundDecimal}, strp("3.15"), true},
@@ -251,26 +250,13 @@ func TestEvalLeaf_Oracle(t *testing.T) {
 		t.Run(r.name, func(t *testing.T) {
 			stored := storedFrom(r.stored)
 
-			// Path A: explicit expand + eval.
 			exp, err := ExpandLeaf(r.op, r.operand, r.values, r.declared)
 			if err != nil {
 				t.Fatalf("ExpandLeaf unexpected error: %v", err)
 			}
-			gotA := EvalLeaf(exp, stored)
-			if gotA != r.want {
-				t.Errorf("EvalLeaf(expand) = %v, want %v", gotA, r.want)
-			}
-
-			// Path B: convenience one-shot (fast path enabled).
-			gotB, err := EvalLeafString(r.op, r.operand, r.values, r.declared, stored)
-			if err != nil {
-				t.Fatalf("EvalLeafString unexpected error: %v", err)
-			}
-			if gotB != r.want {
-				t.Errorf("EvalLeafString = %v, want %v", gotB, r.want)
-			}
-			if gotA != gotB {
-				t.Errorf("fast/slow divergence: expand=%v fast=%v", gotA, gotB)
+			got := EvalLeaf(exp, stored)
+			if got != r.want {
+				t.Errorf("EvalLeaf(expand) = %v, want %v", got, r.want)
 			}
 		})
 	}

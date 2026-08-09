@@ -11,7 +11,7 @@ import (
 // the anti-corruption layer between the domain's predicate syntax and the
 // stable filter contract storage plugins use for pushdown, and it is the only
 // supported way to produce a Filter that the leaf-comparison kernel
-// ([MatchFilter] / [EvalLeaf]) will evaluate correctly.
+// ([Prepare] / [EvalLeaf]) will evaluate correctly.
 //
 // It lives in the SPI, not in the engine, because a backend that
 // self-executes a search — one that receives a serialized condition rather

@@ -8,93 +8,15 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// --- Filter-based evaluation (used by Iterable/GroupedAggregator/streaming-tally) ---
+// --- Filter operand and meta-value plumbing ---
 //
-// The helpers below mirror plugins/sqlite/post_filter.go semantics so that an
-// in-process evaluator (memory Iterate, residual post-filter, streaming tally)
-// produces bit-identical results to the sqlite backend's post-filter step.
-// Drift between the two would silently change grouped-stats results across
-// backends — see e2e/parity/MatchFilterSqliteEvaluateFilterParity (the smoke
-// test that pins this contract).
-
-// MatchFilter evaluates a Filter against an entity. Filter is the
-// pushdown-friendly subset of predicate.Condition used by GroupedAggregator,
-// Iterable, and the existing Searcher. Used by the memory plugin's Iterate
-// to apply filters inside Next() and by the streaming-tally path when a
-// pushdown leaves a residual.
-//
-// A zero-value filter (no Op) matches everything. An explicit empty AND
-// (Op = FilterAnd with no children) is the AND identity (true). An explicit
-// empty OR is the OR identity (false).
-//
-// Unlike Match, MatchFilter does not return an error. The pushdown contract
-// guarantees ops are well-formed before they reach here; an unsupported op
-// (which would only happen on a programmer error or SPI/plugin drift) is
-// treated as a non-match.
-func MatchFilter(f Filter, data []byte, meta EntityMeta) bool {
-	// Zero-value filter (no Op) matches everything. We deliberately only
-	// check Op: an explicit Op (even FilterAnd with no children) must reach
-	// the group evaluator so the group identity is honored (empty AND → true,
-	// empty OR → false). evalLeafFilter returns false when Source/Path are
-	// also empty, so a non-empty Op with an unset Source/Path won't false-
-	// positive into the "match everything" branch.
-	if f.Op == "" {
-		return true
-	}
-	return evalFilter(f, data, meta)
-}
-
-func evalFilter(f Filter, data []byte, meta EntityMeta) bool {
-	switch f.Op {
-	case FilterAnd:
-		for _, c := range f.Children {
-			if !evalFilter(c, data, meta) {
-				return false
-			}
-		}
-		return true
-	case FilterOr:
-		for _, c := range f.Children {
-			if evalFilter(c, data, meta) {
-				return true
-			}
-		}
-		return false
-	}
-	return evalLeafFilter(f, data, meta)
-}
-
-// evalLeafFilter routes a single leaf through the type-directed EvalLeaf kernel
-// (eval_leaf.go), the one authoritative comparator shared with the search
-// boundary. It resolves the stored value as a gjson.Result (preserving its
-// precise numeric/temporal Raw form), normalizes the operand(s) to Cloud
-// .asText() string form, and stamps the leaf's declared model types so the
-// kernel can do type-directed comparison.
-//
-// IS_NULL / NOT_NULL are routed through the kernel too — it decides them purely
-// from the stored Result's presence, uniformly for data and (bridged) meta.
-//
-// The operand was already validated at the search boundary, so a per-row expand
-// error (which only happens on a genuinely malformed operand) is treated as a
-// non-match rather than propagated: matched && err == nil.
-func evalLeafFilter(f Filter, data []byte, meta EntityMeta) bool {
-	stored := filterStoredResult(f, data, meta)
-	matched, err := EvalLeafString(f.Op, OperandString(f.Value), valuesToStrings(f.Values), f.Declared, stored)
-	return matched && err == nil
-}
-
-// filterStoredResult resolves the stored value referenced by the leaf as a
-// gjson.Result, keeping its .Raw so the kernel can classify numerics/temporals
-// precisely. A missing data path yields a non-existent Result (Exists()==false);
-// SourceMeta values are bridged through metaGjsonResult. In both cases the
-// kernel handles absent/null uniformly.
-func filterStoredResult(f Filter, data []byte, meta EntityMeta) gjson.Result {
-	if f.Source == SourceMeta {
-		r, _ := metaGjsonResult(f.Path, meta)
-		return r
-	}
-	return gjson.GetBytes(data, f.Path)
-}
+// The helpers below are what the prepared evaluator (prepared_filter.go)
+// uses; the sqlite/postgres post-filter steps reach them transitively
+// through spi.Prepare/Match rather than calling them directly. The one
+// direct external sharer of OperandString is the consuming repo's
+// internal/match/operators.go. Drift between them would silently change
+// grouped-stats results across backends; TestSqliteEvaluateFilter_DelegatesToKernel
+// in cyoda-go pins the contract across the module boundary.
 
 // metaGjsonResult bridges a SourceMeta value into a gjson.Result so the kernel
 // classifies it uniformly with data values. It reuses extractFilterMetaValue for

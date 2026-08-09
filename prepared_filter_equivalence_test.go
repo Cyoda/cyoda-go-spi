@@ -8,8 +8,22 @@ package spi
 // answering the old way after the originals are gone, or the gate stops
 // guarding anything the moment the deletion lands.
 //
-// Do not "simplify" this by calling live code. Do not update it when the live
-// evaluator changes. If it and Prepare disagree, the live code is wrong.
+// What is frozen: the tree walk, the stored-value resolution, the fused
+// expand-and-evaluate call, and the fast path — everything this change
+// deleted from the live tree. Do not make this delegate to Prepare/Match;
+// that would make the gate compare live code to itself.
+//
+// What is deliberately NOT frozen: ExpandLeaf and EvalLeaf, plus the shared
+// helpers (OperandString, valuesToStrings, metaGjsonResult, cmpResult,
+// ParseDecimal) below it in the call graph. Both the frozen side and Prepare
+// call the same live copies of these — freezing them would mean freezing the
+// ~500-line kernel this change does not touch.
+//
+// What the agreement proves: the hoist. The frozen side calls ExpandLeaf once
+// per row; Prepare calls it once per query. If the two still answer alike
+// across the corpus, the hoist changed no answers. It does NOT guard the
+// kernel itself — a change to ExpandLeaf or EvalLeaf moves both sides
+// identically and this gate stays green regardless.
 
 import (
 	"math/rand"
@@ -174,6 +188,9 @@ var genDocs = []string{
 }
 
 func genLeaf(r *rand.Rand) Filter {
+	if r.Intn(20) == 0 {
+		return Filter{} // zero-Op child: a leaf that never matches
+	}
 	f := Filter{Op: genOps[r.Intn(len(genOps))]}
 	if r.Intn(4) == 0 {
 		f.Source = SourceMeta
@@ -232,11 +249,19 @@ func genMeta(r *rand.Rand) EntityMeta {
 // reproducible. The committed defaults ARE the standing gate; -count alone
 // widens nothing, because a fixed seed regenerates the same corpus.
 func equivCases() int  { return envInt("SPI_EQUIV_CASES", 200000) }
-func equivSeed() int64 { return int64(envInt("SPI_EQUIV_SEED", 0x30C0DE)) }
+func equivSeed() int64 { return int64(envIntFrom(0, "SPI_EQUIV_SEED", 0x30C0DE)) }
 
 func envInt(key string, def int) int {
+	return envIntFrom(1, key, def)
+}
+
+// envIntFrom parses key as a base-10 int, accepting any value >= min. Passing
+// min=0 lets a caller distinguish "unset" from "explicitly zero" — needed for
+// SPI_EQUIV_SEED, where 0 is a valid seed someone might set to reproduce a
+// specific run, not a sentinel for "use the default".
+func envIntFrom(min int, key string, def int) int {
 	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		if n, err := strconv.Atoi(v); err == nil && n >= min {
 			return n
 		}
 	}

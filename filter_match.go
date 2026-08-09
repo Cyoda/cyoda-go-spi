@@ -10,12 +10,13 @@ import (
 
 // --- Filter operand and meta-value plumbing ---
 //
-// The helpers below are what the prepared evaluator (prepared_filter.go) and
-// the sqlite/postgres post-filter steps share, so an in-process evaluation
-// produces bit-identical results to a SQL backend's post-filter step. Drift
-// between them would silently change grouped-stats results across backends;
-// TestSqliteEvaluateFilter_DelegatesToKernel in cyoda-go pins the contract
-// across the module boundary.
+// The helpers below are what the prepared evaluator (prepared_filter.go)
+// uses; the sqlite/postgres post-filter steps reach them transitively
+// through spi.Prepare/Match rather than calling them directly. The one
+// direct external sharer of OperandString is the consuming repo's
+// internal/match/operators.go. Drift between them would silently change
+// grouped-stats results across backends; TestSqliteEvaluateFilter_DelegatesToKernel
+// in cyoda-go pins the contract across the module boundary.
 
 // metaGjsonResult bridges a SourceMeta value into a gjson.Result so the kernel
 // classifies it uniformly with data values. It reuses extractFilterMetaValue for

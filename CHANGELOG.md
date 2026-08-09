@@ -14,9 +14,11 @@ MAINTAINING.md.
 
 ### Breaking
 
-- **`MatchFilter`, `EvalLeafString`, `evalLeafFast` and `Expansion.Void` are removed.**
+- **`MatchFilter`, `EvalLeafString` and `Expansion.Void` are removed.**
   Filter evaluation is now a prepare/execute split: build a `PreparedFilter` once
   per query with `Prepare(Filter)`, then call `Match(data, meta)` once per row.
+  (The unexported `evalLeafFast` is deleted too, but it was never reachable from
+  outside this module.)
 
   Migration:
 
@@ -41,6 +43,11 @@ MAINTAINING.md.
   A leaf-level `EvalLeafString` replacement is deliberately not provided: leaving
   one would let a caller keep compiling per row while only the tree walk was forced
   open. Use `ExpandLeaf` once and `EvalLeaf` per row if you need leaf-level control.
+
+  `Expansion.Void` is removed with no replacement. It existed for the
+  group-combining case (OR-drop / AND-annihilate), which `Prepare` now subsumes
+  internally. Anyone needing an unsatisfiable-leaf signal of their own should
+  raise it — it belongs as a `PreparedFilter`-level accessor, not on `Expansion`.
 
   No one-release `// Deprecated:` grace period: removal is the mechanism that
   forces each caller to re-site the preparation, and a shim would silently preserve

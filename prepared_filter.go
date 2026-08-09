@@ -49,8 +49,9 @@ type preparedNode struct {
 // rejection is a cross-backend contract change and is deliberately not done
 // here.
 //
-// Prepare consumes f. It does not retain a reference to it, and it is not a
-// defence against a caller mutating f afterwards — no such defence is owed.
+// Prepare copies everything it needs out of f. It does not retain a
+// reference to it, so mutating f afterwards does not affect the returned
+// value.
 func Prepare(f Filter) PreparedFilter {
 	// Root-only match-all. This check must NOT move into prepareNode: a
 	// zero-Op CHILD is a leaf that never matches, and hoisting the check into

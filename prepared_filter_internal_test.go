@@ -55,9 +55,10 @@ func TestPrepare_CompilesRegexExactlyOncePerQuery(t *testing.T) {
 	}
 }
 
-// TestEvalLeaf_UsesStoredRawForRegex guards the indirection itself: swapping
-// compileRegex must not change what a pattern leaf answers.
-func TestEvalLeaf_UsesStoredRawForRegex(t *testing.T) {
+// TestEvalLeaf_AnchoredPatternMatchesWholeValue asserts that an anchored
+// regex pattern leaf matches a value equal to the whole pattern and rejects a
+// value that only matches a prefix of it.
+func TestEvalLeaf_AnchoredPatternMatchesWholeValue(t *testing.T) {
 	exp, err := ExpandLeaf(FilterMatchesRegex, "A.*e", nil, []DataType{String})
 	if err != nil {
 		t.Fatalf("ExpandLeaf: %v", err)
@@ -67,5 +68,24 @@ func TestEvalLeaf_UsesStoredRawForRegex(t *testing.T) {
 	}
 	if EvalLeaf(exp, gjson.Parse(`"Alicia"`)) {
 		t.Error("EvalLeaf = true for a non-matching value, want false")
+	}
+}
+
+// TestPrepare_UnexpandableLeafMarkedUnexpanded pins the explicit
+// !n.expanded guard in preparedNode.match. It is not redundant with the
+// zero-Expansion happening to fall through EvalLeaf's switch to false: that
+// fallthrough is an accident of kindUnary being the zero expKind (iota's
+// first value). A zero Expansion therefore enters EvalLeaf's unary branch
+// with an empty op, matches neither FilterIsNull nor FilterNotNull, and
+// falls through to false — not because it was recognised as unexpandable.
+// If expKind's zero value ever changes, or EvalLeaf's unary branch changes,
+// the accident stops holding and only the explicit flag keeps an
+// unexpandable leaf a never-match. Do not delete this guard on the grounds
+// that the whole suite passes without it — it does today only by that
+// accident.
+func TestPrepare_UnexpandableLeafMarkedUnexpanded(t *testing.T) {
+	p := Prepare(Filter{Op: FilterEq, Source: SourceData, Path: "n", Value: "abc", Declared: []DataType{Integer}})
+	if p.root.expanded {
+		t.Error("a leaf whose ExpandLeaf errored must be marked unexpanded, not left to a zero-Expansion fallthrough")
 	}
 }

@@ -12,6 +12,18 @@ MAINTAINING.md.
 
 ## [Unreleased]
 
+### Added
+
+- **Conformance: `GetSubmitTime` now requires tenant isolation.** Two new
+  `spitest` subtests: `TxStateErrors/TenantMismatchOnGetSubmitTime` (a caller
+  from another tenant resolving a txID — in-flight or committed — must get an
+  error wrapping `ErrTxTenantMismatch`, never the submit time or the
+  transaction's lifecycle state) and `TxStateErrors/NotFoundOnGetSubmitTime`
+  (a txID that exists in no tenant must wrap `ErrTxNotFound`). `GetSubmitTime`
+  was the only tx-lifecycle method without the tenant gate every other method
+  already enforces; backends that ignore the `ctx` parameter in their
+  implementation will fail the new subtests until they add the check.
+
 ### Breaking
 
 - **`MatchFilter`, `EvalLeafString` and `Expansion.Void` are removed.**

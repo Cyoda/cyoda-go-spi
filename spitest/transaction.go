@@ -48,6 +48,8 @@ func runTransactionSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "TxStateErrors/OpAfterRollback", testTxStateOpAfterRollback)
 	runSubtest(t, h, tracker, "TxStateErrors/TenantMismatchOnJoin", testTxStateTenantMismatchOnJoin)
 	runSubtest(t, h, tracker, "TxStateErrors/TenantMismatchOnCommit", testTxStateTenantMismatchOnCommit)
+	runSubtest(t, h, tracker, "TxStateErrors/TenantMismatchOnGetSubmitTime", testTxStateTenantMismatchOnGetSubmitTime)
+	runSubtest(t, h, tracker, "TxStateErrors/NotFoundOnGetSubmitTime", testTxStateNotFoundOnGetSubmitTime)
 	runSubtest(t, h, tracker, "TxStateErrors/SavepointNotFound", testTxStateSavepointNotFound)
 	runSubtest(t, h, tracker, "Attribution/OriginCaptureAndJoin", testTxOriginCaptureAndJoin)
 	runSubtest(t, h, tracker, "Attribution/OriginAmbientRoot", testTxOriginAmbientRoot)
@@ -355,6 +357,54 @@ func testTxStateTenantMismatchOnCommit(t *testing.T, h Harness) {
 	require.Error(t, err, "tenant B Commit of tenant A tx must fail")
 	require.True(t, errors.Is(err, spi.ErrTxTenantMismatch),
 		"cross-tenant Commit must wrap ErrTxTenantMismatch; got: %v", err)
+}
+
+// testTxStateTenantMismatchOnGetSubmitTime verifies that tenant B cannot
+// resolve the submit time of a transaction begun by tenant A — in either
+// lifecycle phase. While the tx is in flight the lookup must not disclose
+// "exists but not yet committed", and after Commit it must not disclose
+// the submit timestamp; both phases wrap ErrTxTenantMismatch. The owning
+// tenant's own lookup keeps working after Commit.
+func testTxStateTenantMismatchOnGetSubmitTime(t *testing.T, h Harness) {
+	ctxA := tenantContext(h.NewTenant())
+	ctxB := tenantContext(h.NewTenant())
+
+	tmA, err := h.Factory.TransactionManager(ctxA)
+	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tmA, ctxA)
+
+	tmB, err := h.Factory.TransactionManager(ctxB)
+	require.NoError(t, err)
+
+	// Phase 1: tx in flight.
+	_, err = tmB.GetSubmitTime(ctxB, txID)
+	require.Error(t, err, "tenant B GetSubmitTime of tenant A's in-flight tx must fail")
+	require.True(t, errors.Is(err, spi.ErrTxTenantMismatch),
+		"cross-tenant GetSubmitTime (in-flight tx) must wrap ErrTxTenantMismatch; got: %v", err)
+
+	// Phase 2: tx committed.
+	require.NoError(t, tmA.Commit(txCtx, txID))
+	_, err = tmB.GetSubmitTime(ctxB, txID)
+	require.Error(t, err, "tenant B GetSubmitTime of tenant A's committed tx must fail")
+	require.True(t, errors.Is(err, spi.ErrTxTenantMismatch),
+		"cross-tenant GetSubmitTime (committed tx) must wrap ErrTxTenantMismatch; got: %v", err)
+
+	// Sanity: the owning tenant still resolves the submit time.
+	_, err = tmA.GetSubmitTime(ctxA, txID)
+	require.NoError(t, err, "owning tenant's GetSubmitTime must keep working")
+}
+
+// testTxStateNotFoundOnGetSubmitTime verifies that a lookup of a txID that
+// exists in no tenant wraps ErrTxNotFound.
+func testTxStateNotFoundOnGetSubmitTime(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+
+	_, err = tm.GetSubmitTime(ctx, "no-such-tx-"+newID())
+	require.Error(t, err, "GetSubmitTime with unknown txID must fail")
+	require.True(t, errors.Is(err, spi.ErrTxNotFound),
+		"unknown txID must wrap ErrTxNotFound; got: %v", err)
 }
 
 // testTxStateSavepointNotFound verifies that RollbackToSavepoint with an

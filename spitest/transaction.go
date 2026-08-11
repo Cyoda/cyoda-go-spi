@@ -401,7 +401,10 @@ func testTxStateNotFoundOnGetSubmitTime(t *testing.T, h Harness) {
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 
-	_, err = tm.GetSubmitTime(ctx, "no-such-tx-"+newID())
+	// A valid-but-unknown v1 UUID: backends that store txIDs in typed
+	// columns (e.g. Cassandra timeuuid) parse the ID before looking it up,
+	// so a malformed string would test format validation, not not-found.
+	_, err = tm.GetSubmitTime(ctx, newID())
 	require.Error(t, err, "GetSubmitTime with unknown txID must fail")
 	require.True(t, errors.Is(err, spi.ErrTxNotFound),
 		"unknown txID must wrap ErrTxNotFound; got: %v", err)

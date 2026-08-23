@@ -47,8 +47,11 @@ type AsyncSearchStore interface {
 	GetResultIDs(ctx context.Context, jobID string, offset, limit int) (entityIDs []string, total int, err error)
 	DeleteJob(ctx context.Context, jobID string) error
 	ReapExpired(ctx context.Context, ttl time.Duration) (int, error)
-	// Cancel marks the job as CANCELLED. Idempotent: cancelling a job
-	// already in a terminal state returns nil. Cancelling a non-existent
-	// job returns ErrNotFound.
-	Cancel(ctx context.Context, jobID string) error
+	// Cancel marks the job CANCELLED and stamps the given finishTime on the
+	// job it transitions. Idempotent: cancelling a job already in a
+	// terminal state returns nil AND does not overwrite the existing finish
+	// time. Cancelling a non-existent job returns ErrNotFound. The finish
+	// time is caller-supplied so all backends record the same instant — the
+	// engine is the single clock.
+	Cancel(ctx context.Context, jobID string, finishTime time.Time) error
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 	"testing"
 	"time"
 
@@ -35,10 +36,12 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "GetAsAt/BeforeAnyWrite", testEntityGetAsAtBefore)
 	runSubtest(t, h, tracker, "GetAllAsAt", testEntityGetAllAsAt)
 	runSubtest(t, h, tracker, "GetVersionMetadata/Ordering", testEntityVersionMetadataOrdering)
+	runSubtest(t, h, tracker, "GetVersionMetadata/EmptyWindowIsNotAnError", testEntityGetVersionMetadataEmptyWindowIsNotAnError)
 
 	// Paging + purposed history-read group (S5)
 	runSubtest(t, h, tracker, "GetPage/OrderAndBounds", testEntityGetPageOrderAndBounds)
 	runSubtest(t, h, tracker, "GetPage/AsAtSnapshot", testEntityGetPageAsAtSnapshot)
+	runSubtest(t, h, tracker, "GetPage/InTxWithStagedDeletes", testEntityGetPageInTxWithStagedDeletes)
 	runSubtest(t, h, tracker, "GetVersionByTransaction/EarliestWins", testEntityGetVersionByTransactionEarliestWins)
 	runSubtest(t, h, tracker, "GetVersionByTransaction/DeletedNeverMatches", testEntityGetVersionByTransactionDeletedNeverMatches)
 	runSubtest(t, h, tracker, "GetVersionByTransaction/EmptyTxID", testEntityGetVersionByTransactionEmptyTxID)
@@ -564,6 +567,44 @@ func testEntityVersionMetadataOrdering(t *testing.T, h Harness) {
 	}
 }
 
+// testEntityGetVersionMetadataEmptyWindowIsNotAnError pins the intended
+// contract (see GetVersionMetadata's doc comment): ErrNotFound is returned
+// ONLY when entityID has no version history at all. An entity that EXISTS
+// but whose versions all fall outside the requested From/Until window must
+// come back as an empty slice with a nil error — never ErrNotFound. Two
+// real backends diverged here: one returned ErrNotFound for an existing
+// entity whose window excluded all its versions; the other correctly
+// returned (empty slice, nil). A buggy backend conflating "no rows in the
+// window" with "no such entity" fails the first assertion below.
+func testEntityGetVersionMetadataEmptyWindowIsNotAnError(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	id := newID()
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = es.Save(txCtx, newEntity(t, "m-vmw", id, map[string]any{}))
+		require.NoError(t, err)
+	})
+
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+
+	// A window entirely in the future excludes every version this entity
+	// actually has. The entity still EXISTS, so this must come back
+	// empty+nil, never ErrNotFound. Derived from h.Now() rather than a
+	// wall-clock literal so it stays correct under any backend's clock.
+	future := h.Now().UTC().Add(365 * 24 * time.Hour)
+	metas, err := es.GetVersionMetadata(ctx, id, spi.VersionMetadataOptions{From: &future})
+	require.NoError(t, err, "an existing entity queried with an empty window must not return an error")
+	require.Empty(t, metas, "a window excluding all of an existing entity's versions must yield an empty slice")
+
+	// A genuinely missing entity (no version history at all) must still
+	// return ErrNotFound — the window-vs-missing-entity distinction is the
+	// whole point of this contract.
+	_, err = es.GetVersionMetadata(ctx, newID(), spi.VersionMetadataOptions{})
+	require.ErrorIs(t, err, spi.ErrNotFound, "an entity with no version history at all must return ErrNotFound")
+}
+
 // testEntityGetPageOrderAndBounds seeds 5 entities and checks that
 // GetPage(0,4) ≡ GetPage(0,2) ++ GetPage(2,2) under h.IDOrder, that the page
 // itself is h.IDOrder-ascending, and that limit<1 / offset<0 are contract
@@ -681,6 +722,144 @@ func testEntityGetPageAsAtSnapshot(t *testing.T, h Harness) {
 			"the buffered, uncommitted entity must never appear on an asAt page")
 	}
 	require.NoError(t, tm.Rollback(txCtx, txID))
+}
+
+// entityIDs extracts Meta.ID from a GetPage/GetAll result in order.
+func entityIDs(es []*spi.Entity) []string {
+	ids := make([]string, len(es))
+	for i, e := range es {
+		ids[i] = e.Meta.ID
+	}
+	return ids
+}
+
+// testEntityGetPageInTxWithStagedDeletes reproduces a Critical bug: a
+// backend that prefetches a BOUNDED committed prefix (`LIMIT offset+limit`)
+// and then merges the ambient transaction's overlay silently under-fills or
+// empties the page, because the merge skips committed rows whose IDs are
+// staged for deletion without ever extending the prefetch to compensate —
+// the scan runs off the end of the artificially bounded prefix. Reproduced
+// on one backend: 10 committed entities, deletes staged on the first 5
+// inside the ambient tx, GetPage(limit=5, offset=0) returned 0 rows instead
+// of the correct next 5.
+//
+// Three independent entity groups exercise three shapes of the defect, all
+// read through ONE shared ambient transaction:
+//
+//	(a) deletes exactly fill the head of the requested page — the reported
+//	    repro: a naive `LIMIT offset+limit` prefetch returns nothing left
+//	    to merge.
+//	(b) deletes span across the naive prefetch boundary: the deleted block
+//	    starts inside the window a naive `LIMIT offset+limit` would fetch
+//	    and extends past it, so the naive fetch under-fills even though
+//	    most of the deleted rows lie outside the requested page.
+//	(c) the same spanning shape as (b), with offset > 0.
+//
+// A fourth check, layered on group (a), confirms a staged ADD inside the
+// same tx still appears in the merged page at its correct h.IDOrder
+// position alongside the delete-thinned committed survivors — complementing
+// (not duplicating) the existing add-only overlay coverage
+// (testIterableOverlaySnapshotAtOpen), which asserts add-visibility but not
+// page position.
+func testEntityGetPageInTxWithStagedDeletes(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+
+	// idOrderSort sorts ids in place by h.IDOrder — used only where the
+	// expected order cannot be read directly off an already-ordered
+	// GetPage result (i.e. once a freshly-generated ID is mixed in).
+	idOrderSort := func(ids []string) {
+		sort.Slice(ids, func(i, j int) bool { return h.IDOrder(ids[i], ids[j]) < 0 })
+	}
+
+	// seedOrdered commits n freshly-created entities under mref and returns
+	// their IDs in canonical h.IDOrder-ascending order (read back via a
+	// committed-only GetPage, per GetPage's documented canonical-order
+	// contract).
+	seedOrdered := func(mref spi.ModelRef, n int) []string {
+		t.Helper()
+		withTx(t, h, ctx, func(txCtx context.Context) {
+			es, err := h.Factory.EntityStore(txCtx)
+			require.NoError(t, err)
+			for i := 0; i < n; i++ {
+				_, err := es.Save(txCtx, newEntity(t, mref.EntityName, newID(), map[string]any{"i": i}))
+				require.NoError(t, err)
+			}
+		})
+		es, err := h.Factory.EntityStore(ctx)
+		require.NoError(t, err)
+		page, err := es.GetPage(ctx, mref, n, 0, nil)
+		require.NoError(t, err)
+		require.Len(t, page, n)
+		return entityIDs(page)
+	}
+
+	mrefA := spi.ModelRef{EntityName: "m-page-txdel-a", ModelVersion: "1"}
+	mrefB := spi.ModelRef{EntityName: "m-page-txdel-b", ModelVersion: "1"}
+	mrefC := spi.ModelRef{EntityName: "m-page-txdel-c", ModelVersion: "1"}
+
+	orderA := seedOrdered(mrefA, 10)
+	orderB := seedOrdered(mrefB, 10)
+	orderC := seedOrdered(mrefC, 10)
+
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
+	esTx, err := h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+
+	// (a) deletes exactly fill the head of the requested page.
+	for _, id := range orderA[:5] {
+		require.NoError(t, esTx.Delete(txCtx, id))
+	}
+	gotA, err := esTx.GetPage(txCtx, mrefA, 5, 0, nil)
+	require.NoError(t, err)
+	require.Equal(t, orderA[5:10], entityIDs(gotA),
+		"GetPage must return the full next page in canonical order when the entire requested page's committed prefix is staged-deleted")
+
+	// Layer a staged ADD onto the same overlay and confirm it appears at
+	// its correct h.IDOrder position once merged with the delete-thinned
+	// committed survivors.
+	bufferedID := newID()
+	_, err = esTx.Save(txCtx, newEntity(t, mrefA.EntityName, bufferedID, map[string]any{"buffered": true}))
+	require.NoError(t, err)
+	survivorsPlusAdd := append(append([]string{}, orderA[5:10]...), bufferedID)
+	idOrderSort(survivorsPlusAdd)
+	gotAWithAdd, err := esTx.GetPage(txCtx, mrefA, 6, 0, nil)
+	require.NoError(t, err)
+	require.Equal(t, survivorsPlusAdd, entityIDs(gotAWithAdd),
+		"a staged ADD inside the same tx must appear in the merged page at its correct h.IDOrder position, alongside the delete-thinned committed survivors")
+
+	// (b) deletes span across the naive `LIMIT offset+limit` prefetch
+	// boundary: orderB[3:8] (5 rows) are deleted, straddling the boundary a
+	// naive backend would compute for GetPage(limit=4, offset=0) — a
+	// `LIMIT 4` prefetch covers only orderB[0:4], of which just orderB[3]
+	// falls inside; the other 4 deletes (orderB[4:8]) lie entirely outside
+	// that naive window, so a backend that never looks past it silently
+	// under-fills the page even though most deletes aren't even requested.
+	for _, id := range orderB[3:8] {
+		require.NoError(t, esTx.Delete(txCtx, id))
+	}
+	survivorsB := append(append([]string{}, orderB[0:3]...), orderB[8:10]...)
+	gotB, err := esTx.GetPage(txCtx, mrefB, 4, 0, nil)
+	require.NoError(t, err)
+	require.Equal(t, survivorsB[:4], entityIDs(gotB),
+		"GetPage must extend past a naive offset+limit prefetch boundary when staged deletes span it, returning the full next page")
+
+	// (c) the same spanning shape as (b), with offset > 0 — a naive
+	// `LIMIT offset+limit` = `LIMIT 4` prefetch (orderC[0:4], one deleted)
+	// leaves only 2 survivors after applying offset=1, one short of the
+	// requested 3; the correct 3rd row (orderC[8]) lies well past the
+	// naive window.
+	for _, id := range orderC[3:8] {
+		require.NoError(t, esTx.Delete(txCtx, id))
+	}
+	survivorsC := append(append([]string{}, orderC[0:3]...), orderC[8:10]...)
+	gotC, err := esTx.GetPage(txCtx, mrefC, 3, 1, nil)
+	require.NoError(t, err)
+	require.Equal(t, survivorsC[1:4], entityIDs(gotC),
+		"GetPage must return the correct full page when offset > 0 and staged deletes span the naive prefetch boundary")
+
+	require.NoError(t, tm.Commit(txCtx, txID))
 }
 
 // testEntityGetVersionByTransactionEarliestWins verifies that when one

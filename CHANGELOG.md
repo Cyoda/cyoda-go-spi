@@ -121,7 +121,7 @@ MAINTAINING.md.
   already enforces; backends that ignore the `ctx` parameter in their
   implementation will fail the new subtests until they add the check.
 
-- **Conformance: 31 new `spitest` subtests are pure additions, not
+- **Conformance: 33 new `spitest` subtests are pure additions, not
   renames — no `Harness.Skip` key needs to change.** `AsyncSearch` gains 15
   (`Epoch/InitialisedToOne`, `Epoch/FencedWrites`, `Terminal/WriteOnce`,
   `Claim/StaleClaimed`, `Claim/FreshNotClaimed`, `Claim/NilHeartbeatBaseline`,
@@ -130,11 +130,19 @@ MAINTAINING.md.
   `GetResultIDs/DegenerateInputs`, `GetResultIDs/NonTerminalPartial`,
   `UpdateStatus/MissingIsNotFound`, `UpdateStatus/ZeroFinishTimeAbsent`,
   `Heartbeat/Semantics`) covering the epoch-fenced job surface below.
-  `Entity` gains 5 (`GetPage/OrderAndBounds`, `GetPage/AsAtSnapshot`,
-  `GetVersionByTransaction/EarliestWins`,
+  `Entity` gains 7 (`GetPage/OrderAndBounds`, `GetPage/AsAtSnapshot`,
+  `GetPage/InTxWithStagedDeletes`, `GetVersionByTransaction/EarliestWins`,
   `GetVersionByTransaction/DeletedNeverMatches`,
-  `GetVersionByTransaction/EmptyTxID`) covering `GetPage`/
-  `GetVersionByTransaction` above. A wholly new `Iterable` group (11
+  `GetVersionByTransaction/EmptyTxID`,
+  `GetVersionMetadata/EmptyWindowIsNotAnError`) covering `GetPage`/
+  `GetVersionByTransaction` above, plus two conformance-coverage gaps found
+  post-hoc: `GetPage/InTxWithStagedDeletes` pins the merge of an ambient
+  transaction's staged deletes with a bounded committed prefetch (a real
+  Critical bug on one backend silently under-filled or emptied the page),
+  and `GetVersionMetadata/EmptyWindowIsNotAnError` pins that an empty
+  `From`/`Until` window on an existing entity yields an empty slice and a
+  nil error, never `ErrNotFound` (two backends had diverged on this). A
+  wholly new `Iterable` group (11
   subtests: `Unordered/YieldsAllMatches`, `Ordered/EntityID`,
   `Ordered/UserFieldWithTieBreak`, `Ordered/InTxErrors`,
   `Residual/AppliedInNext`, `Ctx/CancelObserved`, `Err/Sticky`,

@@ -139,6 +139,10 @@ type EntityStore interface {
 	// a deliberate divergence from GetPage's limit>=1 requirement, since
 	// a single entity's history can never be an unbounded model-wide scan.
 	//
+	// Returns ErrNotFound ONLY when entityID has no version history at all;
+	// an existing entity whose versions all fall outside opts.From/opts.Until
+	// yields an empty slice and a nil error, never ErrNotFound.
+	//
 	// Deleted is true only on the DELETED tombstone row, and Version is
 	// populated on every returned row, including the tombstone.
 	GetVersionMetadata(ctx context.Context, entityID string, opts VersionMetadataOptions) ([]EntityVersionMeta, error)

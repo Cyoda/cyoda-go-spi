@@ -45,8 +45,12 @@ type EntityVersion struct {
 	Version    int64
 	Deleted    bool
 	// AttributedKind is the kind of the attributed User above; empty on
-	// legacy rows. Populated independently of Entity — Entity is nil for
-	// DELETED versions on some backends, but attribution must not be.
+	// legacy rows. Populated independently of Entity — GetVersionByTransaction,
+	// EntityVersion's sole producer, contractually never returns a DELETED
+	// tombstone (see its doc comment), so Entity is populated on every
+	// EntityVersion in circulation today; AttributedKind is nonetheless
+	// stamped as an independent field rather than derived from Entity, for
+	// symmetry with EntityVersionMeta.
 	AttributedKind PrincipalKind
 	// Executor is the actual caller that performed the change, independent
 	// of attribution. Populated independently of Entity for the same reason

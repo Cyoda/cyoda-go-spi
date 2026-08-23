@@ -101,61 +101,6 @@ MAINTAINING.md.
   `GetPage`/`GetVersionByTransaction` subtests if the backend needs to skip
   them.
 
-### Added
-
-- **`MergeOrdered` helper.** A pure pull-stream merge of an already-ordered
-  committed source with a sorted overlay (adds), excluding deleted ids: on
-  an equal-ID collision the overlay wins and the committed duplicate is
-  consumed without a second yield; an error from the committed source is
-  propagated once already-fetched entities have been yielded and is sticky
-  thereafter. Pairs with `Iterable.Iterate` the way `MergeBounded` pairs
-  with `Searcher.Search`.
-
-- **Conformance: `GetSubmitTime` now requires tenant isolation.** Two new
-  `spitest` subtests: `TxStateErrors/TenantMismatchOnGetSubmitTime` (a caller
-  from another tenant resolving a txID — in-flight or committed — must get an
-  error wrapping `ErrTxTenantMismatch`, never the submit time or the
-  transaction's lifecycle state) and `TxStateErrors/NotFoundOnGetSubmitTime`
-  (a txID that exists in no tenant must wrap `ErrTxNotFound`). `GetSubmitTime`
-  was the only tx-lifecycle method without the tenant gate every other method
-  already enforces; backends that ignore the `ctx` parameter in their
-  implementation will fail the new subtests until they add the check.
-
-- **Conformance: 33 new `spitest` subtests are pure additions, not
-  renames — no `Harness.Skip` key needs to change.** `AsyncSearch` gains 15
-  (`Epoch/InitialisedToOne`, `Epoch/FencedWrites`, `Terminal/WriteOnce`,
-  `Claim/StaleClaimed`, `Claim/FreshNotClaimed`, `Claim/NilHeartbeatBaseline`,
-  `Claim/ConcurrentDisjoint`, `Claim/TerminalNeverClaimed`,
-  `ClearResults/Idempotent`, `SaveResults/ChunkSeqContinuity`,
-  `GetResultIDs/DegenerateInputs`, `GetResultIDs/NonTerminalPartial`,
-  `UpdateStatus/MissingIsNotFound`, `UpdateStatus/ZeroFinishTimeAbsent`,
-  `Heartbeat/Semantics`) covering the epoch-fenced job surface below.
-  `Entity` gains 7 (`GetPage/OrderAndBounds`, `GetPage/AsAtSnapshot`,
-  `GetPage/InTxWithStagedDeletes`, `GetVersionByTransaction/EarliestWins`,
-  `GetVersionByTransaction/DeletedNeverMatches`,
-  `GetVersionByTransaction/EmptyTxID`,
-  `GetVersionMetadata/EmptyWindowIsNotAnError`) covering `GetPage`/
-  `GetVersionByTransaction` above, plus two conformance-coverage gaps found
-  post-hoc: `GetPage/InTxWithStagedDeletes` pins the merge of an ambient
-  transaction's staged deletes with a bounded committed prefetch (a real
-  Critical bug on one backend silently under-filled or emptied the page),
-  and `GetVersionMetadata/EmptyWindowIsNotAnError` pins that an empty
-  `From`/`Until` window on an existing entity yields an empty slice and a
-  nil error, never `ErrNotFound` (two backends had diverged on this). A
-  wholly new `Iterable` group (11
-  subtests: `Unordered/YieldsAllMatches`, `Ordered/EntityID`,
-  `Ordered/UserFieldWithTieBreak`, `Ordered/InTxErrors`,
-  `Residual/AppliedInNext`, `Ctx/CancelObserved`, `Err/Sticky`,
-  `Close/Idempotent`, `PIT/SnapshotVariant`, `Overlay/SnapshotAtOpen`,
-  `TrackingRead/Gating`) exercises the optional `spi.Iterable` interface,
-  auto-skipping via type assertion on a backend that doesn't implement it —
-  the same pattern `Searcher` already uses, so it needs no `Harness.Skip`
-  entry either. A backend passing today keeps passing untouched; one that
-  doesn't yet implement the exercised surface sees new failures until it
-  does.
-
-### Breaking
-
 - **`AsyncSearchStore.Cancel` takes a caller-supplied `finishTime`.**
   `Cancel(ctx context.Context, jobID string) error` is now
   `Cancel(ctx context.Context, jobID string, finishTime time.Time) error`.
@@ -212,6 +157,27 @@ MAINTAINING.md.
   reject `SaveResults`, since liveness and reclaim are meaningless when a
   store owns execution outright.
 
+- **Three `AsyncSearchStore` job-record contract fixes are now normative,
+  each with its own conformance subtest.** These are new requirements that
+  will fail conformance on implementations that pass today:
+
+  - `GetResultIDs(ctx, jobID, offset, limit)` MUST return an error — never
+    panic, never silently clamp — when `offset < 0` or `limit < 1`.
+    (`spitest`: `AsyncSearch/GetResultIDs/DegenerateInputs`.)
+  - `UpdateJobStatus` against a `jobID` with no job row MUST return
+    `ErrNotFound`, not a generic or nil error.
+    (`spitest`: `AsyncSearch/UpdateStatus/MissingIsNotFound`.)
+  - A zero-value `finishTime` passed to `UpdateJobStatus` MUST be stored as
+    absent (`SearchJob.FinishTime == nil` on readback), never persisted as a
+    real zero-value timestamp.
+    (`spitest`: `AsyncSearch/UpdateStatus/ZeroFinishTimeAbsent`.)
+
+  Migration: audit each of the three call sites — degenerate pagination
+  input, an update against an already-deleted or never-created job, and a
+  status update with no finish time set — and bring the implementation in
+  line before upgrading; the corresponding `spitest` subtest will fail
+  otherwise.
+
 - **`MatchFilter`, `EvalLeafString` and `Expansion.Void` are removed.**
   Filter evaluation is now a prepare/execute split: build a `PreparedFilter` once
   per query with `Prepare(Filter)`, then call `Match(data, meta)` once per row.
@@ -252,6 +218,66 @@ MAINTAINING.md.
   the defect.
 
 ### Added
+
+- **`MergeOrdered` helper.** A pure pull-stream merge of an already-ordered
+  committed source with a sorted overlay (adds), excluding deleted ids: on
+  an equal-ID collision the overlay wins and the committed duplicate is
+  consumed without a second yield; an error from the committed source is
+  propagated once already-fetched entities have been yielded and is sticky
+  thereafter. Pairs with `Iterable.Iterate` the way `MergeBounded` pairs
+  with `Searcher.Search`.
+
+- **Conformance: `GetSubmitTime` now requires tenant isolation.** Two new
+  `spitest` subtests: `TxStateErrors/TenantMismatchOnGetSubmitTime` (a caller
+  from another tenant resolving a txID — in-flight or committed — must get an
+  error wrapping `ErrTxTenantMismatch`, never the submit time or the
+  transaction's lifecycle state) and `TxStateErrors/NotFoundOnGetSubmitTime`
+  (a txID that exists in no tenant must wrap `ErrTxNotFound`). `GetSubmitTime`
+  was the only tx-lifecycle method without the tenant gate every other method
+  already enforces; backends that ignore the `ctx` parameter in their
+  implementation will fail the new subtests until they add the check.
+
+- **Conformance: 38 new `spitest` subtests are pure additions, not
+  renames — no `Harness.Skip` key needs to change.** `AsyncSearch` gains 16
+  (`Epoch/InitialisedToOne`, `Epoch/FencedWrites`, `Terminal/WriteOnce`,
+  `Claim/StaleClaimed`, `Claim/FreshNotClaimed`, `Claim/NilHeartbeatBaseline`,
+  `Claim/ConcurrentDisjoint`, `Claim/TerminalNeverClaimed`,
+  `ClearResults/Idempotent`, `SaveResults/ChunkSeqContinuity`,
+  `SaveResults/CtxCancelObserved`, `GetResultIDs/DegenerateInputs`,
+  `GetResultIDs/NonTerminalPartial`, `UpdateStatus/MissingIsNotFound`,
+  `UpdateStatus/ZeroFinishTimeAbsent`, `Heartbeat/Semantics`) covering the
+  epoch-fenced job surface below, plus (`SaveResults/CtxCancelObserved`) the
+  ctx-cancellation-mid-stream half of the job-record contract fixes above.
+  `Entity` gains 11 (`GetPage/OrderAndBounds`, `GetPage/AsAtSnapshot`,
+  `GetPage/InTxWithStagedDeletes`, `GetPage/InTxRecordsReadSet`,
+  `GetVersionByTransaction/EarliestWins`,
+  `GetVersionByTransaction/DeletedNeverMatches`,
+  `GetVersionByTransaction/EmptyTxID`,
+  `GetVersionByTransaction/UnrelatedTxID`,
+  `GetVersionMetadata/EmptyWindowIsNotAnError`,
+  `GetVersionMetadata/LimitCaps`, `GetVersionMetadata/UntilBound`) covering
+  `GetPage`/`GetVersionByTransaction` above, plus three conformance-coverage
+  gaps found post-hoc: `GetPage/InTxWithStagedDeletes` pins the merge of an
+  ambient transaction's staged deletes with a bounded committed prefetch (a
+  real Critical bug on one backend silently under-filled or emptied the
+  page); `GetVersionMetadata/EmptyWindowIsNotAnError` pins that an empty
+  `From`/`Until` window on an existing entity yields an empty slice and a
+  nil error, never `ErrNotFound` (two backends had diverged on this); and
+  `GetPage/InTxRecordsReadSet` pins `GetPage`'s unconditional, page-scoped
+  read-set recording inside a transaction (see the `EntityStore.GetVersionHistory`
+  removal entry's `GetPage` description above) — a backend implementing
+  `GetPage` as a plain snapshot read with no read-set effect previously
+  passed every existing subtest. A wholly new `Iterable` group (11
+  subtests: `Unordered/YieldsAllMatches`, `Ordered/EntityID`,
+  `Ordered/UserFieldWithTieBreak`, `Ordered/InTxErrors`,
+  `Residual/AppliedInNext`, `Ctx/CancelObserved`, `Err/Sticky`,
+  `Close/Idempotent`, `PIT/SnapshotVariant`, `Overlay/SnapshotAtOpen`,
+  `TrackingRead/Gating`) exercises the optional `spi.Iterable` interface,
+  auto-skipping via type assertion on a backend that doesn't implement it —
+  the same pattern `Searcher` already uses, so it needs no `Harness.Skip`
+  entry either. A backend passing today keeps passing untouched; one that
+  doesn't yet implement the exercised surface sees new failures until it
+  does.
 
 - Search-filter translation relocated into the SPI, completing the v0.8.3
   type-core relocation: `ConditionToFilter` (with `FieldDescriptor`,

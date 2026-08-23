@@ -1,6 +1,7 @@
 package spitest
 
 import (
+	"context"
 	"slices"
 	"testing"
 	"time"
@@ -32,6 +33,7 @@ func runAsyncSearchSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Claim/TerminalNeverClaimed", testASClaimTerminalNeverClaimed)
 	runSubtest(t, h, tracker, "ClearResults/Idempotent", testASClearResultsIdempotent)
 	runSubtest(t, h, tracker, "SaveResults/ChunkSeqContinuity", testASSaveResultsChunkSeqContinuity)
+	runSubtest(t, h, tracker, "SaveResults/CtxCancelObserved", testASSaveResultsCtxCancelObserved)
 	runSubtest(t, h, tracker, "GetResultIDs/DegenerateInputs", testASGetResultIDsDegenerateInputs)
 	runSubtest(t, h, tracker, "GetResultIDs/NonTerminalPartial", testASGetResultIDsNonTerminalPartial)
 	runSubtest(t, h, tracker, "UpdateStatus/MissingIsNotFound", testASUpdateStatusMissingIsNotFound)
@@ -458,6 +460,49 @@ func testASSaveResultsChunkSeqContinuity(t *testing.T, h Harness) {
 	require.NoError(t, err)
 	require.Equal(t, len(secondIDs), total, "epoch-1 rows must not resurrect after ClearResults")
 	require.Equal(t, secondIDs, page, "second save's ids must page back in second-save order, uncontaminated by the epoch-1 write")
+}
+
+// testASSaveResultsCtxCancelObserved verifies SaveResults observes ctx
+// cancellation mid-stream (its doc comment: "The store observes ctx
+// cancellation") rather than draining the caller's iter.Seq to completion.
+// The sequence itself triggers the cancellation deterministically — no
+// sleeps, no goroutines racing a timer — by calling cancel() a few items in,
+// then continuing to yield far more items than any backend's internal
+// chunk-flush boundary (the largest currently in this SPI's plugins is in
+// the low thousands): a conformant backend must stop pulling from the
+// sequence well short of the full count and return a ctx-derived error; a
+// backend that ignores ctx and drains the whole sequence would return nil
+// and a pulled count equal to total, failing both assertions below.
+func testASSaveResultsCtxCancelObserved(t *testing.T, h Harness) {
+	tid := h.NewTenant()
+	ctx := tenantContext(tid)
+	as, err := h.Factory.AsyncSearchStore(ctx)
+	require.NoError(t, err)
+	id := newID()
+	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, id)))
+
+	cancelCtx, cancel := context.WithCancel(ctx)
+
+	const total = 5000
+	const cancelAfter = 2 // trigger cancellation a few items into the stream
+	pulled := 0
+	seq := func(yield func(string) bool) {
+		for i := 0; i < total; i++ {
+			pulled++
+			if i == cancelAfter {
+				cancel()
+			}
+			if !yield(newID()) {
+				return
+			}
+		}
+	}
+
+	err = as.SaveResults(cancelCtx, id, 1, seq)
+	require.Error(t, err, "SaveResults must return an error once ctx is cancelled mid-stream")
+	require.ErrorIs(t, err, context.Canceled, "the returned error must be ctx-derived (wrap context.Canceled)")
+	require.Less(t, pulled, total,
+		"SaveResults must stop consuming the sequence once cancellation is observed, not drain it to completion (pulled %d of %d)", pulled, total)
 }
 
 func testASGetResultIDsDegenerateInputs(t *testing.T, h Harness) {

@@ -37,14 +37,18 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "GetAllAsAt", testEntityGetAllAsAt)
 	runSubtest(t, h, tracker, "GetVersionMetadata/Ordering", testEntityVersionMetadataOrdering)
 	runSubtest(t, h, tracker, "GetVersionMetadata/EmptyWindowIsNotAnError", testEntityGetVersionMetadataEmptyWindowIsNotAnError)
+	runSubtest(t, h, tracker, "GetVersionMetadata/LimitCaps", testEntityGetVersionMetadataLimitCaps)
+	runSubtest(t, h, tracker, "GetVersionMetadata/UntilBound", testEntityGetVersionMetadataUntilBound)
 
 	// Paging + purposed history-read group (S5)
 	runSubtest(t, h, tracker, "GetPage/OrderAndBounds", testEntityGetPageOrderAndBounds)
 	runSubtest(t, h, tracker, "GetPage/AsAtSnapshot", testEntityGetPageAsAtSnapshot)
 	runSubtest(t, h, tracker, "GetPage/InTxWithStagedDeletes", testEntityGetPageInTxWithStagedDeletes)
+	runSubtest(t, h, tracker, "GetPage/InTxRecordsReadSet", testEntityGetPageInTxRecordsReadSet)
 	runSubtest(t, h, tracker, "GetVersionByTransaction/EarliestWins", testEntityGetVersionByTransactionEarliestWins)
 	runSubtest(t, h, tracker, "GetVersionByTransaction/DeletedNeverMatches", testEntityGetVersionByTransactionDeletedNeverMatches)
 	runSubtest(t, h, tracker, "GetVersionByTransaction/EmptyTxID", testEntityGetVersionByTransactionEmptyTxID)
+	runSubtest(t, h, tracker, "GetVersionByTransaction/UnrelatedTxID", testEntityGetVersionByTransactionUnrelatedTxID)
 
 	// Concurrent / Isolation group (Task 6)
 	runSubtest(t, h, tracker, "CompareAndSave/Success", testEntityCompareAndSaveSuccess)
@@ -605,6 +609,86 @@ func testEntityGetVersionMetadataEmptyWindowIsNotAnError(t *testing.T, h Harness
 	require.ErrorIs(t, err, spi.ErrNotFound, "an entity with no version history at all must return ErrNotFound")
 }
 
+// testEntityGetVersionMetadataLimitCaps pins opts.Limit as a genuine cap on
+// the returned row count, not a hint a backend may ignore. It seeds 6
+// versions, reads the full unbounded history, then reads again with
+// Limit=3 and asserts the capped read returns EXACTLY the first 3 rows of
+// the unbounded read (same newest-first prefix) — a backend that ignores
+// Limit and returns all 6 fails the length assertion; a backend that caps
+// but reorders or drops the wrong rows fails the prefix-equality assertion.
+func testEntityGetVersionMetadataLimitCaps(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	id := newID()
+	const n = 6
+	for i := 0; i < n; i++ {
+		withTx(t, h, ctx, func(txCtx context.Context) {
+			es, err := h.Factory.EntityStore(txCtx)
+			require.NoError(t, err)
+			_, err = es.Save(txCtx, newEntity(t, "m-vlim", id, map[string]any{"v": i}))
+			require.NoError(t, err)
+		})
+		h.AdvanceClock(1 * time.Millisecond)
+	}
+
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+
+	full, err := es.GetVersionMetadata(ctx, id, spi.VersionMetadataOptions{})
+	require.NoError(t, err)
+	require.Len(t, full, n, "sanity: unbounded read must return every seeded version")
+
+	const limit = 3
+	capped, err := es.GetVersionMetadata(ctx, id, spi.VersionMetadataOptions{Limit: limit})
+	require.NoError(t, err)
+	require.Len(t, capped, limit, "Limit must cap the returned row count; a backend that ignores Limit returns all %d rows instead of %d", n, limit)
+	for i := range capped {
+		require.Equal(t, full[i].Version, capped[i].Version,
+			"the capped read must be the same newest-first prefix as the unbounded read (row %d)", i)
+	}
+}
+
+// testEntityGetVersionMetadataUntilBound pins opts.Until as an inclusive
+// upper bound on the returned window, mirroring GetAsAt's asAt semantics: a
+// version written strictly after Until must never be returned, even though
+// it is newer and would otherwise sort first. A backend that ignores Until
+// returns every version instead of only the pre-cutoff one.
+func testEntityGetVersionMetadataUntilBound(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	id := newID()
+
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = es.Save(txCtx, newEntity(t, "m-vuntil", id, map[string]any{"v": 1}))
+		require.NoError(t, err)
+	})
+	h.AdvanceClock(1 * time.Millisecond)
+	until := h.Now().UTC()
+	h.AdvanceClock(1 * time.Millisecond)
+
+	// Two more versions written AFTER until — must be excluded.
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = es.Save(txCtx, newEntity(t, "m-vuntil", id, map[string]any{"v": 2}))
+		require.NoError(t, err)
+	})
+	h.AdvanceClock(1 * time.Millisecond)
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = es.Save(txCtx, newEntity(t, "m-vuntil", id, map[string]any{"v": 3}))
+		require.NoError(t, err)
+	})
+
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	metas, err := es.GetVersionMetadata(ctx, id, spi.VersionMetadataOptions{Until: &until})
+	require.NoError(t, err)
+	require.Len(t, metas, 1, "Until must exclude every version written after the cutoff, even though they are newer")
+	require.False(t, metas[0].Timestamp.After(until), "the one returned version must not be timestamped after Until")
+}
+
 // testEntityGetPageOrderAndBounds seeds 5 entities and checks that
 // GetPage(0,4) ≡ GetPage(0,2) ++ GetPage(2,2) under h.IDOrder, that the page
 // itself is h.IDOrder-ascending, and that limit<1 / offset<0 are contract
@@ -862,6 +946,97 @@ func testEntityGetPageInTxWithStagedDeletes(t *testing.T, h Harness) {
 	require.NoError(t, tm.Commit(txCtx, txID))
 }
 
+// testEntityGetPageInTxRecordsReadSet pins GetPage's documented unconditional
+// (non-opt-in) read-set recording when asAt == nil inside a transaction —
+// unlike Searcher/Iterate's opt-in TrackingRead — and, discriminatingly,
+// that the recording is scoped to the PAGE, not the whole model. This is
+// the deliberate narrowing of first-committer-wins from model-wide to
+// page-wide the GetPage doc comment calls out.
+//
+// Observed black-box (never via internal state), the same technique
+// testIterableTrackingReadGating uses: read a page in tx A, have a second,
+// independent tx B modify an entity and commit, then check whether tx A's
+// own commit is aborted by first-committer-wins.
+//
+//   - EntityOnPage: B modifies an entity A's page actually returned — A's
+//     commit must be rejected (ErrConflict). A backend that implements
+//     GetPage as a plain snapshot read with no read-set effect fails this
+//     half by committing successfully instead.
+//   - EntityOffPage: B modifies an entity that exists in the model but was
+//     NOT on A's returned page — A's commit must succeed. A backend that
+//     over-broadly records the whole model (not just the page) fails this
+//     half by aborting A's commit.
+func testEntityGetPageInTxRecordsReadSet(t *testing.T, h Harness) {
+	t.Run("EntityOnPage/ConflictAborts", func(t *testing.T) {
+		testEntityGetPageReadSetOutcome(t, h, true, false)
+	})
+	t.Run("EntityOffPage/ConflictSucceeds", func(t *testing.T) {
+		testEntityGetPageReadSetOutcome(t, h, false, true)
+	})
+}
+
+func testEntityGetPageReadSetOutcome(t *testing.T, h Harness, conflictOnPage, wantCommitSucceeds bool) {
+	t.Helper()
+	ctx := tenantContext(h.NewTenant())
+	mref := spi.ModelRef{EntityName: "m-page-readset", ModelVersion: "1"}
+
+	// Seed 4 entities and read back committed canonical order so we know
+	// exactly which id lands on a 2-entity first page vs off it.
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		for i := 0; i < 4; i++ {
+			_, err := es.Save(txCtx, newEntity(t, mref.EntityName, newID(), map[string]any{"i": i}))
+			require.NoError(t, err)
+		}
+	})
+	es0, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	full, err := es0.GetPage(ctx, mref, 4, 0, nil)
+	require.NoError(t, err)
+	require.Len(t, full, 4)
+
+	onPageID := full[0].Meta.ID
+	offPageID := full[3].Meta.ID
+
+	targetID := offPageID
+	if conflictOnPage {
+		targetID = onPageID
+	}
+
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
+	esA, err := h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+
+	page, err := esA.GetPage(txCtx, mref, 2, 0, nil) // asAt == nil: unconditional read-set recording
+	require.NoError(t, err)
+	require.Len(t, page, 2)
+	require.Equal(t, onPageID, page[0].Meta.ID, "sanity: the 2-entity first page must contain onPageID")
+
+	// Tx B: a concurrent, independent transaction overwrites targetID and
+	// commits before Tx A commits.
+	tm2, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	txID2, txCtx2, err := tm2.Begin(ctx)
+	require.NoError(t, err)
+	esB, err := h.Factory.EntityStore(txCtx2)
+	require.NoError(t, err)
+	_, err = esB.Save(txCtx2, newEntity(t, mref.EntityName, targetID, map[string]any{"conflict": true}))
+	require.NoError(t, err)
+	require.NoError(t, tm2.Commit(txCtx2, txID2))
+
+	err = tm.Commit(txCtx, txID)
+	if wantCommitSucceeds {
+		require.NoError(t, err,
+			"a concurrent write to an entity NOT on the returned page must not abort the GetPage transaction — read-set recording is page-scoped, not model-wide")
+		return
+	}
+	require.Error(t, err, "a concurrent write to an entity ON the returned page must abort the GetPage transaction under first-committer-wins")
+	require.ErrorIs(t, err, spi.ErrConflict)
+}
+
 // testEntityGetVersionByTransactionEarliestWins verifies that when one
 // transaction saves the same entity twice before committing, the earlier
 // (lower-Version) save is returned for that shared txID — not the latest,
@@ -970,6 +1145,43 @@ func testEntityGetVersionByTransactionEmptyTxID(t *testing.T, h Harness) {
 	_, err = es.GetVersionByTransaction(ctx, idBare, "")
 	require.ErrorIs(t, err, spi.ErrNotFound,
 		"empty txID must never match a stored-empty TransactionID; it must always return ErrNotFound")
+}
+
+// testEntityGetVersionByTransactionUnrelatedTxID verifies the third
+// non-match case alongside EmptyTxID (an empty txID) and
+// DeletedNeverMatches (a DELETED tombstone): a well-formed, real,
+// non-empty txID that simply never wrote to this entity must also return
+// ErrNotFound.
+func testEntityGetVersionByTransactionUnrelatedTxID(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	id := newID()
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = es.Save(txCtx, newEntity(t, "m-gvbt-unrel", id, map[string]any{}))
+		require.NoError(t, err)
+	})
+
+	// Obtain a real, well-formed txID by writing an UNRELATED entity in its
+	// own transaction — that txID never touched id.
+	otherID := newID()
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = es.Save(txCtx, newEntity(t, "m-gvbt-unrel", otherID, map[string]any{}))
+		require.NoError(t, err)
+	})
+
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	otherEntity, err := es.Get(ctx, otherID)
+	require.NoError(t, err)
+	unrelatedTxID := otherEntity.Meta.TransactionID
+	require.NotEmpty(t, unrelatedTxID)
+
+	_, err = es.GetVersionByTransaction(ctx, id, unrelatedTxID)
+	require.ErrorIs(t, err, spi.ErrNotFound,
+		"a well-formed, non-empty txID that never wrote to this entity must return ErrNotFound")
 }
 
 func testEntityCompareAndSaveSuccess(t *testing.T, h Harness) {

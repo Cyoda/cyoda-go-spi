@@ -19,6 +19,7 @@ func runAsyncSearchSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Cancel/NotFound", testASCancelNotFound)
 	runSubtest(t, h, tracker, "DeleteJob", testASDeleteJob)
 	runSubtest(t, h, tracker, "ReapExpired", testASReapExpired)
+	runSubtest(t, h, tracker, "ReapExpired/CancelledIsReapable", testASReapExpiredCancelledIsReapable)
 	runSubtest(t, h, tracker, "TenantIsolation", testASTenantIsolation)
 }
 
@@ -109,16 +110,28 @@ func testASCancel(t *testing.T, h Harness) {
 	as, _ := h.Factory.AsyncSearchStore(ctx)
 	id := newID()
 	require.NoError(t, as.CreateJob(ctx, newSearchJob(tid, id)))
-	require.NoError(t, as.Cancel(ctx, id))
-	got, _ := as.GetJob(ctx, id)
+
+	ft := h.Now()
+	require.NoError(t, as.Cancel(ctx, id, ft))
+	got, err := as.GetJob(ctx, id)
+	require.NoError(t, err)
 	require.Equal(t, "CANCELLED", got.Status)
-	require.NoError(t, as.Cancel(ctx, id), "re-cancelling a terminal job is a no-op")
+	require.NotNil(t, got.FinishTime)
+
+	// Idempotent: re-cancelling a terminal job with a LATER time is a no-op
+	// that must not overwrite the original finish time.
+	later := ft.Add(1 * time.Hour)
+	require.NoError(t, as.Cancel(ctx, id, later), "re-cancelling a terminal job is a no-op")
+	got2, err := as.GetJob(ctx, id)
+	require.NoError(t, err)
+	require.NotNil(t, got2.FinishTime)
+	require.True(t, got.FinishTime.Equal(*got2.FinishTime), "re-cancel must not overwrite the original finish time")
 }
 
 func testASCancelNotFound(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	as, _ := h.Factory.AsyncSearchStore(ctx)
-	err := as.Cancel(ctx, newID()) // valid UUID, never written
+	err := as.Cancel(ctx, newID(), h.Now()) // valid UUID, never written
 	require.ErrorIs(t, err, spi.ErrNotFound)
 }
 
@@ -144,6 +157,26 @@ func testASReapExpired(t *testing.T, h Harness) {
 	// have live goroutines writing results).
 	finishTime := h.Now().UTC()
 	require.NoError(t, as.UpdateJobStatus(ctx, id, "SUCCESSFUL", 0, "", finishTime, 0))
+
+	ttl := 10 * time.Millisecond
+	h.AdvanceClock(ttl + 1*time.Millisecond)
+	n, err := as.ReapExpired(ctx, ttl)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, n, 1)
+	_, err = as.GetJob(ctx, id)
+	require.ErrorIs(t, err, spi.ErrNotFound)
+}
+
+// testASReapExpiredCancelledIsReapable is the acceptance that a cancelled
+// job — not just a SUCCESSFUL/FAILED one — is reapable, i.e. Cancel stamps a
+// finish time on the transition it performs.
+func testASReapExpiredCancelledIsReapable(t *testing.T, h Harness) {
+	tid := h.NewTenant()
+	ctx := tenantContext(tid)
+	as, _ := h.Factory.AsyncSearchStore(ctx)
+	id := newID()
+	require.NoError(t, as.CreateJob(ctx, newSearchJob(tid, id)))
+	require.NoError(t, as.Cancel(ctx, id, h.Now()))
 
 	ttl := 10 * time.Millisecond
 	h.AdvanceClock(ttl + 1*time.Millisecond)

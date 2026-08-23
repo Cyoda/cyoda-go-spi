@@ -26,6 +26,13 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **`AsyncSearchStore.Cancel` takes a caller-supplied `finishTime`.**
+  `Cancel(ctx context.Context, jobID string) error` is now
+  `Cancel(ctx context.Context, jobID string, finishTime time.Time) error`.
+
+  Migration: pass the cancellation instant; stores must stamp it on the
+  transition and must not overwrite it on an idempotent re-cancel.
+
 - **`MatchFilter`, `EvalLeafString` and `Expansion.Void` are removed.**
   Filter evaluation is now a prepare/execute split: build a `PreparedFilter` once
   per query with `Prepare(Filter)`, then call `Match(data, meta)` once per row.

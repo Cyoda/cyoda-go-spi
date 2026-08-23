@@ -34,7 +34,14 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "GetAsAt/FullMetaPopulated", testEntityGetAsAtMeta)
 	runSubtest(t, h, tracker, "GetAsAt/BeforeAnyWrite", testEntityGetAsAtBefore)
 	runSubtest(t, h, tracker, "GetAllAsAt", testEntityGetAllAsAt)
-	runSubtest(t, h, tracker, "GetVersionHistory/Ordering", testEntityVersionHistory)
+	runSubtest(t, h, tracker, "GetVersionMetadata/Ordering", testEntityVersionMetadataOrdering)
+
+	// Paging + purposed history-read group (S5)
+	runSubtest(t, h, tracker, "GetPage/OrderAndBounds", testEntityGetPageOrderAndBounds)
+	runSubtest(t, h, tracker, "GetPage/AsAtSnapshot", testEntityGetPageAsAtSnapshot)
+	runSubtest(t, h, tracker, "GetVersionByTransaction/EarliestWins", testEntityGetVersionByTransactionEarliestWins)
+	runSubtest(t, h, tracker, "GetVersionByTransaction/DeletedNeverMatches", testEntityGetVersionByTransactionDeletedNeverMatches)
+	runSubtest(t, h, tracker, "GetVersionByTransaction/EmptyTxID", testEntityGetVersionByTransactionEmptyTxID)
 
 	// Concurrent / Isolation group (Task 6)
 	runSubtest(t, h, tracker, "CompareAndSave/Success", testEntityCompareAndSaveSuccess)
@@ -514,7 +521,11 @@ func testEntityGetAllAsAt(t *testing.T, h Harness) {
 	require.Len(t, got, 3, "GetAllAsAt must exclude writes after asAt")
 }
 
-func testEntityVersionHistory(t *testing.T, h Harness) {
+// testEntityVersionMetadataOrdering seeds 3 saves + 1 delete and asserts
+// GetVersionMetadata returns all 4 rows newest-first (tie-break Version
+// DESC), with Deleted true only on the tombstone and Version populated on
+// every row, including the tombstone.
+func testEntityVersionMetadataOrdering(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	id := newID()
 	for i := 0; i < 3; i++ {
@@ -525,14 +536,202 @@ func testEntityVersionHistory(t *testing.T, h Harness) {
 		})
 		h.AdvanceClock(1 * time.Millisecond)
 	}
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		require.NoError(t, es.Delete(txCtx, id))
+	})
 	es, _ := h.Factory.EntityStore(ctx)
-	history, err := es.GetVersionHistory(ctx, id)
+	metas, err := es.GetVersionMetadata(ctx, id, spi.VersionMetadataOptions{})
 	require.NoError(t, err)
-	require.Len(t, history, 3)
-	for i := 1; i < len(history); i++ {
-		require.False(t, history[i].Timestamp.Before(history[i-1].Timestamp),
-			"version %d timestamp must not precede version %d", i, i-1)
+	require.Len(t, metas, 4, "3 saves + 1 delete tombstone")
+
+	for i := 1; i < len(metas); i++ {
+		require.False(t, metas[i].Timestamp.After(metas[i-1].Timestamp),
+			"metas must be newest-first by Timestamp (meta %d after meta %d)", i, i-1)
+		if metas[i].Timestamp.Equal(metas[i-1].Timestamp) {
+			require.Greater(t, metas[i-1].Version, metas[i].Version,
+				"equal-timestamp metas must tie-break Version DESC")
+		}
 	}
+
+	require.True(t, metas[0].Deleted, "the newest meta (index 0) must be the DELETE tombstone")
+	for i := 1; i < len(metas); i++ {
+		require.False(t, metas[i].Deleted, "no version before the tombstone may be marked Deleted")
+	}
+
+	for i, m := range metas {
+		require.NotZero(t, m.Version, "meta %d must have Version populated", i)
+	}
+}
+
+// testEntityGetPageOrderAndBounds seeds 5 entities and checks that
+// GetPage(0,4) ≡ GetPage(0,2) ++ GetPage(2,2) under h.IDOrder, that the page
+// itself is h.IDOrder-ascending, and that limit<1 / offset<0 are contract
+// violations.
+func testEntityGetPageOrderAndBounds(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	mref := spi.ModelRef{EntityName: "m-page", ModelVersion: "1"}
+	const n = 5
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		for i := 0; i < n; i++ {
+			_, err := es.Save(txCtx, newEntity(t, "m-page", newID(), map[string]any{"i": i}))
+			require.NoError(t, err)
+		}
+	})
+
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+
+	full, err := es.GetPage(ctx, mref, 4, 0, nil)
+	require.NoError(t, err)
+	require.Len(t, full, 4, "GetPage(limit=4,offset=0) must return 4 of the 5 seeded entities")
+	for i := 1; i < len(full); i++ {
+		require.LessOrEqual(t, h.IDOrder(full[i-1].Meta.ID, full[i].Meta.ID), 0,
+			"GetPage must yield entities in h.IDOrder ascending order")
+	}
+
+	first, err := es.GetPage(ctx, mref, 2, 0, nil)
+	require.NoError(t, err)
+	require.Len(t, first, 2)
+
+	second, err := es.GetPage(ctx, mref, 2, 2, nil)
+	require.NoError(t, err)
+	require.Len(t, second, 2)
+
+	require.Equal(t, []string{full[0].Meta.ID, full[1].Meta.ID},
+		[]string{first[0].Meta.ID, first[1].Meta.ID},
+		"page 0-2 must match the first 2 entities of page 0-4")
+	require.Equal(t, []string{full[2].Meta.ID, full[3].Meta.ID},
+		[]string{second[0].Meta.ID, second[1].Meta.ID},
+		"page 2-2 must match the last 2 entities of page 0-4")
+
+	_, err = es.GetPage(ctx, mref, 0, 0, nil)
+	require.Error(t, err, "limit 0 must be a contract violation")
+
+	_, err = es.GetPage(ctx, mref, 1, -1, nil)
+	require.Error(t, err, "negative offset must be a contract violation")
+}
+
+// testEntityGetPageAsAtSnapshot verifies GetPage's asAt parameter reads
+// committed-only state as of the given instant, excluding writes after it —
+// mirroring GetAllAsAt's contract.
+func testEntityGetPageAsAtSnapshot(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	mref := spi.ModelRef{EntityName: "m-page-asat", ModelVersion: "1"}
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		for i := 0; i < 3; i++ {
+			_, err := es.Save(txCtx, newEntity(t, "m-page-asat", newID(), map[string]any{"i": i}))
+			require.NoError(t, err)
+		}
+	})
+	h.AdvanceClock(1 * time.Millisecond)
+	asAt := h.Now().UTC()
+	h.AdvanceClock(1 * time.Millisecond)
+
+	// Fifth entity written AFTER asAt — must not be returned.
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = es.Save(txCtx, newEntity(t, "m-page-asat", newID(), map[string]any{"i": 99}))
+		require.NoError(t, err)
+	})
+
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	got, err := es.GetPage(ctx, mref, 10, 0, &asAt)
+	require.NoError(t, err)
+	require.Len(t, got, 3, "GetPage with asAt must exclude writes after the cutoff")
+}
+
+// testEntityGetVersionByTransactionEarliestWins verifies that when one
+// transaction saves the same entity twice before committing, the earlier
+// (lower-Version) save is returned for that shared txID — not the latest,
+// which is what a naive "most recent row for this txID" implementation
+// would return.
+func testEntityGetVersionByTransactionEarliestWins(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	id := newID()
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = es.Save(txCtx, newEntity(t, "m-gvbt", id, map[string]any{"v": 1}))
+		require.NoError(t, err)
+		_, err = es.Save(txCtx, newEntity(t, "m-gvbt", id, map[string]any{"v": 2}))
+		require.NoError(t, err)
+	})
+
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	got, err := es.Get(ctx, id)
+	require.NoError(t, err)
+	txID := got.Meta.TransactionID
+	require.NotEmpty(t, txID)
+
+	v, err := es.GetVersionByTransaction(ctx, id, txID)
+	require.NoError(t, err)
+	require.NotNil(t, v)
+	require.NotNil(t, v.Entity)
+	require.Contains(t, string(v.Entity.Data), `"v":1`,
+		"same-tx double-save: GetVersionByTransaction must return the earlier version, not the latest")
+}
+
+// testEntityGetVersionByTransactionDeletedNeverMatches verifies that a
+// DELETED tombstone never matches GetVersionByTransaction, even queried by
+// its own deleting transaction's ID: this method surfaces entity content,
+// and a tombstone has none.
+func testEntityGetVersionByTransactionDeletedNeverMatches(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	id := newID()
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = es.Save(txCtx, newEntity(t, "m-gvbt-del", id, map[string]any{}))
+		require.NoError(t, err)
+	})
+
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		require.NoError(t, es.Delete(txCtx, id))
+	})
+
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	// Recover the deleting transaction's ID from the tombstone's metadata —
+	// Get(id) would just return ErrNotFound, since the entity is gone.
+	metas, err := es.GetVersionMetadata(ctx, id, spi.VersionMetadataOptions{})
+	require.NoError(t, err)
+	require.NotEmpty(t, metas)
+	deleteTxID := metas[0].TransactionID
+	require.NotEmpty(t, deleteTxID, "tombstone's TransactionID must be populated to drive this test")
+
+	_, err = es.GetVersionByTransaction(ctx, id, deleteTxID)
+	require.ErrorIs(t, err, spi.ErrNotFound,
+		"GetVersionByTransaction must never match a DELETED tombstone, even by its own deleting txID")
+}
+
+// testEntityGetVersionByTransactionEmptyTxID verifies that an empty txID
+// never matches: it must always return ErrNotFound rather than being
+// treated as a wildcard or matching a stored-empty TransactionID.
+func testEntityGetVersionByTransactionEmptyTxID(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	id := newID()
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = es.Save(txCtx, newEntity(t, "m-gvbt-empty", id, map[string]any{}))
+		require.NoError(t, err)
+	})
+
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	_, err = es.GetVersionByTransaction(ctx, id, "")
+	require.ErrorIs(t, err, spi.ErrNotFound,
+		"empty txID must never match; it must always return ErrNotFound")
 }
 
 func testEntityCompareAndSaveSuccess(t *testing.T, h Harness) {
@@ -737,10 +936,11 @@ func testEntityTenantIsolationDelete(t *testing.T, h Harness) {
 
 // testEntityExecutorRoundTrip verifies that the ChangeUser/ChangeUserKind/
 // ChangeExecutor attribution fields a caller stamps on Entity.Meta before
-// Save round-trip through GetVersionHistory as EntityVersion.AttributedKind/
-// Executor — including for a DELETED version, whose Executor must be
-// readable without dereferencing the (possibly nil, on some backends)
-// Entity field.
+// Save round-trip through GetVersionMetadata as EntityVersionMeta.User/
+// AttributedKind/Executor — including for a DELETED version. Unlike the
+// deleted EntityVersion.Entity field on some backends, EntityVersionMeta
+// carries no entity payload at all, so there is nothing to dereference:
+// User/AttributedKind/Executor are populated directly on every row.
 func testEntityExecutorRoundTrip(t *testing.T, h Harness) {
 	tenant := h.NewTenant()
 	ctx := tenantContext(tenant)
@@ -766,22 +966,28 @@ func testEntityExecutorRoundTrip(t *testing.T, h Harness) {
 
 	es, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
-	history, err := es.GetVersionHistory(ctx, id)
+	metas, err := es.GetVersionMetadata(ctx, id, spi.VersionMetadataOptions{})
 	require.NoError(t, err)
-	require.Len(t, history, 2, "one CREATE version + one DELETE tombstone")
+	require.Len(t, metas, 2, "one CREATE version + one DELETE tombstone")
 
-	createdVersion := history[0]
-	require.Equal(t, spi.PrincipalUser, createdVersion.AttributedKind,
+	// Newest-first: metas[0] is the DELETE tombstone, metas[1] is the CREATE.
+	deletedMeta := metas[0]
+	createdMeta := metas[1]
+
+	require.Equal(t, "origin-user", createdMeta.User,
+		"CREATE version's User must equal Meta.ChangeUser as written at Save")
+	require.Equal(t, spi.PrincipalUser, createdMeta.AttributedKind,
 		"CREATE version's AttributedKind must equal Meta.ChangeUserKind as written at Save")
-	require.Equal(t, createdExecutor, createdVersion.Executor,
+	require.Equal(t, createdExecutor, createdMeta.Executor,
 		"CREATE version's Executor must equal Meta.ChangeExecutor as written at Save")
 
-	deletedVersion := history[len(history)-1]
-	require.True(t, deletedVersion.Deleted, "second version must be the DELETE tombstone")
-	require.Equal(t, wantDeleteExecutor, deletedVersion.Executor,
-		"a DELETED version's Executor must be readable directly, without dereferencing Entity")
-	require.Equal(t, wantDeleteExecutor.Kind, deletedVersion.AttributedKind,
-		"a DELETED version's AttributedKind must likewise be readable without dereferencing Entity")
+	require.True(t, deletedMeta.Deleted, "the newest version must be the DELETE tombstone")
+	require.Equal(t, wantDeleteExecutor.ID, deletedMeta.User,
+		"a DELETED version's User (attributed) must equal the deleting caller's origin identity")
+	require.Equal(t, wantDeleteExecutor.Kind, deletedMeta.AttributedKind,
+		"a DELETED version's AttributedKind must likewise round-trip")
+	require.Equal(t, wantDeleteExecutor, deletedMeta.Executor,
+		"a DELETED version's Executor must be readable directly — EntityVersionMeta has no Entity field to dereference")
 }
 
 func testEntityEmptyTenant(t *testing.T, h Harness) {

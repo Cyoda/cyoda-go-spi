@@ -50,6 +50,57 @@ MAINTAINING.md.
   `Iterable`-backed ordered pull-stream, instead of asking for an unbounded
   materialized slice.
 
+- **`EntityStore.GetVersionHistory` is removed; replaced by `GetPage`,
+  `GetVersionByTransaction`, and `GetVersionMetadata`.** The single
+  whole-history method conflated three different callers — a paged listing
+  of current entities, a lookup of the specific version a known transaction
+  wrote, and a lightweight audit trail — into one API that always paid for
+  full entity payloads and never bounded or windowed its result.
+
+  - `GetPage(ctx, modelRef, limit, offset, asAt)` pages `modelRef`'s current
+    entities in the engine's canonical per-engine entity-ID order (see
+    `OrderSpec`'s doc comment). `limit >= 1 && offset >= 0` is required —
+    either violation is a contract violation, not a substituted default.
+    `asAt == nil` reads the live in-transaction overlay and unconditionally
+    records the page in the transaction's read-set; `asAt != nil` reads
+    committed-only state as of that instant.
+  - `GetVersionByTransaction(ctx, entityID, txID)` returns the earliest
+    version of `entityID` written by transaction `txID`. DELETED tombstones
+    never match (they carry no entity payload), and an empty `txID` never
+    matches a stored-empty `TransactionID` — both return `ErrNotFound`.
+  - `GetVersionMetadata(ctx, entityID, opts)` returns `entityID`'s version
+    metadata (no entity payload) newest-first, tie-break `Version DESC`,
+    windowed by `opts.From`/`opts.Until` (inclusive; nil side unbounded) and
+    capped by `opts.Limit` (`0` means all — deliberately unbounded, since the
+    result is one entity's own history, never a model-wide scan). The new
+    `EntityVersionMeta` DTO carries `Deleted`, canonically derived from
+    `ChangeType == "DELETED"`, true only on the tombstone row; `Version` is
+    populated on every row including the tombstone.
+
+  Migration: a caller that listed current entities uses `GetPage`; a caller
+  that had a transaction ID and wanted that transaction's write uses
+  `GetVersionByTransaction`; a caller that wanted the audit trail (who, when,
+  what changed) without paying for full payloads uses `GetVersionMetadata`.
+  There is no direct replacement for "give me every full-payload version at
+  once" — that shape was the unbounded scan `GetVersionHistory` never
+  bounded; page through `GetVersionMetadata` for metadata and fetch specific
+  payloads via `GetVersionByTransaction` or `GetAsAt` as needed.
+
+- **`spitest` subtest renames:** `Entity/GetVersionHistory/Ordering` →
+  `Entity/GetVersionMetadata/Ordering`, now asserting `GetVersionMetadata`'s
+  newest-first / `Version DESC` tie-break / tombstone-only-`Deleted`
+  contract instead of `GetVersionHistory`'s. New subtests:
+  `Entity/GetPage/OrderAndBounds`, `Entity/GetPage/AsAtSnapshot`,
+  `Entity/GetVersionByTransaction/EarliestWins`,
+  `Entity/GetVersionByTransaction/DeletedNeverMatches`,
+  `Entity/GetVersionByTransaction/EmptyTxID`.
+
+  Migration: a `Harness.Skip` entry keyed on `Entity/GetVersionHistory/*`
+  now fails the conformance run ("possible typo or stale entry") — rename
+  to `Entity/GetVersionMetadata/Ordering`, and add entries for the new
+  `GetPage`/`GetVersionByTransaction` subtests if the backend needs to skip
+  them.
+
 ### Added
 
 - **`MergeOrdered` helper.** A pure pull-stream merge of an already-ordered

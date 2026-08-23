@@ -487,9 +487,12 @@ func testTxOriginAmbientRoot(t *testing.T, h Harness) {
 // lets SAVEPOINT/ROLLBACK TO SAVEPOINT govern visibility. Both mechanisms
 // must produce the same committed tombstones, so this test drives ONLY
 // through SPI interfaces (TransactionManager/EntityStore) and asserts ONLY
-// what GetVersionHistory reports after Commit — never TransactionState's
+// what GetVersionMetadata reports after Commit — never TransactionState's
 // internal Deletes/DeleteAttribution maps, which are meaningless on a
-// backend that doesn't buffer.
+// backend that doesn't buffer. GetVersionByTransaction is not usable here:
+// it never matches a DELETED tombstone (see its doc comment), so the
+// tombstone rows this test asserts on can only be read via
+// GetVersionMetadata.
 //
 // Scenario: under a user-origin tx, a service-kind joined ctx stages delete
 // A; Savepoint; stage delete B; RollbackToSavepoint discards B; a SECOND
@@ -504,7 +507,7 @@ func testTxOriginAmbientRoot(t *testing.T, h Harness) {
 // NEVER re-staged before Commit. This pins the case a re-stage-after-rollback
 // test cannot: a staged delete that a savepoint rollback discards, and that
 // stays discarded, must not resurface at Commit. Checked purely through
-// committed, observable outcomes (Get + GetVersionHistory on a fresh
+// committed, observable outcomes (Get + GetVersionMetadata on a fresh
 // non-tx ctx) — never TransactionState's internal Deletes/DeleteAttribution
 // maps, which a backend that doesn't buffer wouldn't populate anyway.
 func testTxDeleteAttributionSavepoint(t *testing.T, h Harness) {
@@ -562,22 +565,22 @@ func testTxDeleteAttributionSavepoint(t *testing.T, h Harness) {
 	esOut, err := h.Factory.EntityStore(rootCtx)
 	require.NoError(t, err)
 
-	historyA, err := esOut.GetVersionHistory(rootCtx, idA)
+	metaA, err := esOut.GetVersionMetadata(rootCtx, idA, spi.VersionMetadataOptions{})
 	require.NoError(t, err)
-	require.NotEmpty(t, historyA)
-	tombstoneA := historyA[len(historyA)-1]
-	require.True(t, tombstoneA.Deleted, "A's last version must be the committed tombstone")
+	require.NotEmpty(t, metaA)
+	tombstoneA := metaA[0] // newest-first: the tombstone is metaA[0]
+	require.True(t, tombstoneA.Deleted, "A's newest version must be the committed tombstone")
 	require.Equal(t, origin.ID, tombstoneA.User,
 		"A's tombstone must carry the origin user as attributed, staged before the savepoint")
 	require.Equal(t, origin.Kind, tombstoneA.AttributedKind)
 	require.Equal(t, svc1, tombstoneA.Executor,
 		"A's tombstone must carry the first service as executor — unaffected by the later savepoint rollback")
 
-	historyB, err := esOut.GetVersionHistory(rootCtx, idB)
+	metaB, err := esOut.GetVersionMetadata(rootCtx, idB, spi.VersionMetadataOptions{})
 	require.NoError(t, err)
-	require.NotEmpty(t, historyB)
-	tombstoneB := historyB[len(historyB)-1]
-	require.True(t, tombstoneB.Deleted, "B's last version must be the committed tombstone")
+	require.NotEmpty(t, metaB)
+	tombstoneB := metaB[0] // newest-first: the tombstone is metaB[0]
+	require.True(t, tombstoneB.Deleted, "B's newest version must be the committed tombstone")
 	require.Equal(t, origin.ID, tombstoneB.User,
 		"B's tombstone must carry the origin user as attributed")
 	require.Equal(t, origin.Kind, tombstoneB.AttributedKind)
@@ -595,10 +598,10 @@ func testTxDeleteAttributionSavepoint(t *testing.T, h Harness) {
 	require.NoError(t, err, "C must still be gettable after commit — its staged delete was discarded by the savepoint rollback and never re-staged")
 	require.NotNil(t, entC)
 
-	historyC, err := esOut.GetVersionHistory(rootCtx, idC)
+	metaC, err := esOut.GetVersionMetadata(rootCtx, idC, spi.VersionMetadataOptions{})
 	require.NoError(t, err)
-	require.NotEmpty(t, historyC)
-	for _, v := range historyC {
-		require.False(t, v.Deleted, "C must have no deleted version/tombstone in its history — the discarded staged delete must not resurface at commit")
+	require.NotEmpty(t, metaC)
+	for _, m := range metaC {
+		require.False(t, m.Deleted, "C must have no deleted version/tombstone in its history — the discarded staged delete must not resurface at commit")
 	}
 }

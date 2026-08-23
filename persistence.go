@@ -97,7 +97,51 @@ type EntityStore interface {
 	// from the current tx are visible, writes from other in-flight txs are not),
 	// matching the semantics of Count.
 	CountByState(ctx context.Context, modelRef ModelRef, states []string) (map[string]int64, error)
-	GetVersionHistory(ctx context.Context, entityID string) ([]EntityVersion, error)
+
+	// GetPage returns a page of modelRef's entities in the engine's
+	// canonical per-engine entity-ID order (see OrderSpec's doc comment —
+	// this is the same order Search/Iterate use for an empty/id-only
+	// OrderBy, not guaranteed identical across backends).
+	//
+	// limit >= 1 && offset >= 0 is REQUIRED; either violation is a contract
+	// violation and the implementation MUST return an error rather than
+	// substituting a default. Implementations fail fast on any row-level
+	// error rather than returning a partial page.
+	//
+	// asAt == nil reads the live, in-transaction overlay: with an ambient
+	// transaction, the committed page is merged with the transaction's own
+	// write-set, and — unconditionally, unlike Searcher's opt-in
+	// TrackingRead — every entity on the returned page is recorded in the
+	// transaction's read-set. asAt != nil ignores any ambient transaction
+	// and reads committed-only state as of that instant.
+	GetPage(ctx context.Context, modelRef ModelRef, limit, offset int, asAt *time.Time) ([]*Entity, error)
+
+	// GetVersionByTransaction returns the earliest version of entityID
+	// written by transaction txID. A transaction that saved the same
+	// entity more than once before committing (e.g. two Save calls inside
+	// one commit) may produce more than one matching version; the
+	// earliest (lowest Version) is returned.
+	//
+	// Versions with no entity payload — DELETED tombstones — never match,
+	// even when txID is the deleting transaction's own ID: this method
+	// surfaces entity content, and a tombstone has none. Use
+	// GetVersionMetadata to read a tombstone's metadata instead.
+	//
+	// An empty txID never matches a stored-empty TransactionID
+	// (non-transactional writes carry one); it always returns ErrNotFound.
+	GetVersionByTransaction(ctx context.Context, entityID, txID string) (*EntityVersion, error)
+
+	// GetVersionMetadata returns entityID's version metadata — no entity
+	// payload, just the audit trail — newest first, ties broken by
+	// Version DESC. opts.From/opts.Until bound the window inclusively; a
+	// nil side is unbounded. opts.Limit caps the returned row count; 0
+	// means all, bounded only by this one entity's own version history —
+	// a deliberate divergence from GetPage's limit>=1 requirement, since
+	// a single entity's history can never be an unbounded model-wide scan.
+	//
+	// Deleted is true only on the DELETED tombstone row, and Version is
+	// populated on every returned row, including the tombstone.
+	GetVersionMetadata(ctx context.Context, entityID string, opts VersionMetadataOptions) ([]EntityVersionMeta, error)
 }
 
 // SchemaDelta is an opaque, plugin-agnostic serialization of an

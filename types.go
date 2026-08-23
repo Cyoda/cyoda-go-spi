@@ -54,6 +54,39 @@ type EntityVersion struct {
 	Executor Principal
 }
 
+// VersionMetadataOptions bounds a GetVersionMetadata query.
+type VersionMetadataOptions struct {
+	// From, Until bound the returned window inclusively; a nil side is
+	// unbounded.
+	From, Until *time.Time
+	// Limit caps the number of returned rows. 0 means all — unlike
+	// GetPage, 0 is a valid "unbounded" value here, deliberately: the
+	// result is bounded by one entity's own version history, not an
+	// unbounded model-wide scan. See GetVersionMetadata's doc comment.
+	Limit int
+}
+
+// EntityVersionMeta is one version's metadata — the audit-trail sibling of
+// EntityVersion, without the entity payload. Returned by
+// EntityStore.GetVersionMetadata, newest first, ties broken by Version DESC.
+type EntityVersionMeta struct {
+	Version    int64
+	ChangeType string
+	Timestamp  time.Time
+	// User is the attributed user ID for this version's change.
+	User string
+	// AttributedKind is the kind of User above; empty on legacy rows.
+	AttributedKind PrincipalKind
+	// Executor is the actual caller that performed the change, independent
+	// of attribution.
+	Executor Principal
+	// TransactionID may be empty for non-transactional writes.
+	TransactionID string
+	// Deleted is canonical: derived from ChangeType == "DELETED", not a
+	// separately-stamped flag. True only on the tombstone row.
+	Deleted bool
+}
+
 // ModelState represents the lifecycle state of an entity model.
 type ModelState string
 

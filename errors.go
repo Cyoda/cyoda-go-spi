@@ -127,6 +127,17 @@ var ErrUniqueViolation = errors.New("composite unique key violation")
 // non-scalar value at a key path. All map to 422 INVALID_UNIQUE_KEY.
 var ErrPartialUniqueKey = errors.New("invalid composite unique key value")
 
+// ErrAlreadyTerminal is returned by AsyncSearchStore write methods
+// (UpdateJobStatus, Heartbeat, SaveResults) called against a job already in
+// a terminal status (SUCCESSFUL/FAILED/CANCELLED). Cancel is the sole
+// idempotent-nil exception.
+var ErrAlreadyTerminal = errors.New("job is in a terminal status")
+
+// ErrStaleClaim is returned by AsyncSearchStore write methods
+// (UpdateJobStatus, SaveResults, Heartbeat) when the caller's epoch does not
+// match the job's current Epoch — another claimant has since taken over.
+var ErrStaleClaim = errors.New("write fenced: stale claim epoch")
+
 // ErrUnknownOperator is returned by ConditionToFilter for a condition leaf
 // whose operatorType is not in the closed set OperatorNames reports.
 //

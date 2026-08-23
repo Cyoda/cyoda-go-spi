@@ -3,6 +3,7 @@ package spi
 import (
 	"context"
 	"encoding/json"
+	"iter"
 	"time"
 
 )
@@ -21,6 +22,17 @@ type SearchJob struct {
 	CreateTime  time.Time
 	FinishTime  *time.Time
 	CalcTimeMs  int64
+
+	// HeartbeatTime is the last liveness stamp from the owning executor.
+	// nil means never stamped, in which case staleness is measured from
+	// CreateTime (the baseline).
+	HeartbeatTime *time.Time
+
+	// Epoch is the claim/attempt counter. CreateJob persists 1 regardless
+	// of the value set on the input job; ClaimStale increments it on each
+	// successful claim. Callers fence writes (UpdateJobStatus, SaveResults,
+	// Heartbeat) against the Epoch they were claimed with.
+	Epoch int64
 }
 
 // SelfExecutingSearchStore is implemented by AsyncSearchStore variants whose
@@ -33,20 +45,66 @@ type SearchJob struct {
 // the actual search. A backend with native distributed execution can opt in
 // by implementing this interface; its CreateJob is expected to dispatch work
 // and persist results itself.
+//
+// Self-executing stores may reject SaveResults (they persist results as a
+// side effect of CreateJob's own dispatch, not via a caller-driven stream)
+// and no-op Heartbeat, ClaimStale, and ClearResults — liveness and reclaim
+// are meaningless for a store that owns execution outright.
 type SelfExecutingSearchStore interface {
 	AsyncSearchStore
 	SelfExecuting()
 }
 
-// AsyncSearchStore provides persistence for async search jobs and their results.
+// AsyncSearchStore provides persistence for async search jobs and their
+// results.
+//
+// Terminal statuses (SUCCESSFUL/FAILED/CANCELLED) are write-once: once a job
+// reaches one, UpdateJobStatus, Heartbeat, and SaveResults against it return
+// ErrAlreadyTerminal (SaveResults checks this at least at chunk boundaries).
+// Cancel is the sole idempotent-nil exception — cancelling an already-terminal
+// job returns nil and leaves it unchanged. ClaimStale never claims a terminal
+// job.
+//
+// Epoch fencing: UpdateJobStatus, SaveResults, and Heartbeat each take the
+// epoch the caller was claimed under and MUST refuse a call whose epoch does
+// not match the job's current Epoch with ErrStaleClaim — this is how a
+// reclaimed job fences off writes from the executor it was taken from.
 type AsyncSearchStore interface {
+	// CreateJob persists a new job row. Epoch is always persisted as 1,
+	// regardless of the value set on job.Epoch by the caller.
 	CreateJob(ctx context.Context, job *SearchJob) error
+
 	GetJob(ctx context.Context, jobID string) (*SearchJob, error)
-	UpdateJobStatus(ctx context.Context, jobID string, status string, resultCount int, errMsg string, finishTime time.Time, calcTimeMs int64) error
-	SaveResults(ctx context.Context, jobID string, entityIDs []string) error
+
+	// UpdateJobStatus fences on epoch (ErrStaleClaim on mismatch) and refuses
+	// a terminal job (ErrAlreadyTerminal). Against a missing job it returns
+	// ErrNotFound. A zero finishTime is stored as absent (NULL/nil).
+	UpdateJobStatus(ctx context.Context, jobID string, epoch int64, status string, resultCount int, errMsg string, finishTime time.Time, calcTimeMs int64) error
+
+	// SaveResults streams entityIDs into the job's persisted result set.
+	// Exactly one call is made per claim epoch; yield order is preserved as
+	// GetResultIDs order. Implementations batch internally as they see fit,
+	// but the result sequence position must increase strictly across chunks.
+	// The store observes ctx cancellation. A nil return means everything
+	// yielded was durably stored — it is NOT a statement about job success,
+	// which is recorded separately via UpdateJobStatus.
+	//
+	// Fences on epoch (ErrStaleClaim) and terminal status (ErrAlreadyTerminal,
+	// checked at least at chunk boundaries), matching UpdateJobStatus.
+	SaveResults(ctx context.Context, jobID string, epoch int64, entityIDs iter.Seq[string]) error
+
+	// GetResultIDs requires offset >= 0 && limit >= 1; a violation returns an
+	// error, never a panic. Reading a non-terminal job answers with the
+	// results saved so far.
 	GetResultIDs(ctx context.Context, jobID string, offset, limit int) (entityIDs []string, total int, err error)
+
 	DeleteJob(ctx context.Context, jobID string) error
+
+	// ReapExpired deletes eligible expired jobs. Cross-tenant: obtain with a
+	// background/tenant-less context, as with ScheduledTaskStore.ScanDue
+	// (persistence.go:19-24).
 	ReapExpired(ctx context.Context, ttl time.Duration) (int, error)
+
 	// Cancel marks the job CANCELLED and stamps the given finishTime on the
 	// job it transitions. Idempotent: cancelling a job already in a
 	// terminal state returns nil AND does not overwrite the existing finish
@@ -54,4 +112,22 @@ type AsyncSearchStore interface {
 	// time is caller-supplied so all backends record the same instant — the
 	// engine is the single clock.
 	Cancel(ctx context.Context, jobID string, finishTime time.Time) error
+
+	// Heartbeat stamps HeartbeatTime, fenced by epoch. Returns ErrStaleClaim
+	// if epoch does not match the job's current Epoch, ErrAlreadyTerminal if
+	// the job is already terminal, and ErrNotFound if the job does not exist.
+	Heartbeat(ctx context.Context, jobID string, epoch int64) error
+
+	// ClaimStale atomically claims up to limit RUNNING jobs whose heartbeat
+	// (HeartbeatTime, or CreateTime as the baseline when HeartbeatTime is
+	// nil) is older than staleAfter. It never claims a terminal job. Claiming
+	// bumps Epoch and stamps HeartbeatTime; concurrent claimers obtain
+	// disjoint sets of jobs. The staleness stamp and the staleness comparison
+	// use the same clock domain (store-side, where the store has one).
+	// Cross-tenant, like ReapExpired: obtain with a background/tenant-less
+	// context, as with ScheduledTaskStore.ScanDue (persistence.go:19-24).
+	ClaimStale(ctx context.Context, staleAfter time.Duration, limit int) ([]*SearchJob, error)
+
+	// ClearResults deletes the job's persisted result IDs. Idempotent.
+	ClearResults(ctx context.Context, jobID string) error
 }

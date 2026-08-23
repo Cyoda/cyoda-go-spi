@@ -1,6 +1,7 @@
 package spitest
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -61,7 +62,7 @@ func testASUpdateSucceeded(t *testing.T, h Harness) {
 	id := newID()
 	require.NoError(t, as.CreateJob(ctx, newSearchJob(tid, id)))
 	finish := time.Now().UTC()
-	require.NoError(t, as.UpdateJobStatus(ctx, id, "SUCCESSFUL", 42, "", finish, 100))
+	require.NoError(t, as.UpdateJobStatus(ctx, id, 1, "SUCCESSFUL", 42, "", finish, 100))
 	got, err := as.GetJob(ctx, id)
 	require.NoError(t, err)
 	require.Equal(t, "SUCCESSFUL", got.Status)
@@ -76,7 +77,7 @@ func testASUpdateFailed(t *testing.T, h Harness) {
 	as, _ := h.Factory.AsyncSearchStore(ctx)
 	id := newID()
 	require.NoError(t, as.CreateJob(ctx, newSearchJob(tid, id)))
-	require.NoError(t, as.UpdateJobStatus(ctx, id, "FAILED", 0, "boom", time.Now().UTC(), 10))
+	require.NoError(t, as.UpdateJobStatus(ctx, id, 1, "FAILED", 0, "boom", time.Now().UTC(), 10))
 	got, _ := as.GetJob(ctx, id)
 	require.Equal(t, "FAILED", got.Status)
 	require.Equal(t, "boom", got.Error)
@@ -91,7 +92,7 @@ func testASResultsPagination(t *testing.T, h Harness) {
 	// Use UUID-based IDs to satisfy backends that store result IDs as timeuuids
 	// (e.g. Cassandra). Short literals like "a","b","c" are not valid UUIDs.
 	ids := []string{newID(), newID(), newID(), newID(), newID(), newID(), newID(), newID()}
-	require.NoError(t, as.SaveResults(ctx, id, ids))
+	require.NoError(t, as.SaveResults(ctx, id, 1, slices.Values(ids)))
 
 	page1, total, err := as.GetResultIDs(ctx, id, 0, 3)
 	require.NoError(t, err)
@@ -156,7 +157,7 @@ func testASReapExpired(t *testing.T, h Harness) {
 	// Running jobs are intentionally skipped by the reaper (they may still
 	// have live goroutines writing results).
 	finishTime := h.Now().UTC()
-	require.NoError(t, as.UpdateJobStatus(ctx, id, "SUCCESSFUL", 0, "", finishTime, 0))
+	require.NoError(t, as.UpdateJobStatus(ctx, id, 1, "SUCCESSFUL", 0, "", finishTime, 0))
 
 	ttl := 10 * time.Millisecond
 	h.AdvanceClock(ttl + 1*time.Millisecond)

@@ -114,8 +114,8 @@ type TransactionState struct {
 	// underlying store (e.g. postgres, via immediate DML under a SQL
 	// SAVEPOINT) stamp attribution directly at delete time and MAY leave
 	// these maps unpopulated — that is not a bug. The conformance contract
-	// is the committed outcome (GetVersionHistory's tombstone), never these
-	// maps' contents; do not assert on them from backend-agnostic tests.
+	// is the committed outcome (GetVersionMetadata's tombstone row), never
+	// these maps' contents; do not assert on them from backend-agnostic tests.
 	Deletes           map[string]bool             // staged deletes; access under OpMu
 	DeleteAttribution map[string]WriteAttribution // entityID → actors for staged deletes; same OpMu posture as Deletes
 	RolledBack        bool                        // closure flag; written under OpMu.Lock, read under OpMu.RLock

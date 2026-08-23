@@ -94,10 +94,11 @@ func testSearcherBoundedOrFailInTx(t *testing.T, h Harness) {
 }
 
 // searcherBoundedOrFail seeds searcherSeedOrder and holds the backend to the
-// Searcher doc's contract: a positive Limit is a cap on the matched set, so
-// exceeding it fails with ErrSearchResultLimitExceeded rather than returning a
-// truncated prefix, exactly-at-limit succeeds, and a non-positive Limit is
-// unbounded — the implementation must not substitute a default of its own.
+// Searcher doc's contract: Limit is a cap on the matched set, so exceeding it
+// fails with ErrSearchResultLimitExceeded rather than returning a truncated
+// prefix, exactly-at-limit succeeds, and Limit <= 0 is a contract violation
+// the implementation must reject with an error rather than treating as
+// unbounded or substituting a default of its own.
 //
 // When inTx is set the assertions run inside a live transaction with the tail
 // of the match set staged but uncommitted, so each backend's
@@ -170,16 +171,16 @@ func searcherBoundedOrFail(t *testing.T, h Harness, inTx bool) {
 		require.Len(t, got, searcherMatchN)
 	})
 
-	t.Run("ZeroLimitUnbounded", func(t *testing.T) {
+	t.Run("ZeroLimitRejected", func(t *testing.T) {
 		got, err := search(t, 0)
-		require.NoError(t, err)
-		require.Len(t, got, searcherMatchN)
+		require.Error(t, err, "Limit <= 0 is a contract violation, not \"unbounded\"")
+		require.Empty(t, got)
 	})
 
-	t.Run("NegativeLimitUnbounded", func(t *testing.T) {
+	t.Run("NegativeLimitRejected", func(t *testing.T) {
 		got, err := search(t, -1)
-		require.NoError(t, err)
-		require.Len(t, got, searcherMatchN)
+		require.Error(t, err, "Limit <= 0 is a contract violation, not \"unbounded\"")
+		require.Empty(t, got)
 	})
 }
 

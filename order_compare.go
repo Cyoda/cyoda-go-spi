@@ -7,16 +7,23 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// LessByOrder is the canonical strict-less-than comparator for OrderSpec
-// sequences, shared by every backend (memory, sqlite, postgres, commercial)
-// so query results sort identically regardless of which plugin executed
-// them. It mirrors the SQL ORDER BY built by plugins/sqlite/searcher.go and
-// plugins/postgres/searcher.go's orderByFieldExpr: each spec in precedence
-// order, comparison fixed by Kind, missing/null last (both directions), with
-// a final entity_id ascending tiebreaker. Ported from
-// internal/domain/search/ordersort.go (sortEntities/lessByKey) — do not
-// diverge from either the SQL or the in-memory semantics; drift here would
-// silently change cross-backend ordering.
+// LessByOrder is this engine's strict-less-than comparator for OrderSpec
+// sequences: each spec in precedence order, missing/null last (both
+// directions), with a final entity_id tiebreaker.
+//
+// For data paths and non-id meta fields, Kind fixes the comparison (byte
+// order text, IEEE-754 numeric, bool false<true, chronological instant) and
+// every backend (memory, sqlite, postgres, commercial) applies the same
+// comparison for a given Kind, so ordering on those fields matches across
+// backends. It mirrors the SQL ORDER BY built by plugins/sqlite/searcher.go
+// and plugins/postgres/searcher.go's orderByFieldExpr for that shared-Kind
+// subset.
+//
+// For Source=SourceMeta, Path="id" — including the terminal tiebreaker —
+// Kind is IGNORED: the comparator is this engine's BYTE-WISE canonical
+// entity-ID order, a per-engine choice documented per backend and NOT
+// required to be identical across backends (see OrderSpec's doc comment).
+// Ported from internal/domain/search/ordersort.go (sortEntities/lessByKey).
 func LessByOrder(a, b *Entity, specs []OrderSpec) bool {
 	for _, s := range specs {
 		if decided, less := lessByOrderKey(a, b, s); decided {
@@ -43,7 +50,14 @@ func lessByOrderKey(a, b *Entity, s OrderSpec) (decided, less bool) {
 		}
 		return true, aok // present (aok) sorts first, irrespective of Desc
 	}
-	c := compareOrderValues(av, bv, s.Kind)
+	var c int
+	if s.Source == SourceMeta && s.Path == "id" {
+		// Entity-ID ordering is the engine's canonical byte-wise order, not
+		// a Kind-selected comparison: Kind is ignored for this path.
+		c = bytes.Compare([]byte(av.String()), []byte(bv.String()))
+	} else {
+		c = compareOrderValues(av, bv, s.Kind)
+	}
 	if c == 0 {
 		return false, false
 	}

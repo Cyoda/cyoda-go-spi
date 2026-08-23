@@ -74,6 +74,22 @@ func TestLessByOrder_TemporalMsFloorTie(t *testing.T) {
 	}
 }
 
+func TestLessByOrder_IDPathIgnoresKind(t *testing.T) {
+	// Path="id" ordering is the engine's canonical entity-ID order — a
+	// byte-wise comparison — regardless of the Kind the caller supplies.
+	// "10" vs "9": numerically 9 < 10 (would put "9" first), but byte-wise
+	// '1' < '9' puts "10" first. A Kind=OrderNumeric spec on the id path
+	// must still produce the byte-wise answer, proving Kind is ignored.
+	specs := []spi.OrderSpec{{Path: "id", Source: spi.SourceMeta, Kind: spi.OrderNumeric}}
+	ten, nine := ent("10", `{}`), ent("9", `{}`)
+	if !spi.LessByOrder(ten, nine, specs) {
+		t.Fatal(`byte-wise order must put "10" before "9" even under Kind=OrderNumeric`)
+	}
+	if spi.LessByOrder(nine, ten, specs) {
+		t.Fatal(`byte-wise order must not put "9" before "10" even under Kind=OrderNumeric`)
+	}
+}
+
 func TestLessByOrder_TerminalEntityIDSpecNoDoubleTiebreak(t *testing.T) {
 	// When the terminal spec already resolves to entity_id, no extra
 	// tiebreaker clause is appended (it would be redundant, matching the SQL

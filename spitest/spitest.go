@@ -36,6 +36,16 @@ type Harness struct {
 	// reuses another's tenant. Optional; defaults to a uuid-based generator.
 	NewTenant func() spi.TenantID
 
+	// IDOrder is the engine's canonical entity-ID comparator: a strict
+	// three-way compare (a<b: negative, a==b: zero, a>b: positive) over two
+	// entity ID strings, matching this backend's canonical entity-ID order
+	// (see OrderSpec's doc comment — Path="id" ordering is per-engine, not
+	// guaranteed identical across backends). Ordering conformance subtests
+	// use this to assert Iterate's Ordered/EntityID output rather than
+	// assuming byte-wise comparison. Optional; defaults to byte-wise
+	// strings.Compare.
+	IDOrder func(a, b string) int
+
 	// Skip is an optional map from subtest path suffix to skip reason.
 	// Keys must be the path below the root test name, e.g.:
 	//
@@ -121,6 +131,9 @@ func StoreFactoryConformance(t *testing.T, h Harness) {
 	if h.NewTenant == nil {
 		h.NewTenant = defaultNewTenant
 	}
+	if h.IDOrder == nil {
+		h.IDOrder = strings.Compare
+	}
 	t.Cleanup(func() { _ = h.Factory.Close() })
 
 	tracker := newSkipTracker()
@@ -142,6 +155,7 @@ func StoreFactoryConformance(t *testing.T, h Harness) {
 	t.Run("Audit", func(t *testing.T) { runAuditSuite(t, h, tracker) })
 	t.Run("AsyncSearch", func(t *testing.T) { runAsyncSearchSuite(t, h, tracker) })
 	t.Run("Searcher", func(t *testing.T) { runSearcherSuite(t, h, tracker) })
+	t.Run("Iterable", func(t *testing.T) { runIterableSuite(t, h, tracker) })
 }
 
 func defaultNewTenant() spi.TenantID {

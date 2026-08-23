@@ -6,21 +6,24 @@ import "fmt"
 // (next, lazy pull) with a pre-sorted adds slice, skipping committed rows for
 // which deleted(id) is true, ordered by LessByOrder(specs).
 //
-// limit > 0 is a bounded-or-fail cap on the merged result, not a page size:
-// if the number of survivors exceeds limit, MergeBounded returns
-// ErrSearchResultLimitExceeded rather than a truncated prefix. The bound gates
-// on TOTAL survivors, so the adds slice alone can trip it. Memory is bounded
-// to ~limit+1+len(adds): the committed source is pulled lazily and the merge
-// stops the moment the bound is exceeded.
+// limit >= 1 is REQUIRED — a bounded-or-fail cap on the merged result, not a
+// page size, matching Searcher.Search's contract: if the number of survivors
+// exceeds limit, MergeBounded returns ErrSearchResultLimitExceeded rather
+// than a truncated prefix. The bound gates on TOTAL survivors, so the adds
+// slice alone can trip it. Memory is bounded to ~limit+1+len(adds): the
+// committed source is pulled lazily and the merge stops the moment the bound
+// is exceeded.
 //
-// limit <= 0 means unbounded — it drains and materializes the entire
-// surviving sequence and never raises. Callers must not substitute a default
-// for a non-positive limit; "unbounded" is a real, load-bearing request mode.
+// limit <= 0 is a contract violation: MergeBounded returns an error rather
+// than treating it as "unbounded" or substituting a default. There is no
+// unbounded mode — a caller that wants every surviving entity uses the
+// Iterable streaming surface (see MergeOrdered) instead of asking for a
+// materialized slice with no bound.
 func MergeBounded(next func() (*Entity, bool, error), adds []*Entity, deleted func(id string) bool, specs []OrderSpec, limit int) ([]*Entity, error) {
-	need := -1
-	if limit > 0 {
-		need = limit + 1
+	if limit <= 0 {
+		return nil, fmt.Errorf("MergeBounded: limit must be >= 1")
 	}
+	need := limit + 1
 	out := make([]*Entity, 0, 16)
 	ai := 0
 	// pull the next non-deleted committed row (buffered one-ahead)
@@ -73,11 +76,11 @@ func MergeBounded(next func() (*Entity, bool, error), adds []*Entity, deleted fu
 			}
 		}
 		out = append(out, take)
-		if need >= 0 && len(out) >= need {
+		if len(out) >= need {
 			break
 		}
 	}
-	if limit > 0 && len(out) > limit {
+	if len(out) > limit {
 		return nil, fmt.Errorf("merge: %d or more matches exceed the limit of %d: %w", len(out), limit, ErrSearchResultLimitExceeded)
 	}
 	return out, nil

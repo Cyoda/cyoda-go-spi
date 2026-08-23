@@ -12,6 +12,33 @@ MAINTAINING.md.
 
 ## [Unreleased]
 
+### Breaking
+
+- **`Searcher.Search` requires `Limit >= 1`; `Limit <= 0` is now a contract
+  violation.** Previously `Limit <= 0` meant "unbounded" and the
+  implementation returned the complete matched set; it now MUST return an
+  error instead. The unbounded mode is gone from `Search`.
+
+  Migration: callers that passed `0` or a negative `Limit` to mean "give me
+  everything" must move to the `Iterable` streaming surface — `Iterate`
+  with a zero-value `Filter` yields every match with bounded memory,
+  instead of asking `Search` for an unbounded materialized slice.
+
+- **`spitest` subtest renames:**
+  `Searcher/BoundedOrFail/ZeroLimitUnbounded` → `.../ZeroLimitRejected`,
+  `Searcher/BoundedOrFail/NegativeLimitUnbounded` → `.../NegativeLimitRejected`.
+  Both now assert a non-nil error and an empty result, matching the
+  `Limit <= 0` contract-violation change above.
+
+  Migration: a `Harness.Skip` entry keyed on either old name now fails the
+  conformance run ("possible typo or stale entry") — rename the keys to
+  match.
+
+- **`IterateOptions` gains `OrderBy []OrderSpec` and `TrackingRead bool`.**
+  Ordering — for both `Searcher.Search` and the new `Iterable.Iterate` — is
+  per-engine canonical, not guaranteed identical across backends; see
+  `OrderSpec`'s doc comment.
+
 ### Added
 
 - **Conformance: `GetSubmitTime` now requires tenant isolation.** Two new

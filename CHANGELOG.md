@@ -121,6 +121,31 @@ MAINTAINING.md.
   already enforces; backends that ignore the `ctx` parameter in their
   implementation will fail the new subtests until they add the check.
 
+- **Conformance: 31 new `spitest` subtests are pure additions, not
+  renames — no `Harness.Skip` key needs to change.** `AsyncSearch` gains 15
+  (`Epoch/InitialisedToOne`, `Epoch/FencedWrites`, `Terminal/WriteOnce`,
+  `Claim/StaleClaimed`, `Claim/FreshNotClaimed`, `Claim/NilHeartbeatBaseline`,
+  `Claim/ConcurrentDisjoint`, `Claim/TerminalNeverClaimed`,
+  `ClearResults/Idempotent`, `SaveResults/ChunkSeqContinuity`,
+  `GetResultIDs/DegenerateInputs`, `GetResultIDs/NonTerminalPartial`,
+  `UpdateStatus/MissingIsNotFound`, `UpdateStatus/ZeroFinishTimeAbsent`,
+  `Heartbeat/Semantics`) covering the epoch-fenced job surface below.
+  `Entity` gains 5 (`GetPage/OrderAndBounds`, `GetPage/AsAtSnapshot`,
+  `GetVersionByTransaction/EarliestWins`,
+  `GetVersionByTransaction/DeletedNeverMatches`,
+  `GetVersionByTransaction/EmptyTxID`) covering `GetPage`/
+  `GetVersionByTransaction` above. A wholly new `Iterable` group (11
+  subtests: `Unordered/YieldsAllMatches`, `Ordered/EntityID`,
+  `Ordered/UserFieldWithTieBreak`, `Ordered/InTxErrors`,
+  `Residual/AppliedInNext`, `Ctx/CancelObserved`, `Err/Sticky`,
+  `Close/Idempotent`, `PIT/SnapshotVariant`, `Overlay/SnapshotAtOpen`,
+  `TrackingRead/Gating`) exercises the optional `spi.Iterable` interface,
+  auto-skipping via type assertion on a backend that doesn't implement it —
+  the same pattern `Searcher` already uses, so it needs no `Harness.Skip`
+  entry either. A backend passing today keeps passing untouched; one that
+  doesn't yet implement the exercised surface sees new failures until it
+  does.
+
 ### Breaking
 
 - **`AsyncSearchStore.Cancel` takes a caller-supplied `finishTime`.**
@@ -129,6 +154,55 @@ MAINTAINING.md.
 
   Migration: pass the cancellation instant; stores must stamp it on the
   transition and must not overwrite it on an idempotent re-cancel.
+
+- **`AsyncSearchStore` write methods are epoch-fenced; terminal jobs are
+  write-once.** `SearchJob` gains `HeartbeatTime *time.Time` (liveness
+  stamp; nil means never stamped, staleness measured from `CreateTime`) and
+  `Epoch int64` (claim/attempt counter; `CreateJob` always persists `1`
+  regardless of the input job's value). `UpdateJobStatus` and `SaveResults`
+  each gain an `epoch int64` parameter, and the new `Heartbeat` method takes
+  one too; every one of the three MUST return `ErrStaleClaim` when the
+  caller's epoch does not match the job's current `Epoch`, and MUST return
+  `ErrAlreadyTerminal` against a job already `SUCCESSFUL`/`FAILED`/
+  `CANCELLED` — `Cancel` remains the sole idempotent-nil exception,
+  unaffected by this change.
+
+  Old: `UpdateJobStatus(ctx context.Context, jobID string, status string, resultCount int, errMsg string, finishTime time.Time, calcTimeMs int64) error`
+  New: `UpdateJobStatus(ctx context.Context, jobID string, epoch int64, status string, resultCount int, errMsg string, finishTime time.Time, calcTimeMs int64) error`
+
+  Old: `SaveResults(ctx context.Context, jobID string, entityIDs []string) error`
+  New: `SaveResults(ctx context.Context, jobID string, epoch int64, entityIDs iter.Seq[string]) error`
+  — the results parameter also changes from a materialized slice to a
+  pull-stream.
+
+  Migration: thread the epoch a caller was claimed under (`1` for a job's
+  own `CreateJob`-assigned epoch, or whatever `ClaimStale` last returned)
+  through every `UpdateJobStatus`/`SaveResults`/`Heartbeat` call; replace a
+  `[]string` results slice at each `SaveResults` call site with
+  `slices.Values(ids)` or any other `iter.Seq[string]` producer; treat
+  `ErrStaleClaim` and `ErrAlreadyTerminal` as expected outcomes — a slower
+  executor's write landing after a peer reclaimed or finished the job — not
+  as bugs to suppress.
+
+- **`AsyncSearchStore` gains `Heartbeat`, `ClaimStale`, and `ClearResults`;
+  two new sentinels `ErrAlreadyTerminal` and `ErrStaleClaim`.**
+  `Heartbeat(ctx, jobID, epoch) error` stamps liveness, fenced like the
+  write methods above. `ClaimStale(ctx, staleAfter, limit) ([]*SearchJob,
+  error)` atomically claims up to `limit` `RUNNING` jobs whose heartbeat (or
+  `CreateTime` baseline, when never heartbeated) is older than `staleAfter`;
+  claiming bumps `Epoch` and refreshes `HeartbeatTime` so concurrent
+  claimers get disjoint sets, and a terminal job is never claimed.
+  `ClearResults(ctx, jobID) error` idempotently deletes a job's persisted
+  result IDs, so a reclaimed job's next `SaveResults` epoch starts clean
+  rather than colliding with or being contaminated by the stale epoch's
+  rows. `ClaimStale` is cross-tenant like `ReapExpired` — obtain it with a
+  background/tenant-less context.
+
+  Migration: implement all three methods on every `AsyncSearchStore`. A
+  `SelfExecutingSearchStore` (whose `CreateJob` dispatches and persists
+  results itself) MAY no-op `Heartbeat`/`ClaimStale`/`ClearResults` and
+  reject `SaveResults`, since liveness and reclaim are meaningless when a
+  store owns execution outright.
 
 - **`MatchFilter`, `EvalLeafString` and `Expansion.Void` are removed.**
   Filter evaluation is now a prepare/execute split: build a `PreparedFilter` once

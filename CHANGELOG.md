@@ -39,7 +39,26 @@ MAINTAINING.md.
   per-engine canonical, not guaranteed identical across backends; see
   `OrderSpec`'s doc comment.
 
+- **`MergeBounded` requires `limit >= 1`; `limit <= 0` is now a contract
+  violation.** Previously `limit <= 0` meant "unbounded" and the helper
+  drained and materialized the entire surviving sequence; it now returns
+  `fmt.Errorf("MergeBounded: limit must be >= 1")` instead. There is no
+  unbounded mode, matching the `Searcher.Search` change above.
+
+  Migration: callers that passed `0` or a negative `limit` for "everything"
+  must move to the new `MergeOrdered` streaming helper (below) driven off an
+  `Iterable`-backed ordered pull-stream, instead of asking for an unbounded
+  materialized slice.
+
 ### Added
+
+- **`MergeOrdered` helper.** A pure pull-stream merge of an already-ordered
+  committed source with a sorted overlay (adds), excluding deleted ids: on
+  an equal-ID collision the overlay wins and the committed duplicate is
+  consumed without a second yield; an error from the committed source is
+  propagated once already-fetched entities have been yielded and is sticky
+  thereafter. Pairs with `Iterable.Iterate` the way `MergeBounded` pairs
+  with `Searcher.Search`.
 
 - **Conformance: `GetSubmitTime` now requires tenant isolation.** Two new
   `spitest` subtests: `TxStateErrors/TenantMismatchOnGetSubmitTime` (a caller

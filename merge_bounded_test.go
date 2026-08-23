@@ -24,7 +24,7 @@ func TestMergeBounded_InterleavesAddsInOrder(t *testing.T) {
 	specs := []spi.OrderSpec{{Path: "n", Source: spi.SourceData, Kind: spi.OrderNumeric}}
 	committed := []*spi.Entity{ent("a", `{"n":1}`), ent("c", `{"n":3}`)}
 	adds := []*spi.Entity{ent("b", `{"n":2}`)}
-	got, err := spi.MergeBounded(slcNext(committed), adds, none, specs, 0)
+	got, err := spi.MergeBounded(slcNext(committed), adds, none, specs, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestMergeBounded_InterleavesAddsInOrder(t *testing.T) {
 func TestMergeBounded_EmptyCommittedSourceOnlyAdds(t *testing.T) {
 	specs := []spi.OrderSpec{{Path: "n", Source: spi.SourceData, Kind: spi.OrderNumeric}}
 	adds := []*spi.Entity{ent("x", `{"n":1}`), ent("y", `{"n":2}`)}
-	got, err := spi.MergeBounded(slcNext(nil), adds, none, specs, 0)
+	got, err := spi.MergeBounded(slcNext(nil), adds, none, specs, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestMergeBounded_PropagatesNextError(t *testing.T) {
 	specs := []spi.OrderSpec{{Path: "n", Source: spi.SourceData, Kind: spi.OrderNumeric}}
 	wantErr := errors.New("boom")
 	next := func() (*spi.Entity, bool, error) { return nil, false, wantErr }
-	_, err := spi.MergeBounded(next, nil, none, specs, 0)
+	_, err := spi.MergeBounded(next, nil, none, specs, 1)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("want error propagated, got %v", err)
 	}
@@ -129,14 +129,31 @@ func TestMergeBounded_ExactlyAtLimitSucceeds(t *testing.T) {
 	}
 }
 
-func TestMergeBounded_UnboundedDrains(t *testing.T) {
+// TestMergeBounded_ZeroLimitRejected verifies limit <= 0 is a contract
+// violation (matching Searcher.Search's bounded-or-fail contract): there is
+// no "unbounded" mode, and the caller must not get a fully materialized
+// slice for a non-positive limit.
+func TestMergeBounded_ZeroLimitRejected(t *testing.T) {
 	committed := []*spi.Entity{ent("a", `{}`), ent("b", `{}`), ent("c", `{}`)}
 	got, err := spi.MergeBounded(slcNext(committed), nil, nil, nil, 0)
-	if err != nil {
-		t.Fatalf("limit 0 must be unbounded: unexpected err %v", err)
+	if err == nil {
+		t.Fatal("limit 0 must be rejected, got nil error")
 	}
-	if len(got) != 3 {
-		t.Fatalf("got %d entities, want 3", len(got))
+	if got != nil {
+		t.Fatalf("rejected call must not return a result, got %v", got)
+	}
+}
+
+// TestMergeBounded_NegativeLimitRejected is the same contract violation for
+// a negative limit.
+func TestMergeBounded_NegativeLimitRejected(t *testing.T) {
+	committed := []*spi.Entity{ent("a", `{}`), ent("b", `{}`), ent("c", `{}`)}
+	got, err := spi.MergeBounded(slcNext(committed), nil, nil, nil, -1)
+	if err == nil {
+		t.Fatal("negative limit must be rejected, got nil error")
+	}
+	if got != nil {
+		t.Fatalf("rejected call must not return a result, got %v", got)
 	}
 }
 

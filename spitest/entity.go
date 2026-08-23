@@ -616,7 +616,9 @@ func testEntityGetPageOrderAndBounds(t *testing.T, h Harness) {
 
 // testEntityGetPageAsAtSnapshot verifies GetPage's asAt parameter reads
 // committed-only state as of the given instant, excluding writes after it —
-// mirroring GetAllAsAt's contract.
+// mirroring GetAllAsAt's contract — AND that asAt ignores any ambient
+// transaction's own overlay, reading committed-only state even when called
+// through a transaction's own context.
 func testEntityGetPageAsAtSnapshot(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	mref := spi.ModelRef{EntityName: "m-page-asat", ModelVersion: "1"}
@@ -632,7 +634,7 @@ func testEntityGetPageAsAtSnapshot(t *testing.T, h Harness) {
 	asAt := h.Now().UTC()
 	h.AdvanceClock(1 * time.Millisecond)
 
-	// Fifth entity written AFTER asAt — must not be returned.
+	// Fourth entity written AFTER asAt — must not be returned.
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
 		require.NoError(t, err)
@@ -645,6 +647,40 @@ func testEntityGetPageAsAtSnapshot(t *testing.T, h Harness) {
 	got, err := es.GetPage(ctx, mref, 10, 0, &asAt)
 	require.NoError(t, err)
 	require.Len(t, got, 3, "GetPage with asAt must exclude writes after the cutoff")
+
+	// asAt must also ignore the ambient transaction's own uncommitted
+	// overlay, not just future committed writes. Capture a committed-only
+	// baseline right before opening a transaction, buffer a new save inside
+	// that transaction (uncommitted), capture a cutoff AFTER the buffered
+	// write, and confirm GetPage(asAt) — called through the transaction's
+	// own context — still returns exactly the pre-transaction baseline: if
+	// the overlay were consulted instead, the buffered entity's write-time
+	// would fall inside the cutoff and it would wrongly appear.
+	h.AdvanceClock(1 * time.Millisecond)
+	beforeTxAsAt := h.Now().UTC()
+	baseline, err := es.GetPage(ctx, mref, 10, 0, &beforeTxAsAt)
+	require.NoError(t, err)
+
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
+	esTx, err := h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+	bufferedID := newID()
+	_, err = esTx.Save(txCtx, newEntity(t, "m-page-asat", bufferedID, map[string]any{"i": 100}))
+	require.NoError(t, err)
+	h.AdvanceClock(1 * time.Millisecond)
+	laterAsAt := h.Now().UTC()
+
+	gotInTx, err := esTx.GetPage(txCtx, mref, 10, 0, &laterAsAt)
+	require.NoError(t, err)
+	require.Len(t, gotInTx, len(baseline),
+		"GetPage with asAt must ignore the ambient transaction's own uncommitted write — count must match the committed-only baseline captured just before the transaction opened")
+	for _, e := range gotInTx {
+		require.NotEqual(t, bufferedID, e.Meta.ID,
+			"the buffered, uncommitted entity must never appear on an asAt page")
+	}
+	require.NoError(t, tm.Rollback(txCtx, txID))
 }
 
 // testEntityGetVersionByTransactionEarliestWins verifies that when one
@@ -715,23 +751,46 @@ func testEntityGetVersionByTransactionDeletedNeverMatches(t *testing.T, h Harnes
 }
 
 // testEntityGetVersionByTransactionEmptyTxID verifies that an empty txID
-// never matches: it must always return ErrNotFound rather than being
-// treated as a wildcard or matching a stored-empty TransactionID.
+// never matches, in either of the two ways it could accidentally succeed:
+// as a wildcard against an entity with a real, non-empty TransactionID, or
+// by matching a stored-empty TransactionID. The latter requires an entity
+// actually written with no ambient transaction — a plain Save on a bare
+// (non-tx) ctx is a legal SPI operation, and backends that record
+// TransactionID stamp an empty one for such writes (see
+// EntityVersionMeta.TransactionID's doc comment: "may be empty
+// (non-transactional writes)"). Both scenarios must return ErrNotFound.
 func testEntityGetVersionByTransactionEmptyTxID(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
-	id := newID()
-	withTx(t, h, ctx, func(txCtx context.Context) {
-		es, err := h.Factory.EntityStore(txCtx)
-		require.NoError(t, err)
-		_, err = es.Save(txCtx, newEntity(t, "m-gvbt-empty", id, map[string]any{}))
-		require.NoError(t, err)
-	})
-
 	es, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
-	_, err = es.GetVersionByTransaction(ctx, id, "")
+
+	// Scenario 1 (wildcard non-match): the entity has a real, non-empty
+	// TransactionID; an empty query txID must not match it.
+	idReal := newID()
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		esTx, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = esTx.Save(txCtx, newEntity(t, "m-gvbt-empty", idReal, map[string]any{}))
+		require.NoError(t, err)
+	})
+	_, err = es.GetVersionByTransaction(ctx, idReal, "")
 	require.ErrorIs(t, err, spi.ErrNotFound,
-		"empty txID must never match; it must always return ErrNotFound")
+		"empty txID must not match an entity with a real, non-empty TransactionID")
+
+	// Scenario 2 (stored-empty non-match): a plain Save with no ambient
+	// transaction leaves a stored-empty TransactionID; an empty query txID
+	// must not match that either.
+	idBare := newID()
+	_, err = es.Save(ctx, newEntity(t, "m-gvbt-empty", idBare, map[string]any{}))
+	require.NoError(t, err)
+	gotBare, err := es.Get(ctx, idBare)
+	require.NoError(t, err)
+	require.Empty(t, gotBare.Meta.TransactionID,
+		"a non-transactional Save must leave TransactionID empty — the scenario this subtest pins")
+
+	_, err = es.GetVersionByTransaction(ctx, idBare, "")
+	require.ErrorIs(t, err, spi.ErrNotFound,
+		"empty txID must never match a stored-empty TransactionID; it must always return ErrNotFound")
 }
 
 func testEntityCompareAndSaveSuccess(t *testing.T, h Harness) {

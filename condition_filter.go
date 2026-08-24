@@ -3,6 +3,7 @@ package spi
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/cyoda-platform/cyoda-go-spi/predicate"
 )
@@ -25,15 +26,20 @@ import (
 // A condition's jsonPath is the WIRE form and is JSON Path syntax, so the
 // "$." leader is REQUIRED:
 //
-//	jsonPath = "$." segment ( "." segment )*
-//	segment  = 1*( ALPHA / DIGIT / "_" / "-" )   ; ASCII only
+//	jsonPath  = "$." segment ( "." segment )*
+//	segment   = name subscript*
+//	name      = 1*( ALPHA / DIGIT / "_" / "-" )   ; ASCII only
+//	subscript = "[" ( "*" / 1*DIGIT ) "]"
 //
 // "$.amount" and "$.address.city" are paths. A bare "amount" is not one and
 // is REJECTED with an error wrapping [ErrInvalidFilterPath] — it is not a
 // tolerated alias. So are an empty path, an empty or trailing segment
-// ("$..a", "$.a."), bracket-quoted property access ("$['x']", "$.['x']"), and
-// any character outside the segment set. Callers should surface all of these
-// as a client error (400), not as a reason to fall back.
+// ("$..a", "$.a."), bracket-quoted property access ("$['x']", "$.['x']",
+// `$.a["b"]`), a bracket spelling outside the two supported subscript forms
+// ("$.a[", "$.a]", "$.a[-1]", "$.a[0:2]", "$.a[0,1]", "$.a[?(@.x)]"), and any
+// character outside the segment set — including one that FOLLOWS a well-formed
+// subscript ("$.a[0];DROP"). Callers should surface all of these as a client
+// error (400), not as a reason to fall back.
 //
 // Distinguish this from the PLUGIN-FACING form: [Filter.Path] is what this
 // function emits, and it is BARE ("amount"), with the leader already stripped.
@@ -45,10 +51,11 @@ import (
 // that happens to spell "$._meta.state" is an ordinary dotted path and is
 // accepted as one.
 //
-// An array-subscripted path ("$.tags[*].name", "$.arr[0]") is valid JSON Path
-// but not expressible as a pushdown filter. It fails with a plain error that
-// does NOT wrap ErrInvalidFilterPath, which is the signal to fall back to
-// in-memory evaluation rather than to reject the request.
+// A WELL-FORMED array-subscripted path ("$.tags[*].name", "$.arr[0]",
+// "$.matrix[*][*]") is valid JSON Path but not expressible as a pushdown
+// filter. It fails with a plain error that does NOT wrap ErrInvalidFilterPath,
+// which is the signal to fall back to in-memory evaluation rather than to
+// reject the request. A malformed one is invalid input, per the list above.
 //
 // # fields, and why nil is not a safe default
 //
@@ -398,11 +405,19 @@ const jsonPathLeader = "$."
 //     bare path happily, so the mistake would never surface, while a
 //     bracket-quoted one resolves to nothing and answers an empty page for a
 //     field that exists.
-//   - NOT PUSHDOWNABLE — a well-formed "$."-prefixed path using array
+//   - NOT PUSHDOWNABLE — a WELL-FORMED "$."-prefixed path using array
 //     subscript syntax ("$.tags[*].name", "$.arr[0]"). Valid JSON Path, and
-//     the in-memory evaluator serves the wildcard form, so this stays a plain
-//     error and the fallback is the correct response. Promoting it to
-//     ErrInvalidFilterPath would turn working queries into 400s.
+//     the in-memory evaluator serves it, so this stays a plain error and the
+//     fallback is the correct response. Promoting it to ErrInvalidFilterPath
+//     would turn working queries into 400s.
+//
+// A MALFORMED subscript ("$.a[", "$.a[0:2]", `$.a["x"]`, "$.a[0];DROP") is in
+// the first class, not the second: the whole path is scanned, subscripts
+// included, so bracket syntax outside the supported forms is invalid input.
+// It used to land in the fallback class because the scan stopped at the first
+// '[' and accepted whatever followed — and the in-memory evaluator resolves
+// none of those spellings, so the request answered an empty page for a field
+// that exists.
 func stripDollarDot(path string) (string, error) {
 	if !strings.HasPrefix(path, jsonPathLeader) {
 		return "", invalidPathError(path,
@@ -412,44 +427,148 @@ func stripDollarDot(path string) (string, error) {
 	if stripped == "" {
 		return "", invalidPathError(path, `addresses no field: nothing follows the "$." leader`)
 	}
-	// Bracket-quoted property access ("$.['x']", and "$['x']" which fails the
-	// leader check above) denotes the same node as dotted access but is not
-	// the model's syntax, and NO evaluator in the stack resolves it — pushdown
-	// rejects it and the in-memory fallback misses, answering an empty page
-	// for a field that exists. Named separately from the subscript arm below
-	// so the diagnostic can say what to write instead.
-	if strings.Contains(stripped, "['") || strings.Contains(stripped, "']") {
+	// Bracket-quoted property access ("$.['x']", `$.a["b"]`, and "$['x']"
+	// which fails the leader check above) denotes the same node as dotted
+	// access but is not the model's syntax, and NO evaluator in the stack
+	// resolves it — pushdown rejects it and the in-memory fallback misses,
+	// answering an empty page for a field that exists. The subscript scan
+	// below would reject these anyway; naming them first lets the diagnostic
+	// say what to write instead.
+	if containsBracketQuote(stripped) {
 		return "", invalidPathError(path,
 			`bracket-quoted property access is not supported; use dotted access (e.g. "$.a.b")`)
 	}
-	segStart := 0
-	for i, c := range stripped {
-		if c == '.' {
-			if i == segStart {
-				return "", invalidPathError(path, "contains an empty path segment")
-			}
-			segStart = i + 1
-			continue
-		}
-		// Array subscript/wildcard syntax: valid JSON Path, not expressible as
-		// a pushdown filter. The unpushdownable class — a plain error, so the
-		// caller falls back to in-memory evaluation.
-		if c == '[' || c == ']' {
-			return "", fmt.Errorf("path %q contains non-pushdownable syntax (character %q)", path, c)
-		}
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z',
-			c >= '0' && c <= '9',
-			c == '_', c == '-':
-			// safe
-		default:
-			return "", invalidPathError(path, fmt.Sprintf("contains disallowed character %q", c))
-		}
+	hasSubscript, err := scanWirePathBody(stripped, func(reason string) error {
+		return invalidPathError(path, reason)
+	})
+	if err != nil {
+		return "", err
 	}
-	if segStart == len(stripped) {
-		return "", invalidPathError(path, "ends in a trailing dot")
+	if hasSubscript {
+		// Well-formed array subscript/wildcard syntax: valid JSON Path, not
+		// expressible as a pushdown filter. The unpushdownable class — a
+		// plain error, so the caller falls back to in-memory evaluation.
+		return "", fmt.Errorf("path %q contains non-pushdownable array-subscript syntax", path)
 	}
 	return stripped, nil
+}
+
+// containsBracketQuote reports whether p contains a bracket-quoted property
+// access in either quoting style.
+func containsBracketQuote(p string) bool {
+	return strings.Contains(p, "['") || strings.Contains(p, "']") ||
+		strings.Contains(p, `["`) || strings.Contains(p, `"]`)
+}
+
+// scanWirePathBody validates the leader-stripped remainder of a wire jsonPath
+// against the segment grammar and reports whether it uses array-subscript
+// syntax. Diagnostics are built by mkInvalid so each caller can attach its own
+// sentinel and echo the full path.
+//
+//	body      = segment ( "." segment )*
+//	segment   = name subscript*
+//	name      = 1*( ALPHA / DIGIT / "_" / "-" )        ; ASCII only
+//	subscript = "[" ( "*" / 1*DIGIT ) "]"
+//
+// The whole body is scanned. An earlier version stopped at the first '[' and
+// accepted the remainder unread, which admitted unbalanced brackets, slices,
+// unions, filter expressions, negative indices and arbitrary trailing garbage
+// — none of which any evaluator in the stack resolves.
+//
+// Errors are reported for the FIRST offending position, so the diagnostic
+// names the character the caller has to fix.
+func scanWirePathBody(body string, mkInvalid func(reason string) error) (bool, error) {
+	hasSubscript := false
+	i, n := 0, len(body)
+	for {
+		nameStart := i
+		for i < n && isPathNameByte(body[i]) {
+			i++
+		}
+		if i == nameStart {
+			if i == n {
+				return false, mkInvalid("ends in a trailing dot")
+			}
+			switch body[i] {
+			case '.':
+				return false, mkInvalid("contains an empty path segment")
+			case '[':
+				return false, mkInvalid("has an array subscript with no field name before it")
+			case ']':
+				return false, mkInvalid(`contains an unmatched "]"`)
+			default:
+				return false, mkInvalid(disallowedCharReason(body[i:]))
+			}
+		}
+		for i < n && body[i] == '[' {
+			rel := strings.IndexByte(body[i:], ']')
+			if rel < 0 {
+				return false, mkInvalid("has an unclosed array subscript")
+			}
+			inner := body[i+1 : i+rel]
+			if !isSupportedSubscript(inner) {
+				return false, mkInvalid(fmt.Sprintf(
+					"has an unsupported array subscript %q; only the wildcard [*] and a non-negative index (e.g. [0]) are supported",
+					"["+inner+"]"))
+			}
+			hasSubscript = true
+			i += rel + 1
+		}
+		if i == n {
+			return hasSubscript, nil
+		}
+		switch body[i] {
+		case '.':
+			i++
+			if i == n {
+				return false, mkInvalid("ends in a trailing dot")
+			}
+		case ']':
+			return false, mkInvalid(`contains an unmatched "]"`)
+		default:
+			return false, mkInvalid(disallowedCharReason(body[i:]))
+		}
+	}
+}
+
+// isPathNameByte reports whether b is admissible inside a path segment name.
+func isPathNameByte(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' ||
+		b >= '0' && b <= '9' || b == '_' || b == '-'
+}
+
+// isSupportedSubscript reports whether the text between "[" and "]" is one of
+// the two forms the stack can resolve: the wildcard, or a non-negative decimal
+// index (digits only — no sign, no whitespace, no exponent). Everything else (a
+// slice, a union, a filter expression, a negative or signed index) has no
+// equivalent in either evaluator.
+//
+// The engine's boundary check applies the same rule, reaching it through the
+// predicate its in-memory evaluator uses to rewrite a subscript for gjson, so
+// "accepted here" and "resolvable there" stay the same question.
+// TestValidateCondition_PathGrammarMatchesSPI (cyoda-go) pins the two against
+// each other.
+func isSupportedSubscript(inner string) bool {
+	if inner == "*" {
+		return true
+	}
+	if inner == "" {
+		return false
+	}
+	for i := 0; i < len(inner); i++ {
+		if inner[i] < '0' || inner[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// disallowedCharReason renders the diagnostic for the first rune of s, which
+// the grammar does not admit. It decodes a rune rather than a byte so a
+// non-ASCII character is echoed whole rather than as a mojibake fragment.
+func disallowedCharReason(s string) string {
+	r, _ := utf8.DecodeRuneInString(s)
+	return fmt.Sprintf("contains disallowed character %q", r)
 }
 
 // invalidPathError builds the [ErrInvalidFilterPath]-wrapping diagnostic for a

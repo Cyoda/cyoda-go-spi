@@ -25,13 +25,33 @@ MAINTAINING.md.
   (`ALPHA / DIGIT / "_" / "-"`, ASCII only) — several of which the old
   character-only check let through as malformed `Filter.Path` values.
 
-  Unchanged: an array-subscripted path (`$.tags[*].name`, `$.arr[0]`) is
-  valid JSON Path but not pushdownable, and still fails with a plain error
-  that does NOT wrap `ErrInvalidFilterPath`. That distinction is the point of
-  the sentinel — callers translate a wrapped error into a client error (400)
-  and an unwrapped one into their in-memory-evaluation fallback. A caller
-  that treats every translation error as "fall back" will not observe the
-  tightening at all.
+  Unchanged: a WELL-FORMED array-subscripted path (`$.tags[*].name`,
+  `$.arr[0]`, `$.matrix[*][*]`) is valid JSON Path but not pushdownable, and
+  still fails with a plain error that does NOT wrap `ErrInvalidFilterPath`.
+  That distinction is the point of the sentinel — callers translate a wrapped
+  error into a client error (400) and an unwrapped one into their
+  in-memory-evaluation fallback. A caller that treats every translation error
+  as "fall back" will not observe the tightening at all.
+
+  **Subscripts are now scanned rather than short-circuited.** The grammar
+  previously stopped reading at the first `[` and accepted the remainder
+  unread, so an unbalanced bracket (`$.a[`, `$.a]`), a slice (`$.a[0:2]`), a
+  union (`$.a[0,1]`), a filter expression (`$.a[?(@.x)]`), a negative index
+  (`$.a[-1]`), a double-quoted property access (`$.a["x"]`), a subscript with
+  no field before it (`$.[0]`) and arbitrary trailing garbage
+  (`$.a[0];DROP`, `$.a[0].xé`) all landed in the *unpushdownable* class —
+  i.e. callers fell back to in-memory evaluation, which resolves none of
+  them, and the request answered an empty page for a field that exists. The
+  full path is now scanned:
+
+      jsonPath  = "$." segment ( "." segment )*
+      segment   = name subscript*
+      name      = 1*( ALPHA / DIGIT / "_" / "-" )   ; ASCII only
+      subscript = "[" ( "*" / 1*DIGIT ) "]"
+
+  Anything outside it wraps `ErrInvalidFilterPath` (400). Chained and
+  mid-path subscripts (`$.matrix[*][*]`, `$.orders[*].lines[*].sku`) are
+  admitted, matching the `[*]` key convention `FieldsMapFromSchema` emits.
 
   Also unchanged: `Filter.Path`, the plugin-facing form this function emits,
   stays BARE (`amount`). The wire form requires the leader; the plugin-facing

@@ -170,6 +170,110 @@ func TestConditionToFilter_ArrayWildcardStaysFallbackClass(t *testing.T) {
 	}
 }
 
+// malformedSubscriptPaths are the bracket spellings that are NOT well-formed
+// JSON Path. Each must land in the INVALID class (wrapping
+// [spi.ErrInvalidFilterPath]) rather than the unpushdownable one.
+//
+// The distinction is not academic. The grammar used to stop scanning at the
+// first '[' and accept whatever followed, so everything here classified as
+// "valid but unpushdownable" — which every engine caller reads as "fall back
+// to in-memory evaluation", where gjson resolves none of these and answers an
+// empty page (or a criterion that never fires) for a field that exists. A
+// wrong-but-available result, from input that is simply malformed.
+var malformedSubscriptPaths = []string{
+	"$.a[",           // unclosed subscript
+	"$.a]",           // unmatched close
+	"$.a[0",          // unclosed after an index
+	"$.[0]",          // subscript with no field before it
+	"$.[*]",          // ditto, wildcard
+	"$.a[]",          // empty subscript
+	"$.a[-1]",        // negative index
+	"$.a[0:2]",       // slice
+	"$.a[0,1]",       // union
+	"$.a[?(@.x)]",    // filter expression
+	`$.a["x"]`,       // double-quoted property access
+	"$.a['x']",       // single-quoted property access
+	"$.a[0];DROP",    // punctuation after a well-formed subscript
+	"$.a[0].xé",      // non-ASCII after a well-formed subscript
+	"$.a[0]b",        // a name glued to a subscript
+	"$.a[*]..b",      // empty segment after a subscript
+	"$.a[*].",        // trailing dot after a subscript
+	"$.a[* ]",        // whitespace inside the subscript
+	"$.tags[*][x]",   // non-index chained subscript
+	"$.a[0][-1]",     // negative index in a chained subscript
+	"$.a[0]['x']",    // bracket-quoted access chained onto an index
+	"$.a.b[1e2]",     // exponent notation is not a decimal index
+	"$.a[+1]",        // signed index
+	"$.a[ 0]",        // leading whitespace inside the subscript
+	"$.a[0]$",        // disallowed character after a subscript
+	"$.a[0]/etc",     // slash after a subscript
+	"$.a[0]'; --",    // SQL tail after a subscript
+	"$.a[\x00]",      // NUL inside the subscript
+	"$.a[0]\x00",     // NUL after the subscript
+	"$.a[*].b[?(x)]", // filter expression in a later segment
+}
+
+// TestConditionToFilter_MalformedSubscriptIsInvalidPath pins that a bracket
+// spelling outside the supported subscript forms ("[*]" and a non-negative
+// decimal index) is INVALID INPUT, not merely unpushdownable.
+func TestConditionToFilter_MalformedSubscriptIsInvalidPath(t *testing.T) {
+	for _, p := range malformedSubscriptPaths {
+		t.Run("simple/"+p, func(t *testing.T) {
+			_, err := spi.ConditionToFilter(&predicate.SimpleCondition{
+				JsonPath: p, OperatorType: "EQUALS", Value: "v",
+			}, nil)
+			if err == nil {
+				t.Fatalf("ConditionToFilter(%q): expected an error, got nil", p)
+			}
+			if !errors.Is(err, spi.ErrInvalidFilterPath) {
+				t.Errorf("ConditionToFilter(%q): error %v does not wrap ErrInvalidFilterPath", p, err)
+			}
+		})
+		t.Run("array/"+p, func(t *testing.T) {
+			_, err := spi.ConditionToFilter(&predicate.ArrayCondition{
+				JsonPath: p, Values: []any{"v"},
+			}, nil)
+			if err == nil {
+				t.Fatalf("ConditionToFilter(%q): expected an error, got nil", p)
+			}
+			if !errors.Is(err, spi.ErrInvalidFilterPath) {
+				t.Errorf("ConditionToFilter(%q): error %v does not wrap ErrInvalidFilterPath", p, err)
+			}
+		})
+	}
+}
+
+// TestConditionToFilter_WellFormedSubscriptStaysFallbackClass is the positive
+// control for the tightening above: every subscript form the grammar admits
+// ("[*]", a non-negative decimal index, chained and mid-path) must stay in the
+// unpushdownable class so the in-memory evaluator still serves it.
+func TestConditionToFilter_WellFormedSubscriptStaysFallbackClass(t *testing.T) {
+	for _, p := range []string{
+		"$.tags[*]",
+		"$.tags[*].name",
+		"$.arr[0]",
+		"$.arr[0].field",
+		"$.arr[12].a.b",
+		"$.matrix[*][*]",
+		"$.matrix[0][1]",
+		"$.orders[*].lines[*].sku",
+		"$.a[0][*].b",
+	} {
+		t.Run(p, func(t *testing.T) {
+			_, err := spi.ConditionToFilter(&predicate.SimpleCondition{
+				JsonPath: p, OperatorType: "EQUALS", Value: "v",
+			}, nil)
+			if err == nil {
+				t.Fatalf("ConditionToFilter(%q): expected an error, got nil", p)
+			}
+			if errors.Is(err, spi.ErrInvalidFilterPath) {
+				t.Errorf("ConditionToFilter(%q): error wraps ErrInvalidFilterPath (%v); a well-formed subscript is "+
+					"valid JSON Path the in-memory fallback evaluates — it must stay in the unpushdownable class", p, err)
+			}
+		})
+	}
+}
+
 // TestConditionToFilter_LifecycleUnaffectedByPathLeader records that meta
 // ADDRESSING does not go through the wire-path rule at all: a lifecycle
 // condition names a member of the closed meta vocabulary

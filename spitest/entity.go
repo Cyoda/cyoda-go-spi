@@ -34,7 +34,9 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "GetAsAt/Historical", testEntityGetAsAtHistorical)
 	runSubtest(t, h, tracker, "GetAsAt/FullMetaPopulated", testEntityGetAsAtMeta)
 	runSubtest(t, h, tracker, "GetAsAt/BeforeAnyWrite", testEntityGetAsAtBefore)
+	runSubtest(t, h, tracker, "GetAsAt/CommittedOnlyInTx", testEntityGetAsAtCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "GetAllAsAt", testEntityGetAllAsAt)
+	runSubtest(t, h, tracker, "GetAllAsAt/CommittedOnlyInTx", testEntityGetAllAsAtCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "GetVersionMetadata/Ordering", testEntityVersionMetadataOrdering)
 	runSubtest(t, h, tracker, "GetVersionMetadata/EmptyWindowIsNotAnError", testEntityGetVersionMetadataEmptyWindowIsNotAnError)
 	runSubtest(t, h, tracker, "GetVersionMetadata/LimitCaps", testEntityGetVersionMetadataLimitCaps)
@@ -43,6 +45,7 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	// Paging + purposed history-read group (S5)
 	runSubtest(t, h, tracker, "GetPage/OrderAndBounds", testEntityGetPageOrderAndBounds)
 	runSubtest(t, h, tracker, "GetPage/AsAtSnapshot", testEntityGetPageAsAtSnapshot)
+	runSubtest(t, h, tracker, "GetPage/AsAtCommittedOnlyInTx", testEntityGetPageAsAtCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "GetPage/InTxWithStagedDeletes", testEntityGetPageInTxWithStagedDeletes)
 	runSubtest(t, h, tracker, "GetPage/InTxRecordsReadSet", testEntityGetPageInTxRecordsReadSet)
 	runSubtest(t, h, tracker, "GetVersionByTransaction/EarliestWins", testEntityGetVersionByTransactionEarliestWins)
@@ -526,6 +529,148 @@ func testEntityGetAllAsAt(t *testing.T, h Harness) {
 	got, err := es.GetAllAsAt(ctx, mref, asAt)
 	require.NoError(t, err)
 	require.Len(t, got, 3, "GetAllAsAt must exclude writes after asAt")
+}
+
+// pitFixture is the shared setup for the point-in-time committed-only family
+// (GetAsAt, GetAllAsAt, GetPage(asAt), Iterate(PointInTime), Search(PointInTime)).
+// See newPITCommittedOnlyFixture.
+type pitFixture struct {
+	// ModelRef scopes every collection-shaped read in the family.
+	ModelRef spi.ModelRef
+	// CommittedID exists in committed state carrying pitCommittedValue, and
+	// has been UPDATED to pitDirtyValue inside the open transaction.
+	CommittedID string
+	// DirtyID was CREATED inside the open transaction and has never been
+	// committed. No point-in-time read may surface it.
+	DirtyID string
+	// AsAt is the point-in-time bound every read in the family uses.
+	AsAt time.Time
+	// Store and Ctx are the transaction-scoped EntityStore and context. The
+	// point-in-time read is issued through THESE, which is the whole point:
+	// the read must ignore the transaction it is issued from.
+	Store spi.EntityStore
+	Ctx   spiCtx
+}
+
+const (
+	pitCommittedValue = "committed"
+	pitDirtyValue     = "dirty"
+)
+
+// newPITCommittedOnlyFixture builds the shared scenario for the point-in-time
+// committed-only contract: a point-in-time read ignores any ambient
+// transaction and answers from committed state as of the requested instant.
+//
+// It commits one entity, opens a transaction, and inside that transaction both
+// CREATES a second entity and UPDATES the committed one. Both writes are
+// covered because they fail differently: a backend that consults the
+// transaction's overlay surfaces the create as an extra row, and the update as
+// a correct row carrying the wrong payload — a result set of the right SHAPE
+// that is silently wrong, which a create-only scenario never catches.
+//
+// AsAt is deliberately an hour in the FUTURE (on the harness clock, so it is
+// the same clock domain the backend stamps versions from). Every uncommitted
+// write therefore falls strictly INSIDE the requested window: the window
+// itself can never be the reason a write is invisible, so the only thing the
+// assertion can be passing on is committed-only routing. A cutoff placed
+// before the transaction would pass on a backend that reads its own
+// uncommitted writes, which is exactly the defect this pins.
+//
+// The transaction is left open — beginGuarded's cleanup rolls it back — so the
+// caller reads through a genuinely in-flight transaction.
+func newPITCommittedOnlyFixture(t *testing.T, h Harness, ctx spiCtx, modelName string) pitFixture {
+	t.Helper()
+	mref := spi.ModelRef{EntityName: modelName, ModelVersion: "1"}
+
+	committedID := newID()
+	withTx(t, h, ctx, func(txCtx spiCtx) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = es.Save(txCtx, newEntity(t, modelName, committedID, map[string]any{"v": pitCommittedValue}))
+		require.NoError(t, err)
+	})
+
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	_, txCtx := beginGuarded(t, tm, ctx)
+
+	esTx, err := h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+
+	dirtyID := newID()
+	_, err = esTx.Save(txCtx, newEntity(t, modelName, dirtyID, map[string]any{"v": pitDirtyValue}))
+	require.NoError(t, err)
+	_, err = esTx.Save(txCtx, newEntity(t, modelName, committedID, map[string]any{"v": pitDirtyValue}))
+	require.NoError(t, err)
+
+	return pitFixture{
+		ModelRef:    mref,
+		CommittedID: committedID,
+		DirtyID:     dirtyID,
+		AsAt:        h.Now().UTC().Add(1 * time.Hour),
+		Store:       esTx,
+		Ctx:         txCtx,
+	}
+}
+
+// requireCommittedOnly asserts a collection-shaped point-in-time result holds
+// exactly the committed entity at its committed payload — neither the
+// transaction's uncommitted create nor its uncommitted update showing through.
+func (f pitFixture) requireCommittedOnly(t *testing.T, method string, got []*spi.Entity) {
+	t.Helper()
+	ids := make([]string, 0, len(got))
+	for _, e := range got {
+		ids = append(ids, e.Meta.ID)
+	}
+	require.Equal(t, []string{f.CommittedID}, ids,
+		"%s issued inside a transaction must not see the transaction's own uncommitted writes (got %v)", method, ids)
+	require.Contains(t, string(got[0].Data), `"v":"`+pitCommittedValue+`"`,
+		"%s issued inside a transaction must return the COMMITTED payload, not the transaction's uncommitted update", method)
+}
+
+// testEntityGetAsAtCommittedOnlyInTx: GetAsAt issued inside a transaction
+// answers from committed state — the committed version of an entity the
+// transaction has updated, and ErrNotFound for one the transaction created.
+func testEntityGetAsAtCommittedOnlyInTx(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	f := newPITCommittedOnlyFixture(t, h, ctx, "m-pit-getasat")
+
+	got, err := f.Store.GetAsAt(f.Ctx, f.CommittedID, f.AsAt)
+	require.NoError(t, err)
+	require.Contains(t, string(got.Data), `"v":"`+pitCommittedValue+`"`,
+		"GetAsAt issued inside a transaction must return the COMMITTED payload, not the transaction's uncommitted update")
+
+	_, err = f.Store.GetAsAt(f.Ctx, f.DirtyID, f.AsAt)
+	require.ErrorIs(t, err, spi.ErrNotFound,
+		"GetAsAt must not surface an entity the ambient transaction created but has not committed")
+}
+
+// testEntityGetAllAsAtCommittedOnlyInTx: the collection form of the same
+// contract.
+func testEntityGetAllAsAtCommittedOnlyInTx(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	f := newPITCommittedOnlyFixture(t, h, ctx, "m-pit-getallasat")
+
+	got, err := f.Store.GetAllAsAt(f.Ctx, f.ModelRef, f.AsAt)
+	require.NoError(t, err)
+	f.requireCommittedOnly(t, "GetAllAsAt", got)
+}
+
+// testEntityGetPageAsAtCommittedOnlyInTx holds GetPage's asAt path to the same
+// family contract its own doc comment already states ("asAt != nil ignores any
+// ambient transaction and reads committed-only state as of that instant").
+//
+// GetPage/AsAtSnapshot already covers the uncommitted CREATE half against a
+// cutoff placed after the buffered write. This adds the half that scenario
+// cannot reach: an uncommitted UPDATE of an entity that legitimately belongs on
+// the page, where the row count stays correct and only the payload is wrong.
+func testEntityGetPageAsAtCommittedOnlyInTx(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	f := newPITCommittedOnlyFixture(t, h, ctx, "m-pit-getpage")
+
+	got, err := f.Store.GetPage(f.Ctx, f.ModelRef, 10, 0, &f.AsAt)
+	require.NoError(t, err)
+	f.requireCommittedOnly(t, "GetPage(asAt)", got)
 }
 
 // testEntityVersionMetadataOrdering seeds 3 saves + 1 delete and asserts

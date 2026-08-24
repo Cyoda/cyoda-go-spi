@@ -83,6 +83,31 @@ func runSearcherSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	// "Searcher/BoundedOrFail/InTx".
 	runSubtest(t, h, tracker, "BoundedOrFail", testSearcherBoundedOrFail)
 	runSubtest(t, h, tracker, "BoundedOrFail/InTx", testSearcherBoundedOrFailInTx)
+	runSubtest(t, h, tracker, "PIT/CommittedOnlyInTx", testSearcherPITCommittedOnlyInTx)
+	runSubtest(t, h, tracker, "FilterPath/Grammar", testSearcherFilterPathGrammar)
+}
+
+// testSearcherPITCommittedOnlyInTx pins the Searcher doc's committed-only
+// clause — "In-transaction point-in-time reads are committed-only — they never
+// see the transaction's own uncommitted writes for the PIT dimension" — which
+// nothing in the suite previously exercised.
+//
+// Same shared fixture as the rest of the point-in-time family
+// (newPITCommittedOnlyFixture): the cutoff is deliberately in the future so
+// only committed-only routing, never the window, can be what hides the
+// transaction's own writes.
+func testSearcherPITCommittedOnlyInTx(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	f := newPITCommittedOnlyFixture(t, h, ctx, "searcher-pit-intx")
+
+	got, err := f.Store.(spi.Searcher).Search(f.Ctx, spi.Filter{}, spi.SearchOptions{
+		ModelName:    f.ModelRef.EntityName,
+		ModelVersion: f.ModelRef.ModelVersion,
+		Limit:        100,
+		PointInTime:  &f.AsAt,
+	})
+	require.NoError(t, err)
+	f.requireCommittedOnly(t, "Search(PointInTime)", got)
 }
 
 func testSearcherBoundedOrFail(t *testing.T, h Harness) {
@@ -181,6 +206,192 @@ func searcherBoundedOrFail(t *testing.T, h Harness, inTx bool) {
 		got, err := search(t, -1)
 		require.Error(t, err, "Limit <= 0 is a contract violation, not \"unbounded\"")
 		require.Empty(t, got)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Filter.Path grammar
+//
+// Shared by every filter-taking entry point on the SPI (Searcher.Search here,
+// Iterable.Iterate in iterable.go — the same reuse-across-suites arrangement
+// iterableModelRef already uses for the seed helpers). The vocabulary lives
+// here, next to Search, because Search is where a Filter first reaches a
+// backend.
+//
+// The tables below are the executable form of Filter.Path's documented
+// grammar: `segment ( "." segment )*` with `segment = 1*( ALPHA / DIGIT / "_"
+// / "-" )`, ASCII only. They are NOT a description of what the in-tree
+// backends happen to do — the same input must be classified the same way on
+// every backend, and a backend that quietly accepts what the others reject has
+// diverged even if nothing visibly breaks on it.
+// ---------------------------------------------------------------------------
+
+// filterPathRejects are paths outside the grammar. Each must be refused with
+// an error — never answered with an empty result set, which is a legitimate
+// answer to a well-formed predicate and must stay distinguishable from a
+// malformed one.
+//
+// Two entries deserve naming. "$.status" is in the REJECT set on purpose: a
+// bare path is the contract, because spi.ConditionToFilter strips the "$."
+// at the wire boundary, so a prefixed path never legitimately reaches a
+// plugin. And "tags[*]" / "tags[0]" are rejected because array positions are
+// addressed as ordinary numeric segments ("tags.0", in the accept set below),
+// not as bracketed subscripts.
+var filterPathRejects = []string{
+	"foo';x",                         // quote + semicolon — the shape that diverged
+	"status';DROP TABLE entities;--", // full injection attempt
+	`foo"bar`,                        // double quote
+	`foo\bar`,                        // backslash
+	"foo bar",                        // whitespace
+	"foo/bar",                        // slash
+	"foo*",                           // asterisk
+	"foo,bar",                        // comma
+	"foo:bar",                        // colon
+	"a..b",                           // empty segment
+	".status",                        // leading dot (empty first segment)
+	"status.",                        // trailing dot
+	".",                              // a lone separator
+	"tags[0]",                        // bracketed subscript
+	"tags[*]",                        // wildcard subscript
+	"$.status",                       // "$."-prefixed — a bare path is the contract
+	"$",                              // bare dollar
+	"héllo",                          // non-ASCII
+	"foo\x00bar",                     // NUL control byte
+}
+
+// filterPathAcceptsData are well-formed SourceData paths that must keep
+// working. Without this half the grammar could be satisfied by a backend that
+// rejects everything.
+var filterPathAcceptsData = []string{
+	"status",    // single segment
+	"user_name", // underscore
+	"user-name", // hyphen — a valid JSON key, and safe inside a quoted path literal
+	"Status9",   // mixed case and digits
+	"a.b.c",     // nested
+	"tags.0",    // array position as an ordinary numeric segment
+}
+
+// filterPathAcceptsMeta is the canonical meta vocabulary (see OrderSpec's doc
+// comment). Every name in it is grammar-valid, so a filter on one must be
+// accepted; a backend that applies its meta SORT allowlist to meta FILTER
+// paths would wrongly reject some of these.
+var filterPathAcceptsMeta = []string{
+	"id",
+	"state",
+	"creationDate",
+	"lastUpdateTime",
+	"transitionForLatestSave",
+	"transactionId",
+}
+
+// filterPathExec runs one filter through a backend entry point and reports
+// how that entry point answered: nil for accepted, non-nil for refused. An
+// entry point that streams (Iterate) must additionally have yielded nothing
+// when it refuses — an error alongside rows is not a refusal.
+type filterPathExec func(t *testing.T, filter spi.Filter) error
+
+// malformedPathFilter builds the realistic shape a malformed path arrives in:
+// an ordinary typed equality leaf. The operator is irrelevant to the outcome —
+// path validation precedes evaluation — but an eq leaf is what a real
+// mistyped condition translates to.
+func malformedPathFilter(source spi.FieldSource, path string) spi.Filter {
+	return spi.Filter{
+		Op:       spi.FilterEq,
+		Source:   source,
+		Path:     path,
+		Value:    "irrelevant",
+		Declared: []spi.DataType{spi.String},
+	}
+}
+
+// wellFormedPathFilter builds the positive-control leaf. FilterNotNull is
+// chosen deliberately: it is a presence test the kernel resolves without
+// consulting declared types (see ConditionToFilter's doc comment on the
+// kindUnary arm), so a failure here can only mean the PATH was refused — it
+// cannot be a type-coercion accident on some field whose declared type the
+// conformance harness has no schema for.
+func wellFormedPathFilter(source spi.FieldSource, path string) spi.Filter {
+	return spi.Filter{Op: spi.FilterNotNull, Source: source, Path: path}
+}
+
+// runFilterPathGrammar drives the full grammar table through one entry point.
+// entry names it for failure messages.
+func runFilterPathGrammar(t *testing.T, entry string, exec filterPathExec) {
+	t.Helper()
+	sources := []spi.FieldSource{spi.SourceData, spi.SourceMeta}
+
+	// Rejects, at both sources. Both are held to the same grammar: a
+	// backend that validates only the source it interpolates into SQL leaves
+	// the other one open.
+	for _, source := range sources {
+		for _, path := range filterPathRejects {
+			err := exec(t, malformedPathFilter(source, path))
+			if err == nil {
+				t.Errorf("%s with %s path %q was accepted; a path outside the Filter.Path grammar must be refused with an error, not answered with an empty result set",
+					entry, source, path)
+				continue
+			}
+			if !errors.Is(err, spi.ErrInvalidFilterPath) {
+				t.Errorf("%s with %s path %q was refused with %v; the refusal must wrap spi.ErrInvalidFilterPath so callers can classify a malformed path without knowing the backend",
+					entry, source, path, err)
+			}
+		}
+	}
+
+	// A malformed path nested under a tree operator is still malformed —
+	// validation must walk the whole tree, not just the root.
+	nested := spi.Filter{Op: spi.FilterAnd, Children: []spi.Filter{
+		wellFormedPathFilter(spi.SourceData, "status"),
+		malformedPathFilter(spi.SourceData, "foo';x"),
+	}}
+	switch err := exec(t, nested); {
+	case err == nil:
+		t.Errorf("%s accepted a malformed path nested under an and-branch; path validation must walk the whole filter tree", entry)
+	case !errors.Is(err, spi.ErrInvalidFilterPath):
+		t.Errorf("%s refused a malformed path nested under an and-branch with %v; the refusal must wrap spi.ErrInvalidFilterPath", entry, err)
+	}
+
+	// Accepts: the grammar must not have been satisfied by refusing
+	// everything.
+	for _, path := range filterPathAcceptsData {
+		if err := exec(t, wellFormedPathFilter(spi.SourceData, path)); err != nil {
+			t.Errorf("%s with well-formed data path %q was refused: %v", entry, path, err)
+		}
+	}
+	for _, path := range filterPathAcceptsMeta {
+		if err := exec(t, wellFormedPathFilter(spi.SourceMeta, path)); err != nil {
+			t.Errorf("%s with canonical meta path %q was refused: %v", entry, path, err)
+		}
+	}
+}
+
+// testSearcherFilterPathGrammar holds Search to the Filter.Path grammar.
+//
+// The model is seeded first so a wrongly-accepting backend has real rows to
+// scan: the failure mode this guards against is answering a malformed path
+// with a silently empty page, which is only distinguishable from a correct
+// refusal when the model is non-empty.
+func testSearcherFilterPathGrammar(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		seedSearcherEntities(t, txCtx, es, searcherSeedOrder)
+	})
+
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	searcher := es.(spi.Searcher)
+
+	runFilterPathGrammar(t, "Search", func(t *testing.T, filter spi.Filter) error {
+		// Limit is comfortably above the seeded match count, so
+		// bounded-or-fail can never be what produces the error.
+		_, err := searcher.Search(ctx, filter, spi.SearchOptions{
+			ModelName:    searcherModel,
+			ModelVersion: "1",
+			Limit:        1000,
+		})
+		return err
 	})
 }
 

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"iter"
 	"time"
-
 )
 
 // SearchJob represents the persistent state of an async search operation.
@@ -90,7 +89,16 @@ type AsyncSearchStore interface {
 	// which is recorded separately via UpdateJobStatus.
 	//
 	// Fences on epoch (ErrStaleClaim) and terminal status (ErrAlreadyTerminal,
-	// checked at least at chunk boundaries), matching UpdateJobStatus.
+	// checked at least at chunk boundaries), matching UpdateJobStatus. A
+	// missing job returns ErrNotFound.
+	//
+	// The fence is a property of the CALL, not of the rows it carries: an
+	// entityIDs sequence that yields nothing MUST still be fenced, and MUST
+	// still report ErrStaleClaim / ErrAlreadyTerminal / ErrNotFound where a
+	// non-empty sequence would have. A search matching zero entities is an
+	// ordinary outcome, so short-circuiting on "nothing to write" is exactly
+	// the case where a reclaimed executor is most likely to learn — or fail to
+	// learn — that it has been fenced off.
 	SaveResults(ctx context.Context, jobID string, epoch int64, entityIDs iter.Seq[string]) error
 
 	// GetResultIDs requires offset >= 0 && limit >= 1; a violation returns an

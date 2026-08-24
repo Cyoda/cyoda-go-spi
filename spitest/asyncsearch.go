@@ -34,6 +34,7 @@ func runAsyncSearchSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "ClearResults/Idempotent", testASClearResultsIdempotent)
 	runSubtest(t, h, tracker, "SaveResults/ChunkSeqContinuity", testASSaveResultsChunkSeqContinuity)
 	runSubtest(t, h, tracker, "SaveResults/CtxCancelObserved", testASSaveResultsCtxCancelObserved)
+	runSubtest(t, h, tracker, "SaveResults/EmptySequenceFences", testASSaveResultsEmptySequenceFences)
 	runSubtest(t, h, tracker, "GetResultIDs/DegenerateInputs", testASGetResultIDsDegenerateInputs)
 	runSubtest(t, h, tracker, "GetResultIDs/NonTerminalPartial", testASGetResultIDsNonTerminalPartial)
 	runSubtest(t, h, tracker, "UpdateStatus/MissingIsNotFound", testASUpdateStatusMissingIsNotFound)
@@ -503,6 +504,73 @@ func testASSaveResultsCtxCancelObserved(t *testing.T, h Harness) {
 	require.ErrorIs(t, err, context.Canceled, "the returned error must be ctx-derived (wrap context.Canceled)")
 	require.Less(t, pulled, total,
 		"SaveResults must stop consuming the sequence once cancellation is observed, not drain it to completion (pulled %d of %d)", pulled, total)
+}
+
+// testASSaveResultsEmptySequenceFences pins that the epoch/terminal fence is a
+// property of the CALL, not of the rows it happens to carry: SaveResults with a
+// sequence that yields nothing must answer exactly as a non-empty one does.
+//
+// A search matching zero rows is an ordinary outcome, not an edge case, so this
+// is the shape a reclaimed executor most often reaches the store in. A backend
+// that short-circuits on "nothing to write" and returns nil skips the very
+// check that tells that executor it has been fenced off — and does so silently,
+// where a non-empty save would have reported ErrStaleClaim. The loser then
+// proceeds to call UpdateJobStatus believing its (empty) result set was
+// accepted.
+//
+// All four outcomes are covered against an empty sequence: the positive control
+// (a live claim succeeds and persists nothing), plus each of the three refusals
+// SaveResults documents — ErrStaleClaim, ErrAlreadyTerminal, ErrNotFound.
+func testASSaveResultsEmptySequenceFences(t *testing.T, h Harness) {
+	tid := h.NewTenant()
+	ctx := tenantContext(tid)
+	as, err := h.Factory.AsyncSearchStore(ctx)
+	require.NoError(t, err)
+
+	// An iter.Seq that yields nothing — the sequence a search matching zero
+	// entities produces.
+	empty := func(yield func(string) bool) {}
+
+	// Missing job: a valid UUID that was never written.
+	err = as.SaveResults(ctx, newID(), 1, empty)
+	require.ErrorIs(t, err, spi.ErrNotFound,
+		"SaveResults against a missing job must return ErrNotFound even when the sequence is empty")
+
+	// Positive control: a live claim at the current epoch succeeds, and
+	// persists nothing. Run before the clock advance below so this job cannot
+	// itself be swept up by the ClaimStale that follows.
+	liveID := newID()
+	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, liveID)))
+	require.NoError(t, as.SaveResults(ctx, liveID, 1, empty),
+		"an empty sequence under a live claim is a successful no-op, not an error")
+	_, total, err := as.GetResultIDs(ctx, liveID, 0, 10)
+	require.NoError(t, err)
+	require.Equal(t, 0, total, "an empty sequence must persist no result ids")
+
+	// Stale epoch: ClaimStale bumps the job to epoch 2, so the original
+	// executor's epoch-1 write must be fenced.
+	staleID := newID()
+	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, staleID)))
+	staleAfter := 10 * time.Millisecond
+	h.AdvanceClock(staleAfter + time.Millisecond)
+	claimed, err := as.ClaimStale(ctx, staleAfter, 1000)
+	require.NoError(t, err)
+	job := findClaimed(claimed, staleID)
+	require.NotNil(t, job, "the job must be reclaimed to advance its epoch for this scenario")
+	require.Equal(t, int64(2), job.Epoch)
+
+	err = as.SaveResults(ctx, staleID, 1, empty)
+	require.ErrorIs(t, err, spi.ErrStaleClaim,
+		"SaveResults at a superseded epoch must be fenced with ErrStaleClaim even when the sequence is empty")
+
+	// Terminal job: write-once applies to an empty save too.
+	terminalID := newID()
+	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, terminalID)))
+	require.NoError(t, as.UpdateJobStatus(ctx, terminalID, 1, "SUCCESSFUL", 0, "", h.Now(), 0))
+
+	err = as.SaveResults(ctx, terminalID, 1, empty)
+	require.ErrorIs(t, err, spi.ErrAlreadyTerminal,
+		"SaveResults against a terminal job must return ErrAlreadyTerminal even when the sequence is empty")
 }
 
 func testASGetResultIDsDegenerateInputs(t *testing.T, h Harness) {

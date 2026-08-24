@@ -3,7 +3,6 @@ package spi
 import (
 	"context"
 	"iter"
-
 )
 
 // DefaultSaveAll is the sequential fallback for EntityStore.SaveAll.

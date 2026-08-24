@@ -5,7 +5,6 @@ import (
 	"io"
 	"iter"
 	"time"
-
 )
 
 type StoreFactory interface {
@@ -75,8 +74,18 @@ type EntityStore interface {
 	// transaction are invisible to readers.
 	SaveAll(ctx context.Context, entities iter.Seq[*Entity]) ([]int64, error)
 	Get(ctx context.Context, entityID string) (*Entity, error)
+	// GetAsAt returns entityID as of asAt. Like every point-in-time read in
+	// this SPI it is COMMITTED-ONLY: it ignores any ambient transaction and
+	// never surfaces that transaction's own uncommitted writes — an entity
+	// the transaction created is ErrNotFound, and one it updated comes back
+	// at its committed payload. A backend whose ordinary reads join the
+	// caller's transaction must route this read off it; bounding the query on
+	// a timestamp is not sufficient, because a transaction-stable clock makes
+	// the transaction's own writes fall inside every window it can compute.
 	GetAsAt(ctx context.Context, entityID string, asAt time.Time) (*Entity, error)
 	GetAll(ctx context.Context, modelRef ModelRef) ([]*Entity, error)
+	// GetAllAsAt is GetAsAt's collection form, with the same committed-only
+	// contract.
 	GetAllAsAt(ctx context.Context, modelRef ModelRef, asAt time.Time) ([]*Entity, error)
 	Delete(ctx context.Context, entityID string) error
 	DeleteAll(ctx context.Context, modelRef ModelRef) error

@@ -14,6 +14,37 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **`ConditionToFilter` requires a condition's `jsonPath` to be JSON Path
+  nomenclature: the `$.` leader is now mandatory.** This is a behaviour
+  tightening on accepted input. Previously the leader was optional —
+  `$.amount` and a bare `amount` were both accepted, the latter passed
+  through unchanged. A bare identifier is not a path, and it is now rejected
+  with an error wrapping `ErrInvalidFilterPath`. So are an empty path, an
+  empty or trailing segment (`$..a`, `$.a.`), bracket-quoted property access
+  (`$['x']`, `$.['x']`), and any character outside the segment set
+  (`ALPHA / DIGIT / "_" / "-"`, ASCII only) — several of which the old
+  character-only check let through as malformed `Filter.Path` values.
+
+  Unchanged: an array-subscripted path (`$.tags[*].name`, `$.arr[0]`) is
+  valid JSON Path but not pushdownable, and still fails with a plain error
+  that does NOT wrap `ErrInvalidFilterPath`. That distinction is the point of
+  the sentinel — callers translate a wrapped error into a client error (400)
+  and an unwrapped one into their in-memory-evaluation fallback. A caller
+  that treats every translation error as "fall back" will not observe the
+  tightening at all.
+
+  Also unchanged: `Filter.Path`, the plugin-facing form this function emits,
+  stays BARE (`amount`). The wire form requires the leader; the plugin-facing
+  form forbids it. And metadata is unaffected: a `LifecycleCondition` names a
+  member of the closed meta vocabulary directly and never goes through path
+  translation. A data path spelled `$._meta.state` is an ordinary dotted path
+  and is accepted as one.
+
+  Migration: prefix condition `jsonPath` values with `$.`. `NormalisePath`
+  does that canonicalisation, but it is a canonicaliser and not a licence —
+  run it over paths you construct, not over untrusted input you meant to
+  validate.
+
 - **`Searcher.Search` requires `Limit >= 1`; `Limit <= 0` is now a contract
   violation.** Previously `Limit <= 0` meant "unbounded" and the
   implementation returned the complete matched set; it now MUST return an
@@ -279,6 +310,53 @@ MAINTAINING.md.
   doesn't yet implement the exercised surface sees new failures until it
   does.
 
+- **Conformance: 8 further `spitest` subtests closing three cross-backend
+  divergences that shipped because the harness never reached the case.** All
+  are pure additions — no `Harness.Skip` key changes. Each pins a contract
+  that was already stated or already settled; none of them is new behaviour
+  being invented at the conformance layer.
+
+  - `AsyncSearch/SaveResults/EmptySequenceFences`. The epoch/terminal fence
+    is a property of the CALL, not of the rows it carries: `SaveResults`
+    with a sequence that yields nothing must still report `ErrStaleClaim`,
+    `ErrAlreadyTerminal`, or `ErrNotFound` where a non-empty sequence would
+    have, and must otherwise succeed persisting nothing. Backends that
+    short-circuited on "nothing to write" returned `nil` to a reclaimed
+    executor — which then went on to write a job status it no longer owned.
+    A search matching zero entities is an ordinary outcome, so this is the
+    shape a fenced-off executor most often reaches the store in.
+
+  - The point-in-time committed-only family:
+    `Entity/GetAsAt/CommittedOnlyInTx`,
+    `Entity/GetAllAsAt/CommittedOnlyInTx`,
+    `Entity/GetPage/AsAtCommittedOnlyInTx`,
+    `Searcher/PIT/CommittedOnlyInTx`, `Iterable/PIT/CommittedOnlyInTx`.
+    A point-in-time read ignores any ambient transaction and answers from
+    committed state. `Searcher` and `GetPage` already said so; `GetAsAt`,
+    `GetAllAsAt`, and `IterateOptions.PointInTime` now say so too. Each
+    subtest writes BOTH a create and an update inside the transaction it
+    then reads from, because the two fail differently — the create shows up
+    as an extra row, the update as a correct row carrying the wrong payload.
+    The cutoff is deliberately in the future so the window itself can never
+    be what hides the write. A backend whose ordinary reads join the
+    caller's transaction must route these off it; bounding the query on a
+    timestamp is not sufficient, because a transaction-stable clock puts the
+    transaction's own writes inside every window it can compute.
+
+  - `Searcher/FilterPath/Grammar` and `Iterable/FilterPath/Grammar`.
+    `Filter.Path`'s grammar is now written down on the field itself
+    (`filter.go`) rather than living only in each backend's validator, and
+    the two filter-taking entry points are held to it: a malformed non-empty
+    path must be REFUSED with an error, at both `SourceData` and
+    `SourceMeta`, including nested under an `and`/`or` branch. Answering it
+    with an empty result set is the divergence being closed — a mistyped
+    path and a predicate that genuinely matched nothing are different
+    answers. A positive-control set of well-formed shapes (dotted,
+    underscore, hyphen, numeric segment, and the canonical meta names) must
+    keep working, so the grammar cannot be satisfied by refusing everything.
+    `"$."`-prefixed paths are in the REJECT set: `ConditionToFilter` strips
+    the prefix at the wire boundary, so a bare path is the contract.
+
 - Search-filter translation relocated into the SPI, completing the v0.8.3
   type-core relocation: `ConditionToFilter` (with `FieldDescriptor`,
   `ClassifyType`, `ClassifyTypesFold`, `MetaField`, `ResolveMetaField`,
@@ -344,7 +422,52 @@ MAINTAINING.md.
   uncompilable pattern leaves the compiled program nil and the leaf returns
   false. All three are documented on `ConditionToFilter`.
 
+- **`ErrInvalidFilterPath`** — the sentinel for a `Filter.Path` or
+  `OrderSpec.Path` outside the grammar documented on `Filter.Path` (see the
+  `### Changed` entry below). It was previously declared separately by each
+  storage backend, so the only portable assertion a caller — or the
+  `spitest` conformance suite — could make about a malformed path was that
+  *some* error came back, and an out-of-tree backend could return anything at
+  all. Backends keep their own package-level sentinel of the same name for
+  local callers; each one now wraps this, so `errors.Is(err,
+  spi.ErrInvalidFilterPath)` is the backend-agnostic classification.
+
+  The `Searcher/FilterPath/Grammar` and `Iterable/FilterPath/Grammar`
+  conformance subtests assert it. Migration for an out-of-tree backend: wrap
+  the SPI sentinel in your existing one (`fmt.Errorf("%w",
+  spi.ErrInvalidFilterPath)` preserves your message text) — a refusal that
+  does not unwrap to it now fails conformance.
+
 ### Changed
+
+- **`Filter.Path` now documents its grammar on the field.** The accepted form
+  is `segment ( "." segment )*` with `segment = 1*( ALPHA / DIGIT / "_" /
+  "-" )`, ASCII only: no empty segment, no leading or trailing dot, no
+  bracketed subscript or wildcard (an array position is an ordinary numeric
+  segment, `tags.0`), and no `"$."` prefix — `ConditionToFilter` strips that
+  at the wire boundary, so a path arrives at a plugin bare. An empty `Path`
+  stays legal and unchecked (tree operators carry one). A malformed non-empty
+  path MUST be rejected with an error rather than answered with an empty
+  result set, at both `FieldSource` values and anywhere in the tree.
+
+  This is a documentation change, not a contract change: it writes down the
+  grammar the SQL backends' validators already enforced. It is called out
+  here because the grammar previously existed only inside those validators,
+  and a backend author reading the SPI had nothing to conform to — which is
+  how one backend came to accept silently what the others rejected.
+
+- **Point-in-time reads are documented as committed-only across the whole
+  family.** `Searcher` and `EntityStore.GetPage` already stated it;
+  `EntityStore.GetAsAt`, `EntityStore.GetAllAsAt`, and
+  `IterateOptions.PointInTime` now state it too, including the reason a
+  timestamp bound cannot achieve it on a backend whose clock is
+  transaction-stable. Also a documentation change: the contract is
+  unchanged, it was simply unstated on three of the five members.
+
+- **`AsyncSearchStore.SaveResults` spells out that the fence runs on an empty
+  sequence** and that a missing job returns `ErrNotFound`. The fencing
+  sentence already covered it by implication; making it explicit is what the
+  new conformance subtest enforces.
 
 - **`ConditionToFilter` now rejects an unrecognised `operatorType`** with the
   new `ErrUnknownOperator` sentinel, instead of mapping it to

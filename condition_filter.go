@@ -20,6 +20,36 @@ import (
 // evaluator, which then drifts from this one and answers the same query
 // differently.
 //
+// # jsonPath must be JSON Path nomenclature
+//
+// A condition's jsonPath is the WIRE form and is JSON Path syntax, so the
+// "$." leader is REQUIRED:
+//
+//	jsonPath = "$." segment ( "." segment )*
+//	segment  = 1*( ALPHA / DIGIT / "_" / "-" )   ; ASCII only
+//
+// "$.amount" and "$.address.city" are paths. A bare "amount" is not one and
+// is REJECTED with an error wrapping [ErrInvalidFilterPath] — it is not a
+// tolerated alias. So are an empty path, an empty or trailing segment
+// ("$..a", "$.a."), bracket-quoted property access ("$['x']", "$.['x']"), and
+// any character outside the segment set. Callers should surface all of these
+// as a client error (400), not as a reason to fall back.
+//
+// Distinguish this from the PLUGIN-FACING form: [Filter.Path] is what this
+// function emits, and it is BARE ("amount"), with the leader already stripped.
+// A "$."-prefixed Filter.Path is malformed.
+//
+// Metadata is not addressed through jsonPath at all: a
+// [predicate.LifecycleCondition] names a member of the closed meta vocabulary
+// ([MetaFieldNames]) directly and is not subject to this grammar. A data path
+// that happens to spell "$._meta.state" is an ordinary dotted path and is
+// accepted as one.
+//
+// An array-subscripted path ("$.tags[*].name", "$.arr[0]") is valid JSON Path
+// but not expressible as a pushdown filter. It fails with a plain error that
+// does NOT wrap ErrInvalidFilterPath, which is the signal to fall back to
+// in-memory evaluation rather than to reject the request.
+//
 // # fields, and why nil is not a safe default
 //
 // fields is the model's flattened field view (JSONPath → [FieldDescriptor]),
@@ -132,14 +162,14 @@ func simpleToFilter(c *predicate.SimpleCondition, fields map[string]FieldDescrip
 	if !ok {
 		return Filter{}, unknownOperatorError(c.OperatorType)
 	}
-	// FieldsMap keys are always "$."-prefixed. A condition's jsonPath may
-	// legitimately omit the prefix, and callers' path validation normalises
-	// before checking, so an unprefixed path reaches here as a known field.
-	// Look it up the same way, or it misses the map, Declared comes back empty,
-	// and the type-directed kernel expands a comparison leaf with no declared
-	// type into nothing — a field that exists and holds matching data answers
-	// with an empty page. arrayToFilter normalises via arrayElementPath; this
-	// arm must too.
+	// FieldsMap keys are always "$."-prefixed, and stripDollarDot has just
+	// guaranteed c.JsonPath is too, so this is an identity today. It is kept
+	// as the single key-construction convention — arrayToFilter builds its key
+	// through arrayElementPath, which normalises the same way — because a key
+	// that misses the map does not fail loudly: Declared comes back empty and
+	// the type-directed kernel expands a comparison leaf with no declared type
+	// into nothing, so a field that exists and holds matching data answers
+	// with an empty page.
 	key := NormalisePath(c.JsonPath)
 	return Filter{
 		Op:       op,
@@ -317,6 +347,11 @@ func arrayElementPath(rawPath string) string {
 // annihilates comparison leaves rather than erroring. A caller assembling
 // fields-map keys must produce the same form this function does, so it is
 // published rather than reimplemented per plugin.
+//
+// It is a CANONICALISER, not a validator: it says nothing about whether raw is
+// a legal path, and adding a leader to a bare identifier here does not make
+// that identifier an acceptable wire jsonPath — [ConditionToFilter] requires
+// the leader on input and rejects a bare path outright.
 func NormalisePath(raw string) string {
 	p := strings.TrimSpace(raw)
 	if p == "" {
@@ -331,31 +366,97 @@ func NormalisePath(raw string) string {
 	return "$." + p
 }
 
-// stripDollarDot removes the leading "$." from a JSONPath expression and
-// validates that the resulting path does not contain array-wildcard or
-// advanced JSONPath syntax that cannot be pushed down to storage backends.
-// Returns ("", error) when the path contains characters outside the safe
-// dotted-identifier subset (letters, digits, underscore, hyphen, and dots).
-// Callers fall back to in-memory filtering when this returns an error.
+// jsonPathLeader is the mandatory prefix of a wire jsonPath. See
+// [stripDollarDot].
+const jsonPathLeader = "$."
+
+// stripDollarDot converts a wire jsonPath into the bare [Filter.Path] form,
+// rejecting anything that is not the model's JSON Path syntax.
+//
+// # The two path forms
+//
+// These are different and easy to conflate:
+//
+//   - The WIRE form is what a caller writes in a condition's jsonPath. It is
+//     JSON Path nomenclature and the "$." leader is REQUIRED: "$.amount".
+//   - The PLUGIN-FACING form is [Filter.Path], which is BARE: "amount". This
+//     function is the boundary between them; see Filter.Path's "Grammar"
+//     section, which this enforces on the post-leader remainder.
+//
+// # Two error classes, and why the difference matters
+//
+// Every engine caller treats a translation error as "not pushdownable, fall
+// back to in-memory evaluation". That is the right response to one kind of
+// failure and badly wrong for the other, so the two are distinguishable:
+//
+//   - INVALID PATH — no "$." leader, nothing after it, an empty or trailing
+//     segment, bracket-quoted property access, or any character outside the
+//     grammar. The path is not JSON Path nomenclature at all; a bare
+//     "variantId" is simply not a path. These wrap [ErrInvalidFilterPath] and
+//     a caller should surface them as a client error (400). Falling back
+//     instead would be worse than useless: the in-memory evaluator resolves a
+//     bare path happily, so the mistake would never surface, while a
+//     bracket-quoted one resolves to nothing and answers an empty page for a
+//     field that exists.
+//   - NOT PUSHDOWNABLE — a well-formed "$."-prefixed path using array
+//     subscript syntax ("$.tags[*].name", "$.arr[0]"). Valid JSON Path, and
+//     the in-memory evaluator serves the wildcard form, so this stays a plain
+//     error and the fallback is the correct response. Promoting it to
+//     ErrInvalidFilterPath would turn working queries into 400s.
 func stripDollarDot(path string) (string, error) {
-	stripped := path
-	if len(path) > 2 && path[:2] == "$." {
-		stripped = path[2:]
+	if !strings.HasPrefix(path, jsonPathLeader) {
+		return "", invalidPathError(path,
+			`must be a JSON Path: expected the "$." leader (e.g. "$.amount")`)
 	}
-	// Reject paths containing JSONPath wildcard/array-subscript syntax
-	// (e.g. "[*]", "[0]"). Such paths require in-memory evaluation and cannot
-	// be translated to pushdown filters.
-	for _, c := range stripped {
+	stripped := path[len(jsonPathLeader):]
+	if stripped == "" {
+		return "", invalidPathError(path, `addresses no field: nothing follows the "$." leader`)
+	}
+	// Bracket-quoted property access ("$.['x']", and "$['x']" which fails the
+	// leader check above) denotes the same node as dotted access but is not
+	// the model's syntax, and NO evaluator in the stack resolves it — pushdown
+	// rejects it and the in-memory fallback misses, answering an empty page
+	// for a field that exists. Named separately from the subscript arm below
+	// so the diagnostic can say what to write instead.
+	if strings.Contains(stripped, "['") || strings.Contains(stripped, "']") {
+		return "", invalidPathError(path,
+			`bracket-quoted property access is not supported; use dotted access (e.g. "$.a.b")`)
+	}
+	segStart := 0
+	for i, c := range stripped {
+		if c == '.' {
+			if i == segStart {
+				return "", invalidPathError(path, "contains an empty path segment")
+			}
+			segStart = i + 1
+			continue
+		}
+		// Array subscript/wildcard syntax: valid JSON Path, not expressible as
+		// a pushdown filter. The unpushdownable class — a plain error, so the
+		// caller falls back to in-memory evaluation.
+		if c == '[' || c == ']' {
+			return "", fmt.Errorf("path %q contains non-pushdownable syntax (character %q)", path, c)
+		}
 		switch {
 		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z',
 			c >= '0' && c <= '9',
-			c == '_', c == '-', c == '.':
+			c == '_', c == '-':
 			// safe
 		default:
-			return "", fmt.Errorf("path %q contains non-pushdownable syntax (character %q)", path, c)
+			return "", invalidPathError(path, fmt.Sprintf("contains disallowed character %q", c))
 		}
 	}
+	if segStart == len(stripped) {
+		return "", invalidPathError(path, "ends in a trailing dot")
+	}
 	return stripped, nil
+}
+
+// invalidPathError builds the [ErrInvalidFilterPath]-wrapping diagnostic for a
+// wire jsonPath outside the model's JSON Path syntax, echoing the offending
+// path so the caller can correct it.
+func invalidPathError(path, reason string) error {
+	return fmt.Errorf("%w: jsonPath %q %s", ErrInvalidFilterPath, path, reason)
 }
 
 // MaxConditionDepth caps recursion in [ValidateConditionOperators] to defend

@@ -34,18 +34,162 @@ func TestConditionToFilter_SimpleEquals(t *testing.T) {
 	}
 }
 
-func TestConditionToFilter_SimpleNoPrefix(t *testing.T) {
-	cond := &predicate.SimpleCondition{
-		JsonPath:     "city",
-		OperatorType: "EQUALS",
-		Value:        "Berlin",
+// TestConditionToFilter_PrefixedPathsAccepted is the positive control for the
+// mandatory "$." leader: every wire path form that must keep translating.
+//
+// It matters more than the rejection tests below. Requiring the leader is a
+// tightening on accepted input, and the failure mode of getting it wrong is
+// not "an invalid path slips through" but "a VALID path stops working" — a
+// live caller's query turning into a 400. Each row here is a form real callers
+// send, with the bare post-strip Filter.Path it must produce.
+func TestConditionToFilter_PrefixedPathsAccepted(t *testing.T) {
+	for _, tc := range []struct{ jsonPath, wantPath string }{
+		{"$.name", "name"},
+		{"$.x", "x"},
+		{"$.address.city", "address.city"},
+		{"$.some-array.some-object", "some-array.some-object"},
+		{"$.a_b.C9", "a_b.C9"},
+		// A numeric segment is how an array position is addressed once
+		// arrayToFilter has expanded it; a caller may also write it directly.
+		{"$.tags.0", "tags.0"},
+		// The storage meta block addressed as a data path. It is not meta
+		// ADDRESSING — that is a lifecycle condition, which never reaches
+		// stripDollarDot — but "_meta.state" is a well-formed dotted path and
+		// the leader rule must not turn it into a special case.
+		{"$._meta.state", "_meta.state"},
+		{"$._meta.tenant_id", "_meta.tenant_id"},
+	} {
+		t.Run("simple/"+tc.jsonPath, func(t *testing.T) {
+			f, err := spi.ConditionToFilter(&predicate.SimpleCondition{
+				JsonPath: tc.jsonPath, OperatorType: "EQUALS", Value: "v",
+			}, nil)
+			if err != nil {
+				t.Fatalf("ConditionToFilter(%q): unexpected error: %v", tc.jsonPath, err)
+			}
+			if f.Path != tc.wantPath {
+				t.Errorf("Path = %q, want %q", f.Path, tc.wantPath)
+			}
+		})
+		t.Run("array/"+tc.jsonPath, func(t *testing.T) {
+			f, err := spi.ConditionToFilter(&predicate.ArrayCondition{
+				JsonPath: tc.jsonPath, Values: []any{"v"},
+			}, nil)
+			if err != nil {
+				t.Fatalf("ConditionToFilter(%q): unexpected error: %v", tc.jsonPath, err)
+			}
+			if want := tc.wantPath + ".0"; f.Path != want {
+				t.Errorf("Path = %q, want %q", f.Path, want)
+			}
+		})
 	}
-	f, err := spi.ConditionToFilter(cond, nil)
+}
+
+// TestConditionToFilter_BarePathRejected pins the ruling: jsonPath is JSON Path
+// nomenclature, so the "$." leader is required and a bare identifier is an
+// invalid path, not a tolerated alias.
+//
+// The error must wrap [spi.ErrInvalidFilterPath]. Every ConditionToFilter
+// caller in the engine treats a translation error as "not pushdownable, fall
+// back to in-memory evaluation", and the in-memory evaluator resolves a bare
+// path happily — so an unclassifiable error would leave the tightening with no
+// observable effect at all, other than a silent drop off the pushdown path.
+// The sentinel is what lets a caller separate "invalid input, 400" from "valid
+// but unpushdownable, fall back".
+func TestConditionToFilter_BarePathRejected(t *testing.T) {
+	for _, p := range []string{
+		"variantId",      // the ruling's own example
+		"city",           // single bare segment
+		"address.city",   // bare dotted path
+		"_meta.state",    // the bare meta-block probe
+		"tags.0",         // bare numeric segment
+		"",               // empty
+		"$",              // leader without the dot
+		"$.",             // leader with nothing after it
+		"$name",          // "$" glued to the identifier
+		" $.name",        // leading whitespace is not part of the grammar
+		"$['x']",         // bracket-quoted property access: no "$." leader
+		"$['a']['b']",    // chained bracket-quoted access
+		"$.['x']['y']",   // leader plus bracket-quoted access
+		"$..name",        // recursive descent
+		"$.name.",        // trailing dot
+		"$..",            // degenerate
+		"$. name",        // whitespace inside the path
+		"$.a b",          // whitespace inside a segment
+		"$.name';DROP--", // punctuation that must never reach a backend
+		"$.naïve",        // non-ASCII
+		"$.a..b",         // empty interior segment
+		"$.\"x\"",        // quoted property access
+	} {
+		t.Run("simple/"+p, func(t *testing.T) {
+			_, err := spi.ConditionToFilter(&predicate.SimpleCondition{
+				JsonPath: p, OperatorType: "EQUALS", Value: "v",
+			}, nil)
+			if err == nil {
+				t.Fatalf("ConditionToFilter(%q): expected an error, got nil", p)
+			}
+			if !errors.Is(err, spi.ErrInvalidFilterPath) {
+				t.Errorf("ConditionToFilter(%q): error %v does not wrap ErrInvalidFilterPath", p, err)
+			}
+		})
+		t.Run("array/"+p, func(t *testing.T) {
+			_, err := spi.ConditionToFilter(&predicate.ArrayCondition{
+				JsonPath: p, Values: []any{"v"},
+			}, nil)
+			if err == nil {
+				t.Fatalf("ConditionToFilter(%q): expected an error, got nil", p)
+			}
+			if !errors.Is(err, spi.ErrInvalidFilterPath) {
+				t.Errorf("ConditionToFilter(%q): error %v does not wrap ErrInvalidFilterPath", p, err)
+			}
+		})
+	}
+}
+
+// TestConditionToFilter_ArrayWildcardStaysFallbackClass pins the OTHER half of
+// the error taxonomy, and it is the half easiest to break while tightening.
+//
+// "$.tags[*].name" is a well-formed JSON Path the engine's in-memory evaluator
+// genuinely serves (it rewrites "[*]" to gjson's "#"), so it must keep
+// producing the plain "not pushdownable" error that routes callers to that
+// fallback. Promoting it to ErrInvalidFilterPath would turn a working query
+// into a 400.
+func TestConditionToFilter_ArrayWildcardStaysFallbackClass(t *testing.T) {
+	for _, p := range []string{"$.items[*].name", "$.arr[0].field", "$.foo[*]"} {
+		t.Run(p, func(t *testing.T) {
+			_, err := spi.ConditionToFilter(&predicate.SimpleCondition{
+				JsonPath: p, OperatorType: "EQUALS", Value: "v",
+			}, nil)
+			if err == nil {
+				t.Fatalf("ConditionToFilter(%q): expected an error, got nil", p)
+			}
+			if errors.Is(err, spi.ErrInvalidFilterPath) {
+				t.Errorf("ConditionToFilter(%q): error wraps ErrInvalidFilterPath (%v); a subscripted path is "+
+					"valid JSON Path the in-memory fallback evaluates — it must stay in the unpushdownable class", p, err)
+			}
+		})
+	}
+}
+
+// TestConditionToFilter_LifecycleUnaffectedByPathLeader records that meta
+// ADDRESSING does not go through the wire-path rule at all: a lifecycle
+// condition names a member of the closed meta vocabulary
+// ([spi.MetaFieldNames]) directly, never a JSON Path, so it neither needs nor
+// tolerates a "$." leader. Pinned because "how is _meta addressed now?" is the
+// first question the leader rule raises.
+func TestConditionToFilter_LifecycleUnaffectedByPathLeader(t *testing.T) {
+	f, err := spi.ConditionToFilter(&predicate.LifecycleCondition{
+		Field: "state", OperatorType: "EQUALS", Value: "CREATED",
+	}, nil)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("ConditionToFilter: %v", err)
 	}
-	if f.Path != "city" {
-		t.Errorf("Path = %s, want city", f.Path)
+	if f.Source != spi.SourceMeta || f.Path != "state" {
+		t.Errorf("got Source=%s Path=%q, want meta/state", f.Source, f.Path)
+	}
+	if _, err := spi.ConditionToFilter(&predicate.LifecycleCondition{
+		Field: "$.state", OperatorType: "EQUALS", Value: "CREATED",
+	}, nil); err != nil {
+		t.Fatalf("a lifecycle Field is not a JSON Path and is not validated as one: %v", err)
 	}
 }
 
@@ -399,29 +543,6 @@ func TestConditionToFilter_Nil(t *testing.T) {
 	_, err := spi.ConditionToFilter(nil, nil)
 	if err == nil {
 		t.Fatal("expected error for nil condition, got nil")
-	}
-}
-
-// TestConditionToFilter_WildcardPath_ReturnsError verifies that paths
-// containing JSONPath array-wildcard or subscript syntax (e.g. "[*]", "[0]")
-// cause ConditionToFilter to return an error so the caller falls back to
-// in-memory evaluation. Such paths cannot be translated to pushdown filters.
-func TestConditionToFilter_WildcardPath_ReturnsError(t *testing.T) {
-	wildcardPaths := []string{
-		"$.items[*].name",
-		"$.arr[0].field",
-		"$.foo[*]",
-	}
-	for _, path := range wildcardPaths {
-		cond := &predicate.SimpleCondition{
-			JsonPath:     path,
-			OperatorType: "EQUALS",
-			Value:        "x",
-		}
-		_, err := spi.ConditionToFilter(cond, nil)
-		if err == nil {
-			t.Errorf("ConditionToFilter with path %q: expected error (non-pushdownable), got nil", path)
-		}
 	}
 }
 
@@ -900,56 +1021,51 @@ func TestConditionToFilter_NilFields_MetaLeafStillMatches(t *testing.T) {
 	}
 }
 
-// TestConditionToFilter_FieldsLookupNormalisesPath pins that a condition's
-// jsonPath resolves against the FieldsMap whichever way it is spelled.
+// TestConditionToFilter_FieldsLookupUsesPrefixedKey pins that a condition's
+// jsonPath resolves against the FieldsMap, whose keys are canonically
+// "$."-prefixed.
 //
-// FieldsMap keys are canonically "$."-prefixed; a condition may omit the
-// prefix, and callers' path validation normalises before checking, so an
-// unprefixed path arrives here as a known field. Looking it up raw silently
-// yielded no declared types, and the type-directed kernel turns a comparison
-// leaf with no declared type into a permanent non-match — a field that exists
-// and holds matching data answers with an empty page.
+// The lookup missing is not a visible failure: it silently yields no declared
+// types, and the type-directed kernel turns a comparison leaf with no declared
+// type into a permanent non-match — a field that exists and holds matching data
+// answers with an empty page.
 //
-// An earlier revision of this file asserted the opposite and called it "a
-// deliberate, load-bearing asymmetry inherited verbatim from the engine". It
-// was neither deliberate nor load-bearing: it was a defect introduced upstream
-// on 2026-07-25 and fixed there in Cyoda/cyoda-go#490. Behaviour inferred from
-// code is not intent.
-func TestConditionToFilter_FieldsLookupNormalisesPath(t *testing.T) {
+// This test used to assert the same for an UNPREFIXED path, because a bare
+// jsonPath was accepted at the wire boundary and had to be normalised before
+// the lookup. It no longer is: the leader is mandatory, so the only spelling
+// that reaches here is the prefixed one. The bare spellings moved to
+// TestConditionToFilter_BarePathRejected.
+func TestConditionToFilter_FieldsLookupUsesPrefixedKey(t *testing.T) {
 	fields := map[string]spi.FieldDescriptor{
 		"$.age":     {Path: "$.age", Types: []spi.DataType{spi.Long}},
 		"$.when":    {Path: "$.when", Types: []spi.DataType{spi.ZonedDateTime}},
 		"$.tags[*]": {Path: "$.tags[*]", Types: []spi.DataType{spi.String}, IsArray: true},
 	}
 
-	for _, path := range []string{"age", "$.age"} {
-		t.Run("declared/"+path, func(t *testing.T) {
-			c := &predicate.SimpleCondition{JsonPath: path, OperatorType: "EQUALS", Value: 30}
-			f, err := spi.ConditionToFilter(c, fields)
-			if err != nil {
-				t.Fatalf("ConditionToFilter: %v", err)
-			}
-			if len(f.Declared) != 1 || f.Declared[0] != spi.Long {
-				t.Errorf("Declared = %v, want [LONG]: %q must resolve against key %q", f.Declared, path, "$.age")
-			}
-		})
-	}
+	t.Run("declared", func(t *testing.T) {
+		c := &predicate.SimpleCondition{JsonPath: "$.age", OperatorType: "EQUALS", Value: 30}
+		f, err := spi.ConditionToFilter(c, fields)
+		if err != nil {
+			t.Fatalf("ConditionToFilter: %v", err)
+		}
+		if len(f.Declared) != 1 || f.Declared[0] != spi.Long {
+			t.Errorf("Declared = %v, want [LONG]: %q must resolve against key %q", f.Declared, "$.age", "$.age")
+		}
+	})
 
-	// Coercion is looked up with the same key and had the same defect: a
-	// declared-temporal field reached without the prefix was stamped
-	// CoerceNone, so SQL planners compared it as text rather than as an instant.
-	for _, path := range []string{"when", "$.when"} {
-		t.Run("coercion/"+path, func(t *testing.T) {
-			c := &predicate.SimpleCondition{JsonPath: path, OperatorType: "GREATER_THAN", Value: "2020-01-01T00:00:00Z"}
-			f, err := spi.ConditionToFilter(c, fields)
-			if err != nil {
-				t.Fatalf("ConditionToFilter: %v", err)
-			}
-			if f.Coercion != spi.CoerceTemporal {
-				t.Errorf("Coercion = %v, want CoerceTemporal for %q", f.Coercion, path)
-			}
-		})
-	}
+	// Coercion is looked up with the same key: a declared-temporal field whose
+	// lookup misses is stamped CoerceNone, so SQL planners compare it as text
+	// rather than as an instant.
+	t.Run("coercion", func(t *testing.T) {
+		c := &predicate.SimpleCondition{JsonPath: "$.when", OperatorType: "GREATER_THAN", Value: "2020-01-01T00:00:00Z"}
+		f, err := spi.ConditionToFilter(c, fields)
+		if err != nil {
+			t.Fatalf("ConditionToFilter: %v", err)
+		}
+		if f.Coercion != spi.CoerceTemporal {
+			t.Errorf("Coercion = %v, want CoerceTemporal for %q", f.Coercion, "$.when")
+		}
+	})
 
 	// A genuinely unknown path still carries no declared types — the deliberate
 	// degrade-to-non-match this must not disturb.

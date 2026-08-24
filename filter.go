@@ -64,8 +64,57 @@ const (
 // Leaf nodes carry Op, Path, Source, and Value/Values.
 // Branch nodes (FilterAnd, FilterOr) carry Children.
 type Filter struct {
-	Op       FilterOp
-	Path     string
+	Op FilterOp
+
+	// Path addresses the leaf field this predicate applies to. It is BARE:
+	// there is no "$." prefix and no JSONPath syntax. [ConditionToFilter]
+	// strips the "$." at the wire boundary (see stripDollarDot, where the
+	// leader is mandatory on the way in) and [lifecycleToFilter] emits
+	// canonical meta names directly, so by the time a Filter reaches a storage
+	// plugin the prefix is already gone. A "$."-prefixed path is therefore
+	// malformed, not a tolerated alias.
+	//
+	// The two forms are opposites and must not be conflated: the wire jsonPath
+	// REQUIRES the leader, this plugin-facing Path FORBIDS it.
+	//
+	// # Grammar
+	//
+	// A non-empty Path is a dotted identifier:
+	//
+	//	path    = segment ( "." segment )*
+	//	segment = 1*( ALPHA / DIGIT / "_" / "-" )
+	//
+	// ASCII only. At least one segment; no empty segment (so no leading dot
+	// and no ".."), no trailing dot, and no other character at all — notably
+	// no whitespace, quote, backslash, semicolon, slash, asterisk, bracket,
+	// control byte, or non-ASCII rune. Bracketed array subscripts and
+	// wildcards ("tags[0]", "tags[*]") are outside the grammar; an array
+	// position is addressed as an ordinary numeric segment ("tags.0"), which
+	// is what [ConditionToFilter] produces for an ArrayCondition.
+	//
+	// The grammar is deliberately narrower than any backend's native JSON
+	// path syntax. It is the intersection every backend can serve, and on
+	// SQL backends it is also the injection guard: every character that could
+	// terminate a quoted JSON-path literal is outside it. A backend needing a
+	// wider form must widen this grammar, not bypass its own validator.
+	//
+	// An EMPTY Path is legal and is not checked: tree operators (FilterAnd,
+	// FilterOr) and any leaf that addresses no field carry one.
+	//
+	// # Rejection is mandatory
+	//
+	// Both FieldSource values are held to the same grammar, and the check is
+	// on the whole tree — a malformed path nested under an and/or branch is
+	// still malformed.
+	//
+	// A backend MUST reject a malformed non-empty Path with an error. It MUST
+	// NOT answer with an empty result set: a path the caller mistyped and a
+	// predicate that genuinely matched nothing are different answers, and a
+	// backend that conflates them makes a client error indistinguishable from
+	// a legitimate empty page on that backend alone. Backends name this
+	// sentinel ErrInvalidFilterPath.
+	Path string
+
 	Source   FieldSource
 	Value    any
 	Values   []any

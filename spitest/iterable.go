@@ -43,8 +43,50 @@ func runIterableSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Err/Sticky", testIterableErrSticky)
 	runSubtest(t, h, tracker, "Close/Idempotent", testIterableCloseIdempotent)
 	runSubtest(t, h, tracker, "PIT/SnapshotVariant", testIterablePITSnapshotVariant)
+	runSubtest(t, h, tracker, "PIT/CommittedOnlyInTx", testIterablePITCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "Overlay/SnapshotAtOpen", testIterableOverlaySnapshotAtOpen)
 	runSubtest(t, h, tracker, "TrackingRead/Gating", testIterableTrackingReadGating)
+	runSubtest(t, h, tracker, "FilterPath/Grammar", testIterableFilterPathGrammar)
+}
+
+// testIterableFilterPathGrammar holds Iterate to the Filter.Path grammar,
+// using the same table Search is held to (searcher.go). Both are filter-taking
+// entry points on the same contract, so a backend that guards one and not the
+// other has left the grammar unenforced on whichever path the engine's
+// streamed reads happen to take.
+//
+// A refusal may surface either from Iterate itself or, for a backend that
+// validates lazily, from the iterator's sticky Err(). What it may NOT do is
+// yield rows: an error alongside results is not a refusal, and a nil error
+// with zero rows is the silently-empty-page failure this whole subtest exists
+// to catch.
+//
+// The model is seeded first so a wrongly-accepting backend has real rows to
+// yield rather than trivially reaching the end of an empty scan.
+func testIterableFilterPathGrammar(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	seedIterable(t, h, ctx)
+
+	store, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	iterable := store.(spi.Iterable)
+
+	runFilterPathGrammar(t, "Iterate", func(t *testing.T, filter spi.Filter) error {
+		it, err := iterable.Iterate(ctx, iterableModelRef, filter, spi.IterateOptions{})
+		if err != nil {
+			return err
+		}
+		n := 0
+		for it.Next() {
+			n++
+		}
+		err = it.Err()
+		require.NoError(t, it.Close())
+		if err != nil {
+			require.Zero(t, n, "an iterator that refuses a filter path must not also have yielded rows")
+		}
+		return err
+	})
 }
 
 // drainIterator consumes it fully, collecting every yielded entity, closes
@@ -298,6 +340,30 @@ func testIterablePITSnapshotVariant(t *testing.T, h Harness) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	require.Contains(t, string(got[0].Data), `"v":1`, "PointInTime Iterate must yield the pre-cutoff state")
+}
+
+// testIterablePITCommittedOnlyInTx: a point-in-time Iterate issued INSIDE a
+// transaction ignores that transaction and answers from committed state.
+//
+// PIT/SnapshotVariant above runs Iterate outside any transaction, so it can
+// only exercise the cutoff — not the routing. The two options are independent
+// and a backend can get one right and the other wrong: this is the case where
+// PointInTime and an ambient transaction are set together, which the shared
+// fixture arranges so the cutoff cannot mask the answer (see
+// newPITCommittedOnlyFixture on why AsAt is in the future).
+//
+// OrderBy is left empty — ordered iteration inside a transaction is
+// unsupported per the spi.Iterable contract (see Ordered/InTxErrors), and this
+// subtest is about visibility, not order.
+func testIterablePITCommittedOnlyInTx(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	f := newPITCommittedOnlyFixture(t, h, ctx, "iterable-pit-intx")
+
+	it, err := f.Store.(spi.Iterable).Iterate(f.Ctx, f.ModelRef, spi.Filter{}, spi.IterateOptions{PointInTime: &f.AsAt})
+	require.NoError(t, err)
+	got, err := drainIterator(t, it)
+	require.NoError(t, err)
+	f.requireCommittedOnly(t, "Iterate(PointInTime)", got)
 }
 
 // testIterableOverlaySnapshotAtOpen: inside a transaction, an entity saved

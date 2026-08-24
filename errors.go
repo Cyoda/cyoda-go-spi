@@ -146,3 +146,27 @@ var ErrStaleClaim = errors.New("write fenced: stale claim epoch")
 // translation failures mean the predicate is well-formed but not expressible
 // as a pushdown Filter, which is a different answer entirely.
 var ErrUnknownOperator = errors.New("unknown condition operator")
+
+// ErrInvalidFilterPath is returned for a Filter.Path — or an OrderSpec.Path —
+// that falls outside the documented path grammar. See the "Grammar" and
+// "Rejection is mandatory" sections of [Filter]'s Path field: a non-empty path
+// is a dotted run of ASCII identifier segments, and a backend MUST refuse
+// anything else with an error rather than answering with an empty result set.
+//
+// [ConditionToFilter] also returns it one step earlier, for the WIRE form: a
+// condition jsonPath that is not JSON Path nomenclature — no "$." leader, an
+// empty or trailing segment, bracket-quoted access, a disallowed character.
+// Note what it does NOT cover there: a valid but array-subscripted path
+// ("$.tags[*]") is unpushdownable rather than invalid, and fails with a plain
+// error so the caller falls back to in-memory evaluation instead of rejecting
+// a query that works.
+//
+// Like ErrUnknownOperator this means the INPUT is invalid, so a caller should
+// surface it as a client error rather than a storage failure. Backends declare
+// their own package-level sentinel of the same name for their local callers;
+// each one wraps this, so
+//
+//	errors.Is(err, spi.ErrInvalidFilterPath)
+//
+// is the backend-agnostic way to classify a malformed path.
+var ErrInvalidFilterPath = errors.New("invalid filter path")

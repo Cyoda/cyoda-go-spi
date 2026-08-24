@@ -72,7 +72,10 @@ type Iterator interface {
 type IterateOptions struct {
 	// PointInTime, when non-nil, requests a historical snapshot at the
 	// given instant. Semantics match the rest of the SPI (read-committed
-	// snapshot).
+	// snapshot): the read is COMMITTED-ONLY and ignores any ambient
+	// transaction, so it never yields that transaction's own uncommitted
+	// writes — see EntityStore.GetAsAt for the full statement, and note that
+	// bounding the query on a timestamp is not sufficient to achieve it.
 	PointInTime *time.Time
 
 	// OrderBy specifies the sort keys applied to yielded entities. Empty

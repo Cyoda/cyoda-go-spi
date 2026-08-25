@@ -15,7 +15,7 @@ import (
 // Must NOT be t.Parallel() and must not overlap any other test that touches
 // compileRegex — the indirection swap is itself a data race otherwise.
 func TestPrepare_CompilesRegexExactlyOncePerQuery(t *testing.T) {
-	for _, op := range []FilterOp{FilterMatchesRegex, FilterLike} {
+	for _, op := range []FilterOp{FilterMatchesRegex} {
 		t.Run(string(op), func(t *testing.T) {
 			calls := 0
 			orig := compileRegex
@@ -26,9 +26,6 @@ func TestPrepare_CompilesRegexExactlyOncePerQuery(t *testing.T) {
 			defer func() { compileRegex = orig }()
 
 			operand := "A.*"
-			if op == FilterLike {
-				operand = "A%"
-			}
 			p := Prepare(Filter{
 				Op:       op,
 				Source:   SourceData,

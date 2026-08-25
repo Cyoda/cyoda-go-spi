@@ -321,7 +321,7 @@ func TestExpandLeaf_TemporalDownscaleOpMutation(t *testing.T) {
 	}
 }
 
-func TestLikeToRegex_Grammar(t *testing.T) {
+func TestLike_Grammar(t *testing.T) {
 	cases := []struct {
 		pattern, in string
 		want        bool
@@ -347,6 +347,75 @@ func TestLikeToRegex_Grammar(t *testing.T) {
 		got := EvalLeaf(exp, jsonStr(c.in))
 		if got != c.want {
 			t.Errorf("LIKE %q vs %q = %v, want %v", c.pattern, c.in, got, c.want)
+		}
+	}
+}
+
+// TestLike_SQLParity pins the seven probe rows from the spec's Why table
+// against the SQL column. PostgreSQL 17 and SQLite agree on every one; today's
+// kernel disagrees with SQL on five.
+func TestLike_SQLParity(t *testing.T) {
+	cases := []struct {
+		pattern, in string
+		want        bool // what PostgreSQL and SQLite return
+	}{
+		{`\d`, "7", false},
+		{`\d`, "d", true},
+		{`\d`, `\d`, false},
+		{`\w`, "q", false},
+		{`a\nb`, "a\nb", false}, // \n is a literal 'n', not a newline
+		{`a\nb`, "anb", true},
+		{"a_b", "a\nb", true}, // _ matches a newline
+		{"%", "a\nb", true},   // % matches a newline
+	}
+	for _, c := range cases {
+		exp, err := ExpandLeaf(FilterLike, c.pattern, nil, []DataType{String})
+		if err != nil {
+			t.Fatalf("ExpandLeaf(like %q) error: %v", c.pattern, err)
+		}
+		if got := EvalLeaf(exp, jsonStr(c.in)); got != c.want {
+			t.Errorf("LIKE %q vs %q = %v, want %v (SQL)", c.pattern, c.in, got, c.want)
+		}
+	}
+}
+
+// TestLike_MalformedOperandNeverMatches pins Prepare's documented contract: a
+// leaf whose operand cannot be expanded becomes a leaf that never matches. The
+// 400 happens at the request boundary, via ValidateConditionPatterns — not here.
+func TestLike_MalformedOperandNeverMatches(t *testing.T) {
+	exp, err := ExpandLeaf(FilterLike, `a\`, nil, []DataType{String})
+	if err != nil {
+		t.Fatalf("ExpandLeaf should not surface the error, got %v", err)
+	}
+	for _, in := range []string{"a", `a\`, "ab", ""} {
+		if EvalLeaf(exp, jsonStr(in)) {
+			t.Errorf("malformed LIKE operand matched %q", in)
+		}
+	}
+}
+
+// TestValidatorAgreesWithKernel is the anti-drift guard: for every corpus
+// operand, compileLeafPattern erroring must be exactly when the kernel ends up
+// with no matcher.
+func TestValidatorAgreesWithKernel(t *testing.T) {
+	corpus := []struct {
+		op      FilterOp
+		operand string
+	}{
+		{FilterLike, `%`}, {FilterLike, `a\`}, {FilterLike, `\`}, {FilterLike, `\d`},
+		{FilterLike, `a\\b`}, {FilterLike, ``},
+		{FilterMatchesRegex, `A.*e`}, {FilterMatchesRegex, `\Q`}, {FilterMatchesRegex, `)|(`},
+		{FilterMatchesRegex, `[`}, {FilterMatchesRegex, `a|b`}, {FilterMatchesRegex, ``},
+	}
+	for _, c := range corpus {
+		_, valErr := compileLeafPattern(c.op, c.operand)
+		exp, err := ExpandLeaf(c.op, c.operand, nil, []DataType{String})
+		if err != nil {
+			t.Fatalf("ExpandLeaf(%s, %q) error: %v", c.op, c.operand, err)
+		}
+		if (valErr != nil) != (exp.strMatch == nil) {
+			t.Errorf("skew for (%s, %q): validator err=%v, kernel matcher nil=%v",
+				c.op, c.operand, valErr, exp.strMatch == nil)
 		}
 	}
 }

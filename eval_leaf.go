@@ -102,7 +102,7 @@ type Expansion struct {
 
 	// kindStringOp payload.
 	strOperand string
-	strRegex   *regexp.Regexp // compiled+anchored pattern for LIKE / MATCHES_PATTERN
+	strMatch   patternMatcher // LIKE glob / MATCHES_PATTERN anchored regex; nil ⇒ never matches
 }
 
 // compileRegex is regexp.Compile behind a package var so an internal test can
@@ -138,15 +138,11 @@ func ExpandLeaf(op FilterOp, operand string, values []string, declared []DataTyp
 		FilterIEq, FilterINe, FilterIContains, FilterINotContains, FilterIStartsWith,
 		FilterINotStartsWith, FilterIEndsWith, FilterINotEndsWith:
 		e := Expansion{kind: kindStringOp, op: op, strOperand: operand}
-		switch op {
-		case FilterLike:
-			if re, err := compileRegex(anchor(likeToRegex(operand))); err == nil {
-				e.strRegex = re
-			}
-		case FilterMatchesRegex:
-			if re, err := compileRegex(anchor(operand)); err == nil {
-				e.strRegex = re
-			}
+		// Swallowed deliberately: Prepare's contract is that a leaf whose
+		// operand cannot be expanded becomes a leaf that never matches.
+		// Callers wanting a rejection ask ValidateLeafPattern FIRST.
+		if m, err := compileLeafPattern(op, operand); err == nil {
+			e.strMatch = m
 		}
 		return e, nil
 
@@ -496,7 +492,7 @@ func evalStringOp(e Expansion, s string) bool {
 	case FilterNotEndsWith:
 		return !strings.HasSuffix(s, op)
 	case FilterLike, FilterMatchesRegex:
-		return e.strRegex != nil && e.strRegex.MatchString(s)
+		return e.strMatch != nil && e.strMatch.matches(s)
 	case FilterIEq:
 		return strings.EqualFold(s, op)
 	case FilterINe:
@@ -576,12 +572,6 @@ func classifyStoredNumeric(d Decimal) DataType {
 
 func fold(s string) string { return strings.ToLower(s) }
 
-// --- LIKE grammar (Cloud queryable/Like.java prepareSpecialCharacters) -------
-
-// regexpSpecialChars mirrors Cloud Like.REGEXP_SPECIAL_CHARS: every char here is
-// escaped to a literal in the compiled pattern.
-const regexpSpecialChars = "[](){}.*+?$^|#<>-="
-
 // anchor wraps a regex body so it must match the WHOLE stored string, matching
 // Java's Pattern.matcher(x).matches() semantics (Go's MatchString is otherwise
 // an unanchored substring search).
@@ -657,52 +647,4 @@ func compileLeafPattern(op FilterOp, value any) (patternMatcher, error) {
 		return compileMatchesPattern(OperandString(value))
 	}
 	return nil, nil
-}
-
-// likeToRegex ports Like.prepareSpecialCharacters: '%' → '.*?', '_' → '.', every
-// regexp metacharacter escaped as a literal, '\' the escape char (\%, \_, \\ →
-// literal %, _, \). Case-sensitive; the caller anchors the result.
-func likeToRegex(s string) string {
-	if s == "" {
-		return ""
-	}
-	rs := []rune(s)
-	sb := make([]rune, 0, len(rs)*2)
-	for i := 0; i < len(rs); i++ {
-		c := rs[i]
-		switch {
-		case strings.ContainsRune(regexpSpecialChars, c):
-			sb = append(sb, '\\', c)
-		case c == '_':
-			if !hasEscapeRune(rs, i) {
-				sb = append(sb, '.')
-			} else {
-				sb = sb[:len(sb)-1] // drop the raw '\' appended by the else-branch
-				sb = append(sb, c)
-			}
-		case c == '%':
-			if !hasEscapeRune(rs, i) {
-				sb = append(sb, '.', '*', '?')
-			} else {
-				sb = sb[:len(sb)-1]
-				sb = append(sb, c)
-			}
-		default:
-			sb = append(sb, c)
-		}
-	}
-	return string(sb)
-}
-
-// hasEscapeRune reports whether the rune at idx is escaped: an odd number of
-// immediately-preceding backslashes (Cloud Like.hasEscapeCharacter).
-func hasEscapeRune(rs []rune, idx int) bool {
-	if idx == 0 {
-		return false
-	}
-	count := 0
-	for i := idx - 1; i >= 0 && rs[i] == '\\'; i-- {
-		count++
-	}
-	return count%2 == 1
 }

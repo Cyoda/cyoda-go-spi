@@ -385,7 +385,7 @@ Each is a grep with an expected count, scoped to `*.go`.
 | `\A(?:` in `*.go` | 1 — the `anchor` body |
 | `regexp.` in the LIKE path | 0 |
 | `ErrScanBudgetExhausted` repo-wide | 0 in code and docs; CHANGELOG history retained |
-| new test files | 0 — all coverage folded into existing files, except the `spitest` case |
+| new test files | 2 — `like_pattern_test.go` (matcher internals) and the `spitest` case. The twelve-row grammar corpus stays in `eval_leaf_test.go` |
 | `ExpandLeaf`'s old compile arms | deleted, not left beside the new path |
 | `MaxConditionDepth` godoc (`condition_filter.go:581-586`) | names both walkers, not just `ValidateConditionOperators` |
 

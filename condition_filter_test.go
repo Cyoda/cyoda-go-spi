@@ -1461,12 +1461,11 @@ func TestValidateConditionPatterns(t *testing.T) {
 		cond   predicate.Condition
 		wantOp string
 	}{
-		// wantOp is the substring that actually appears in the error, not the
-		// predicate.SimpleCondition.OperatorType domain name: the regex path
-		// (eval_leaf.go's invalidPatternError) formats the internal FilterOp
-		// constant ("matches_regex"), while the LIKE path (like_pattern.go)
-		// hardcodes the literal word "LIKE".
-		"regex": {bad, "matches_regex"},
+		// wantOp is the domain operator string the caller actually wrote
+		// (predicate.SimpleCondition.OperatorType) — the vocabulary
+		// ValidateConditionPatterns' errors speak, never the internal
+		// FilterOp spelling ("matches_regex").
+		"regex": {bad, "MATCHES_PATTERN"},
 		"like":  {badLike, "LIKE"},
 	}
 	for name, c := range cases {
@@ -1482,10 +1481,15 @@ func TestValidateConditionPatterns(t *testing.T) {
 		if !strings.Contains(err.Error(), "$.name") {
 			t.Errorf("%s: error does not name the leaf: %v", name, err)
 		}
-		// The operator name is safe to surface and must survive; the operand
-		// (checked elsewhere) must not.
+		// The operator name the caller wrote is safe to surface and must
+		// survive; the operand (checked elsewhere) must not.
 		if !strings.Contains(err.Error(), c.wantOp) {
 			t.Errorf("%s: error does not name the operator %q: %v", name, c.wantOp, err)
+		}
+		// Regression guard: the internal FilterOp spelling must never leak
+		// into a client-facing error — the caller never wrote "matches_regex".
+		if strings.Contains(err.Error(), "matches_regex") {
+			t.Errorf("%s: error leaks internal FilterOp spelling %q: %v", name, "matches_regex", err)
 		}
 	}
 
@@ -1537,8 +1541,15 @@ func TestValidateConditionPatterns_DepthGuard(t *testing.T) {
 }
 
 func TestValidateLeafPattern(t *testing.T) {
-	if err := spi.ValidateLeafPattern(spi.FilterMatchesRegex, `)|(`); err == nil {
-		t.Error("anchor-escape operand accepted")
+	err := spi.ValidateLeafPattern(spi.FilterMatchesRegex, `)|(`)
+	if err == nil {
+		t.Fatal("anchor-escape operand accepted")
+	}
+	// Accurate here: op is exactly what the caller passed in, so naming it
+	// back — in FilterOp's own spelling — is honest, unlike
+	// ValidateConditionPatterns, which speaks the caller's domain vocabulary.
+	if !strings.Contains(err.Error(), string(spi.FilterMatchesRegex)) {
+		t.Errorf("error does not name the FilterOp %q: %v", spi.FilterMatchesRegex, err)
 	}
 	if err := spi.ValidateLeafPattern(spi.FilterLike, `100%`); err != nil {
 		t.Errorf("valid LIKE operand rejected: %v", err)

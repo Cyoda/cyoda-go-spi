@@ -591,12 +591,17 @@ func (m regexMatcher) matches(s string) bool { return m.re.MatchString(s) }
 // invalidPatternError reports a regex failure by its syntax CODE only. It must
 // never carry syntax.Error.Expr, which echoes the anchored expression and the
 // caller's operand into a client-facing 400.
-func invalidPatternError(op FilterOp, err error) error {
+//
+// It carries no operator name: naming the operator is the caller's job, in
+// the vocabulary that caller's own caller speaks — [ValidateLeafPattern] names
+// the FilterOp it was handed, [ValidateConditionPatterns] names the domain
+// operator string the user wrote. Naming it here would fix it to neither.
+func invalidPatternError(err error) error {
 	var se *syntax.Error
 	if errors.As(err, &se) {
-		return fmt.Errorf("%w: %s: %s", ErrInvalidPattern, op, se.Code)
+		return fmt.Errorf("%w: %s", ErrInvalidPattern, se.Code)
 	}
-	return fmt.Errorf("%w: %s: operand is not a valid regular expression", ErrInvalidPattern, op)
+	return fmt.Errorf("%w: operand is not a valid regular expression", ErrInvalidPattern)
 }
 
 // compileMatchesPattern requires the operand to parse STANDALONE as well as
@@ -620,11 +625,11 @@ func invalidPatternError(op FilterOp, err error) error {
 // about a \z the caller never wrote.
 func compileMatchesPattern(operand string) (patternMatcher, error) {
 	if _, err := syntax.Parse(operand, syntax.Perl); err != nil {
-		return nil, invalidPatternError(FilterMatchesRegex, err)
+		return nil, invalidPatternError(err)
 	}
 	re, err := compileRegex(anchor(operand))
 	if err != nil {
-		return nil, invalidPatternError(FilterMatchesRegex, err)
+		return nil, invalidPatternError(err)
 	}
 	return regexMatcher{re: re}, nil
 }
@@ -658,9 +663,12 @@ func compileLeafPattern(op FilterOp, value any) (patternMatcher, error) {
 //
 // It covers pattern VALIDITY only. Passing it is not the same as having
 // validated the condition — see [ValidateConditionOperators] for operator
-// names. Errors wrap [ErrInvalidPattern] and carry neither the operand nor the
-// anchored form.
+// names. Errors wrap [ErrInvalidPattern], name op (the exact FilterOp the
+// caller passed in — accurate here, since the caller supplied it), and carry
+// neither the operand nor the anchored form.
 func ValidateLeafPattern(op FilterOp, value any) error {
-	_, err := compileLeafPattern(op, value)
-	return err
+	if _, err := compileLeafPattern(op, value); err != nil {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+	return nil
 }

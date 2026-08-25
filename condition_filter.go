@@ -699,8 +699,10 @@ func checkOperator(op string) error {
 // ignores operands. Call both.
 //
 // Errors wrap [ErrInvalidPattern] and name the offending leaf by jsonPath (or,
-// for a lifecycle leaf, by field), which is what makes them actionable against
-// a deep tree. They never carry the operand.
+// for a lifecycle leaf, by field) and the operator string the caller wrote
+// (e.g. "MATCHES_PATTERN") — never the operand, and never the internal
+// FilterOp spelling ([ValidateLeafPattern] uses that vocabulary; this one
+// speaks the caller's).
 func ValidateConditionPatterns(cond predicate.Condition) error {
 	return validatePatternsAtDepth(cond, 0)
 }
@@ -714,9 +716,9 @@ func validatePatternsAtDepth(cond predicate.Condition, depth int) error {
 	}
 	switch c := cond.(type) {
 	case *predicate.SimpleCondition:
-		return checkPattern(MapOperator(c.OperatorType), c.Value, c.JsonPath)
+		return checkPattern(MapOperator(c.OperatorType), c.OperatorType, c.Value, c.JsonPath)
 	case *predicate.LifecycleCondition:
-		return checkPattern(MapOperator(c.OperatorType), c.Value, c.Field)
+		return checkPattern(MapOperator(c.OperatorType), c.OperatorType, c.Value, c.Field)
 	case *predicate.GroupCondition:
 		for _, child := range c.Conditions {
 			if err := validatePatternsAtDepth(child, depth+1); err != nil {
@@ -733,10 +735,14 @@ func validatePatternsAtDepth(cond predicate.Condition, depth int) error {
 	}
 }
 
-// checkPattern names the leaf without echoing its operand.
-func checkPattern(op FilterOp, value any, location string) error {
-	if err := ValidateLeafPattern(op, value); err != nil {
-		return fmt.Errorf("%s: %w", location, err)
+// checkPattern names the leaf and the operator the caller wrote (opName, e.g.
+// "MATCHES_PATTERN") — never the operand, and never the internal FilterOp
+// spelling. It calls compileLeafPattern directly rather than
+// [ValidateLeafPattern], which would name the FilterOp instead: one name per
+// error, in the vocabulary this caller's own caller used.
+func checkPattern(op FilterOp, opName string, value any, location string) error {
+	if _, err := compileLeafPattern(op, value); err != nil {
+		return fmt.Errorf("%s: %s: %w", location, opName, err)
 	}
 	return nil
 }

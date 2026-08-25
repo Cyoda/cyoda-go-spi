@@ -496,6 +496,15 @@ MAINTAINING.md.
   invokes `ValidateLeafPattern` or `ValidateConditionPatterns` before
   evaluating.
 
+- **Conformance: `spitest` now pins the `LIKE` and `MATCHES_PATTERN` grammar
+  through the `Searcher` surface.** Two new subtests, `Pattern/LikeGrammar`
+  and `Pattern/MalformedLike`, seed a fixed corpus and assert the glob rules
+  above end-to-end — there was previously zero conformance coverage of
+  either grammar. A backend that has not converged on the kernel's grammar
+  (translates `LIKE` to a regex, for example) will fail one or both and
+  needs a `Harness.Skip` entry for `Pattern/LikeGrammar` and/or
+  `Pattern/MalformedLike` until it does.
+
 ### Changed
 
 - **`Filter.Path` now documents its grammar on the field.** The accepted form

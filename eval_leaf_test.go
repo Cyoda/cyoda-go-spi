@@ -367,6 +367,10 @@ func TestLike_SQLParity(t *testing.T) {
 		{`a\nb`, "anb", true},
 		{"a_b", "a\nb", true}, // _ matches a newline
 		{"%", "a\nb", true},   // % matches a newline
+		{`\Q`, "Q", true},
+		{`\Q`, `\Q`, false},
+		{`\p{Foo}`, "p{Foo}", true},
+		{`\p{Foo}`, "x", false},
 	}
 	for _, c := range cases {
 		exp, err := ExpandLeaf(FilterLike, c.pattern, nil, []DataType{String})

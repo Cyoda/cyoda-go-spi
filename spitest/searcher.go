@@ -85,6 +85,8 @@ func runSearcherSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "BoundedOrFail/InTx", testSearcherBoundedOrFailInTx)
 	runSubtest(t, h, tracker, "PIT/CommittedOnlyInTx", testSearcherPITCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "FilterPath/Grammar", testSearcherFilterPathGrammar)
+	runSubtest(t, h, tracker, "Pattern/LikeGrammar", testPatternLikeGrammar)
+	runSubtest(t, h, tracker, "Pattern/MalformedLike", testPatternMalformedLike)
 }
 
 // testSearcherPITCommittedOnlyInTx pins the Searcher doc's committed-only

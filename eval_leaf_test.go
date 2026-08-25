@@ -336,7 +336,7 @@ func TestLike_Grammar(t *testing.T) {
 		{`a\\b`, `a\b`, true},
 		{"1.2", "1.2", true},
 		{"1.2", "1x2", false},
-		{"[a]", "[a]", true}, // regex metachars escaped to literals
+		{"[a]", "[a]", true}, // regex metachars are literals — LIKE is a glob
 		{"a<b>c", "a<b>c", true},
 	}
 	for _, c := range cases {
@@ -351,9 +351,9 @@ func TestLike_Grammar(t *testing.T) {
 	}
 }
 
-// TestLike_SQLParity pins the seven probe rows from the spec's Why table
-// against the SQL column. PostgreSQL 17 and SQLite agree on every one; today's
-// kernel disagrees with SQL on five.
+// TestLike_SQLParity pins the twelve probe rows from the spec's Why table
+// against the SQL column. PostgreSQL 17 and SQLite agree on every one, and so
+// does today's kernel.
 func TestLike_SQLParity(t *testing.T) {
 	cases := []struct {
 		pattern, in string
@@ -438,8 +438,16 @@ func TestCompileMatchesPattern_AnchorEscapeRejected(t *testing.T) {
 
 func TestCompileMatchesPattern_AcceptSet(t *testing.T) {
 	// Rejected: compiles bare, fails anchored (\Q swallows the wrapper's )\z).
-	if _, err := compileLeafPattern(FilterMatchesRegex, `\Q`); err == nil {
-		t.Error(`compileLeafPattern(MATCHES_PATTERN, "\\Q") = nil error, want rejection`)
+	err := func() error { _, err := compileLeafPattern(FilterMatchesRegex, `\Q`); return err }()
+	if err == nil {
+		t.Fatal(`compileLeafPattern(MATCHES_PATTERN, "\\Q") = nil error, want rejection`)
+	}
+	// The bare parse succeeds for "\Q", so any syntax.Error.Code from the
+	// ANCHORED compile can only describe anchor's own \A(?:...)\z wrapper —
+	// never the operand. The message must not report on the wrapper's
+	// parentheses (e.g. a "missing closing )" about anchor's "(?:").
+	if msg := err.Error(); strings.ContainsAny(msg, "()") {
+		t.Errorf(`error for "\Q" mentions a paren, which can only describe anchor's wrapper: %q`, msg)
 	}
 	// Accepted: legitimate patterns are unaffected by the bare requirement.
 	for _, operand := range []string{`a|b`, `^foo`, `A.*e`, ``} {

@@ -98,6 +98,24 @@ func TestParseLikePattern_InvalidUTF8(t *testing.T) {
 	}
 }
 
+func TestParseLikePattern_InvalidUTF8InOperand(t *testing.T) {
+	// An invalid byte in the OPERAND (the pattern itself, not the subject)
+	// must be preserved byte-identical, not transcoded to U+FFFD — literals
+	// are compared bytewise, so a decode-then-WriteRune round trip would make
+	// this fail against the byte-identical subject and wrongly match "�".
+	if !mustLike(t, "\xff").matches("\xff") {
+		t.Error(`LIKE "\xff" should match the byte-identical subject "\xff"`)
+	}
+	if mustLike(t, "\xff").matches("�") {
+		t.Error(`LIKE "\xff" should NOT match "�" (U+FFFD)`)
+	}
+	// Same guarantee through the escape branch: \X is the literal byte X,
+	// even when X is an invalid UTF-8 byte.
+	if !mustLike(t, "\\\xff").matches("\xff") {
+		t.Error(`LIKE "\` + "\\xff" + `" should match the byte-identical subject "\xff"`)
+	}
+}
+
 func TestParseLikePattern_NoPathologicalBacktracking(t *testing.T) {
 	// Would be exponential under a naive recursive matcher. Must finish fast.
 	m := mustLike(t, strings.Repeat("%_", 40)+"z")

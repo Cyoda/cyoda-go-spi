@@ -10,20 +10,9 @@ import (
 // LIKE and MATCHES_PATTERN both produce one; nothing else does.
 type patternMatcher interface{ matches(s string) bool }
 
-// LIKE is a glob, not a regex. The grammar, which is PostgreSQL's and
-// SQLite's `LIKE ... ESCAPE '\'`:
-//
-//   - '%'  any sequence of characters, including empty, INCLUDING newlines
-//   - '_'  exactly one character (one rune), INCLUDING a newline
-//   - '\X' the literal character X, for ANY X — so \%, \_ and \\ are literal
-//     '%', '_' and '\', and \d is a literal 'd'
-//   - anything else, itself
-//
-// The match is whole-string and case-sensitive. A trailing unpaired '\' is the
-// only malformed pattern; every other operand matches something.
-//
-// This is deliberately NOT Cloud's Like.prepareSpecialCharacters, which
-// translates to a regex and leaks RE2 escapes. cyoda-go leads this contract.
+// likeTokKind classifies one token of a tokenised LIKE pattern: literal text,
+// a '_' single-char wildcard, or a '%' any-sequence wildcard. See [FilterLike]
+// for the grammar this tokenises.
 type likeTokKind uint8
 
 const (
@@ -41,9 +30,15 @@ type likeTok struct {
 // writes no field, because a prepared plan tree is evaluated concurrently.
 type likePattern struct{ toks []likeTok }
 
-// parseLikePattern tokenises operand. It allocates once, at Prepare time;
+// parseLikePattern is parseLikePatternImpl behind a package var, mirroring
+// [compileRegex]: an internal test counts calls to prove tokenisation happens
+// once per query (at Prepare time) rather than once per row. Production code
+// never reassigns it.
+var parseLikePattern = parseLikePatternImpl
+
+// parseLikePatternImpl tokenises operand. It allocates once, at Prepare time;
 // matches allocates nothing.
-func parseLikePattern(operand string) (patternMatcher, error) {
+func parseLikePatternImpl(operand string) (patternMatcher, error) {
 	var (
 		toks []likeTok
 		lit  strings.Builder
@@ -59,11 +54,14 @@ func parseLikePattern(operand string) (patternMatcher, error) {
 		case '\\':
 			if i+1 >= len(operand) {
 				// Byte offset, not the operand: this error reaches a 400.
-				return nil, fmt.Errorf("%w: LIKE pattern ends with an unpaired escape at byte %d",
+				return nil, fmt.Errorf("%w: pattern ends with an unpaired escape at byte %d",
 					ErrInvalidPattern, i)
 			}
-			r, sz := utf8.DecodeRuneInString(operand[i+1:])
-			lit.WriteRune(r)
+			// WriteString, not decode-then-WriteRune: a raw invalid UTF-8
+			// byte must stay byte-identical, not get transcoded to U+FFFD
+			// (see the default branch below for why).
+			_, sz := utf8.DecodeRuneInString(operand[i+1:])
+			lit.WriteString(operand[i+1 : i+1+sz])
 			i += 1 + sz
 		case '%':
 			flush()
@@ -78,8 +76,15 @@ func parseLikePattern(operand string) (patternMatcher, error) {
 			toks = append(toks, likeTok{kind: tokOne})
 			i++
 		default:
-			r, sz := utf8.DecodeRuneInString(operand[i:])
-			lit.WriteRune(r)
+			// WriteString, not decode-then-WriteRune: an invalid UTF-8 byte
+			// decodes to (utf8.RuneError, 1); WriteRune would re-encode that
+			// as the three bytes of U+FFFD, silently transcoding the
+			// operand. Literals are compared bytewise, so that would make
+			// LIKE "\xff" fail against the byte-identical "\xff" while
+			// wrongly matching "�" — inconsistent with EQ/CONTAINS on
+			// the same pair. WriteString keeps the original byte(s).
+			_, sz := utf8.DecodeRuneInString(operand[i:])
+			lit.WriteString(operand[i : i+sz])
 			i += sz
 		}
 	}
@@ -88,7 +93,9 @@ func parseLikePattern(operand string) (patternMatcher, error) {
 }
 
 // matches runs the standard greedy wildcard scan with a single backtrack
-// point at the most recent '%'. Linear in len(s) per star, never exponential.
+// point at the most recent '%'. strings.HasPrefix re-scans the current
+// literal at each backtrack step, so this is O(len(s) × len(literal)) per
+// star, never exponential.
 func (p *likePattern) matches(s string) bool {
 	starTok, starPos := -1, 0
 	i, j := 0, 0
@@ -116,10 +123,11 @@ func (p *likePattern) matches(s string) bool {
 			return false
 		}
 		// Give the star one more character and retry from just after it.
+		// starPos is always < len(s) here: it is only ever set to a j from
+		// the outer `for j < len(s)` guard, and an increment that reaches
+		// len(s) makes i,j = starTok+1, starPos fail that guard and exit the
+		// loop before this line runs again — so sz is never 0.
 		_, sz := utf8.DecodeRuneInString(s[starPos:])
-		if sz == 0 {
-			return false
-		}
 		starPos += sz
 		i, j = starTok+1, starPos
 	}

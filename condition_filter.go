@@ -133,10 +133,14 @@ import (
 //     [lo, hi] operand. Anything else leaves Filter.Values nil, ExpandLeaf
 //     errors, and the leaf silently no-matches. Check the arity before
 //     translating rather than diagnosing an empty result set afterwards.
-//   - PATTERN COMPILABILITY. An uncompilable MATCHES_PATTERN operand leaves
-//     the compiled program nil and the leaf silently returns false. Note the
-//     kernel compiles the ANCHORED form while a naive caller-side check would
-//     compile the raw operand, so the two accept sets are not identical.
+//   - PATTERN COMPILABILITY. An uncompilable MATCHES_PATTERN or LIKE operand
+//     (e.g. LIKE with a trailing unpaired escape) leaves the compiled
+//     program nil and the leaf silently returns false. Note the kernel
+//     compiles the ANCHORED form of MATCHES_PATTERN while a naive
+//     caller-side check would compile the raw operand, so the two accept
+//     sets are not identical — use [ValidateLeafPattern] (per leaf) or
+//     [ValidateConditionPatterns] (whole condition) rather than hand-rolling
+//     the check; they route through the same derivation the kernel does.
 func ConditionToFilter(cond predicate.Condition, fields map[string]FieldDescriptor) (Filter, error) {
 	if cond == nil {
 		return Filter{}, fmt.Errorf("condition is nil")
@@ -638,14 +642,16 @@ func OperatorNames() []string {
 // meant to remove.
 //
 // It covers ONLY operator names. The three operand obligations documented on
-// [ConditionToFilter] are deliberately not folded in: two are cheap local
-// checks a caller can apply while walking its own input, and the third depends
-// on a pattern-cost bound this module has not settled. Passing this function
-// is not the same as having validated the condition.
+// [ConditionToFilter] are deliberately not folded in: the object-operand and
+// BETWEEN-arity checks are cheap local checks a caller can apply while
+// walking its own input; the pattern-compilability check was blocked on
+// reaching the kernel's own pattern derivation, which [ValidateLeafPattern]
+// and [ValidateConditionPatterns] now expose. Passing this function is not
+// the same as having validated the condition.
 //
-// Pattern operands are now covered by [ValidateConditionPatterns] — validity
-// was blocked on reaching the kernel's derivation, not on the pattern-cost
-// bound, which remains unsettled and out of scope.
+// Pattern operands are now covered by [ValidateConditionPatterns]. A
+// pattern-cost bound (rejecting a syntactically valid but expensive pattern)
+// remains a separate, unsettled concern, out of scope for both functions.
 func ValidateConditionOperators(cond predicate.Condition) error {
 	return validateOperatorsAtDepth(cond, 0)
 }

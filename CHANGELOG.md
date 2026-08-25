@@ -502,8 +502,8 @@ MAINTAINING.md.
   above end-to-end — there was previously zero conformance coverage of
   either grammar. A backend that has not converged on the kernel's grammar
   (translates `LIKE` to a regex, for example) will fail one or both and
-  needs a `Harness.Skip` entry for `Pattern/LikeGrammar` and/or
-  `Pattern/MalformedLike` until it does.
+  needs a `Harness.Skip` entry for `Searcher/Pattern/LikeGrammar` and/or
+  `Searcher/Pattern/MalformedLike` until it does.
 
 ### Changed
 

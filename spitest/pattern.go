@@ -10,8 +10,9 @@ import (
 
 const patternModel = "spitest_pattern"
 
-// patternSeed maps an entity's "name" value to the label used in failures.
-// The values are chosen so each grammar rule has both a match and a decoy.
+// patternSeed is the fixed corpus of "name" values seeded before each
+// pattern subtest. The values are chosen so each grammar rule has both a
+// match and a decoy.
 var patternSeed = []string{
 	"d",    // \d must match this
 	"7",    // \d must NOT match this (it is not a digit class)

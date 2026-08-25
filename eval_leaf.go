@@ -629,7 +629,13 @@ func compileMatchesPattern(operand string) (patternMatcher, error) {
 	}
 	re, err := compileRegex(anchor(operand))
 	if err != nil {
-		return nil, invalidPatternError(err)
+		// The bare parse above already succeeded, so any syntax.Error.Code
+		// here can only describe the \A(?:...)\z wrapper this function
+		// added — never the operand the caller wrote. Reporting it would
+		// point the caller at punctuation they never typed (e.g. a "missing
+		// closing )" about anchor's own "(?:"). Report the honest, generic
+		// fact instead: not usable as a whole-string pattern.
+		return nil, fmt.Errorf("%w: operand is not usable as a whole-string pattern", ErrInvalidPattern)
 	}
 	return regexMatcher{re: re}, nil
 }

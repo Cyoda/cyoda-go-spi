@@ -30,7 +30,7 @@
 
 **Modify:**
 - `errors.go` — add `ErrInvalidPattern`, delete `ErrScanBudgetExhausted:110-113`.
-- `eval_leaf.go` — `Expansion.strRegex`→`strMatch` (`:103`), `ExpandLeaf`'s two compile arms (`:140-147`), `evalStringOp` (`:497`), add `compileMatchesPattern` + `compileLeafPattern`, **delete** the LIKE-grammar block (`:577-637`: `regexpSpecialChars`, `likeToRegex`, `hasEscapeRune`).
+- `eval_leaf.go` — `Expansion.strRegex`→`strMatch` (`:103`), `ExpandLeaf`'s two compile arms (`:140-147`), `evalStringOp` (`:497`), add `compileMatchesPattern` + `compileLeafPattern` (Task 2, additive); **delete** the LIKE-grammar block (`:577-637`: `regexpSpecialChars`, `likeToRegex`, `hasEscapeRune`) in Task 3, together with the rewiring that stops calling it.
 - `condition_filter.go` — add `ValidateConditionPatterns` + `validatePatternsAtDepth`; update `MaxConditionDepth` godoc (`:581-586`).
 - `eval_leaf_test.go` — rename `TestLikeToRegex_Grammar`→`TestLike_Grammar` (body unchanged), add grammar and validator tests.
 - `condition_filter_test.go` — walker tests.
@@ -474,20 +474,26 @@ Expected: FAIL — `undefined: compileLeafPattern`.
 
 - [ ] **Step 3: Implement**
 
-In `eval_leaf.go`, replace the whole LIKE-grammar block (from the `// --- LIKE grammar (Cloud queryable/Like.java prepareSpecialCharacters) ---` banner through the end of `hasEscapeRune`, roughly `:577-637`) with the following, keeping `anchor` — it now serves `MATCHES_PATTERN` only:
+**ADD the following to `eval_leaf.go`. Delete nothing in this task.** The old
+LIKE-grammar block (`regexpSpecialChars`, `likeToRegex`, `hasEscapeRune`) stays
+exactly where it is and keeps compiling — `ExpandLeaf` still calls it, and Task 3
+is what rewires `ExpandLeaf` and removes the block, in one commit. Removing it
+here would leave the package unbuildable at the end of this task, which the
+Global Constraints forbid.
+
+Keep the existing `anchor` function where it is; it now serves
+`MATCHES_PATTERN` only. Append one sentence to its godoc recording why the
+standalone check below exists:
+
+```go
+// It is string concatenation, so it is only sound for a body that parses
+// STANDALONE — see compileMatchesPattern.
+```
+
+Then add, below `anchor`:
 
 ```go
 // --- pattern derivation ----------------------------------------------------
-
-// anchor wraps a regex body so it must match the WHOLE stored string, matching
-// Java's Pattern.matcher(x).matches() semantics (Go's MatchString is otherwise
-// an unanchored substring search).
-//
-// It is string concatenation, so it is only sound for a body that compiles
-// STANDALONE — see compileMatchesPattern.
-func anchor(body string) string {
-	return `\A(?:` + body + `)\z`
-}
 
 type regexMatcher struct{ re *regexp.Regexp }
 
@@ -504,21 +510,27 @@ func invalidPatternError(op FilterOp, err error) error {
 	return fmt.Errorf("%w: %s: operand is not a valid regular expression", ErrInvalidPattern, op)
 }
 
-// compileMatchesPattern requires the operand to compile BARE as well as
-// ANCHORED.
+// compileMatchesPattern requires the operand to parse STANDALONE as well as
+// compile ANCHORED.
 //
 // Anchoring is concatenation, so a body with a net-unmatched ')' escapes the
 // group: ")|(" becomes \A(?:)|()\z, an alternation whose first branch \A(?:)
 // matches the empty string at position 0 — it matches every stored value.
-// Requiring a standalone compile makes that family unrepresentable, because
-// RE2 rejects an unmatched ')' on its own. The two accept-sets then agree in
-// the safe direction: nothing is accepted that matches more than it says.
+// Requiring a standalone parse makes that family unrepresentable, because RE2
+// rejects an unmatched ')' on its own. The two accept-sets then agree in the
+// safe direction: nothing is accepted that matches more than it says.
 //
-// The bare parse is also the honest diagnostic. For "[", bare reports
-// "missing closing ]"; anchored reports "invalid escape sequence" about a \z
-// the caller never wrote.
+// The standalone check is syntax.Parse, NOT a second regexp.Compile.
+// regexp.Compile is syntax.Parse plus program construction, so the parse alone
+// rejects exactly the same operands — and building a second program we would
+// throw away would make Prepare compile twice per query, breaking
+// TestPrepare_CompilesRegexExactlyOncePerQuery.
+//
+// The standalone parse is also the honest diagnostic. For "[", it reports
+// "missing closing ]"; the anchored form reports "invalid escape sequence"
+// about a \z the caller never wrote.
 func compileMatchesPattern(operand string) (patternMatcher, error) {
-	if _, err := compileRegex(operand); err != nil {
+	if _, err := syntax.Parse(operand, syntax.Perl); err != nil {
 		return nil, invalidPatternError(FilterMatchesRegex, err)
 	}
 	re, err := compileRegex(anchor(operand))
@@ -549,14 +561,19 @@ func compileLeafPattern(op FilterOp, value any) (patternMatcher, error) {
 }
 ```
 
-Add `"errors"` and `"regexp/syntax"` to `eval_leaf.go`'s imports. Remove `"strings"` only if nothing else in the file uses it — `fold` does, so keep it.
+Add `"errors"` and `"regexp/syntax"` to `eval_leaf.go`'s imports. Keep
+`"strings"` and `"regexp"` — `fold`, the still-present LIKE block and
+`compileRegex` all use them.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./... -run 'TestCompileMatchesPattern|TestCompileLeafPattern' -v 2>&1 | tail -20`
 Expected: PASS, all five tests.
 
-The package will not build yet if `ExpandLeaf` still calls `likeToRegex` — Task 3 fixes that. If the build breaks here, do Step 3 of Task 3 now and commit the two together.
+Then the whole module: `go build ./... && go vet ./... && go test ./...` — green.
+It builds precisely because nothing was deleted: `ExpandLeaf` still uses the old
+LIKE block, and the new functions sit beside it, unused by production code until
+Task 3. `go vet` does not flag unused package-level functions, so this is clean.
 
 - [ ] **Step 5: Commit**
 
@@ -700,7 +717,14 @@ Change `evalStringOp` (`:497`):
 		return e.strMatch != nil && e.strMatch.matches(s)
 ```
 
-- [ ] **Step 4: Fix the compile-once test**
+- [ ] **Step 4: Delete the translation**
+
+Now that `ExpandLeaf` no longer calls it, remove the whole LIKE-grammar block
+from `eval_leaf.go`: the `// --- LIKE grammar (Cloud queryable/Like.java
+prepareSpecialCharacters) ---` banner, `regexpSpecialChars`, `likeToRegex` and
+`hasEscapeRune`. Keep `anchor`, `compileRegex` and `fold`.
+
+- [ ] **Step 5: Fix the compile-once test**
 
 In `prepared_filter_internal_test.go`, drop `FilterLike` from the loop at `:18` — LIKE no longer reaches `compileRegex`:
 
@@ -710,7 +734,11 @@ In `prepared_filter_internal_test.go`, drop `FilterLike` from the loop at `:18` 
 
 Delete the `if op == FilterLike { ... }` branch at `:29` entirely.
 
-- [ ] **Step 5: Run the full package**
+Do **not** weaken its two `calls != 1` assertions. `MATCHES_PATTERN` still
+compiles exactly once per query: the standalone check is `syntax.Parse`, which
+does not route through the `compileRegex` package var.
+
+- [ ] **Step 6: Run the full package**
 
 Run: `go build ./... && go vet ./... && go test ./... 2>&1 | tail -20`
 Expected: PASS. `TestLike_Grammar`'s twelve rows pass **unedited** — if any fails, the matcher is wrong, not the test.
@@ -723,7 +751,7 @@ grep -rn 'anchor(' --include='*.go' . | grep -v '_test' | grep -v 'func anchor' 
 grep -rn '\\A(?:' --include='*.go' . | wc -l                                            # expect 1
 ```
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add eval_leaf.go eval_leaf_test.go prepared_filter_internal_test.go
@@ -1323,7 +1351,7 @@ Do not tag `v0.8.4`: per `MAINTAINING.md` it is cut once every milestone SPI cha
 ```bash
 grep -rn 'likeToRegex\|hasEscapeRune\|regexpSpecialChars' --include='*.go' . | wc -l  # 0
 grep -rn 'anchor(' --include='*.go' . | grep -v '_test' | grep -v 'func anchor' | wc -l # 1
-grep -rn 'compileRegex(' --include='*.go' . | grep -v '_test' | grep -v 'var compileRegex' | wc -l # 2 (bare + anchored, both in compileMatchesPattern)
+grep -rn 'compileRegex(' --include='*.go' . | grep -v '_test' | grep -v 'var compileRegex' | wc -l # 1 (the anchored compile; the standalone check is syntax.Parse)
 grep -rn 'A(?:' --include='*.go' . | wc -l                                            # 1
 grep -rn 'ErrScanBudgetExhausted' --include='*.go' . | wc -l                          # 0
 grep -rn 'strRegex' --include='*.go' . | wc -l                                        # 0

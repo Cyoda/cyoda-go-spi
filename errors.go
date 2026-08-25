@@ -147,6 +147,16 @@ var ErrStaleClaim = errors.New("write fenced: stale claim epoch")
 // as a pushdown Filter, which is a different answer entirely.
 var ErrUnknownOperator = errors.New("unknown condition operator")
 
+// ErrInvalidPattern is returned by [ValidateLeafPattern] and
+// [ValidateConditionPatterns] for an operand that cannot be used as a pattern:
+// a LIKE operand ending in an unpaired escape, or a MATCHES_PATTERN operand
+// that does not compile.
+//
+// The wrapped message names the operator and the failure, and deliberately
+// carries NEITHER the operand NOR the anchored form the kernel compiles — a
+// caller puts this error into a client-facing 400, and both are internals.
+var ErrInvalidPattern = errors.New("invalid pattern")
+
 // ErrInvalidFilterPath is returned for a Filter.Path — or an OrderSpec.Path —
 // that falls outside the documented path grammar. See the "Grammar" and
 // "Rejection is mandatory" sections of [Filter]'s Path field: a non-empty path

@@ -1457,8 +1457,20 @@ func TestValidateConditionPatterns(t *testing.T) {
 	if err := spi.ValidateConditionPatterns(good); err != nil {
 		t.Errorf("valid pattern rejected: %v", err)
 	}
-	for name, cond := range map[string]predicate.Condition{"regex": bad, "like": badLike} {
-		err := spi.ValidateConditionPatterns(cond)
+	cases := map[string]struct {
+		cond   predicate.Condition
+		wantOp string
+	}{
+		// wantOp is the substring that actually appears in the error, not the
+		// predicate.SimpleCondition.OperatorType domain name: the regex path
+		// (eval_leaf.go's invalidPatternError) formats the internal FilterOp
+		// constant ("matches_regex"), while the LIKE path (like_pattern.go)
+		// hardcodes the literal word "LIKE".
+		"regex": {bad, "matches_regex"},
+		"like":  {badLike, "LIKE"},
+	}
+	for name, c := range cases {
+		err := spi.ValidateConditionPatterns(c.cond)
 		if err == nil {
 			t.Errorf("%s: invalid pattern accepted", name)
 			continue
@@ -1469,6 +1481,11 @@ func TestValidateConditionPatterns(t *testing.T) {
 		// Actionable against a large tree: the leaf is named.
 		if !strings.Contains(err.Error(), "$.name") {
 			t.Errorf("%s: error does not name the leaf: %v", name, err)
+		}
+		// The operator name is safe to surface and must survive; the operand
+		// (checked elsewhere) must not.
+		if !strings.Contains(err.Error(), c.wantOp) {
+			t.Errorf("%s: error does not name the operator %q: %v", name, c.wantOp, err)
 		}
 	}
 

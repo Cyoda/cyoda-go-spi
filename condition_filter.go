@@ -581,9 +581,9 @@ func invalidPathError(path, reason string) error {
 // MaxConditionDepth caps recursion in [ValidateConditionOperators] and
 // [ValidateConditionPatterns] to defend against stack exhaustion from a deeply
 // nested predicate tree. Client-facing parsers cap incoming requests at a
-// smaller depth, but a programmatically constructed tree bypasses that and
-// can otherwise nest arbitrarily. 256 is
-// well above any realistic query and well below the stack-blow threshold.
+// smaller depth, but a programmatically constructed tree bypasses that and can
+// otherwise nest arbitrarily. 256 is well above any realistic query and well
+// below the stack-blow threshold.
 const MaxConditionDepth = 256
 
 // LookupOperator translates a domain operator string to a [FilterOp],

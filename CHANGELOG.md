@@ -283,7 +283,7 @@ MAINTAINING.md.
   `)\z`, so an operand with a net-unmatched `)` escaped the group: `)|(`
   became an alternation whose first branch matched the empty string at
   position 0 — it matched every stored value. Such operands are now rejected
-  by [`ValidateLeafPattern`] and never match when evaluated.
+  by `ValidateLeafPattern` and never match when evaluated.
 
 - **`ErrScanBudgetExhausted` is removed.** Server-imposed scan budgets left
   the `Searcher` contract; time bounding belongs to the caller and memory
@@ -487,6 +487,15 @@ MAINTAINING.md.
   wrap the new **`ErrInvalidPattern`** and carry neither the operand nor the
   anchored form.
 
+- **A trailing unpaired escape (`LIKE 'abc\'`) is now detectable, but its
+  evaluation is deliberately unchanged.** It remains the one malformed `LIKE`
+  pattern, and a leaf carrying one still matches nothing, so a search still
+  returns an empty page rather than an error — `Prepare`'s contract is that a
+  leaf whose operand cannot be expanded never matches, and this release does
+  not promote that to a rejection. It becomes a rejection only where a caller
+  invokes `ValidateLeafPattern` or `ValidateConditionPatterns` before
+  evaluating.
+
 ### Changed
 
 - **`Filter.Path` now documents its grammar on the field.** The accepted form
@@ -552,11 +561,12 @@ MAINTAINING.md.
   multi-line value was unreachable. This contradicted the published grammar
   ("any sequence of characters") and both SQL engines.
 
-- **A `LIKE` operand that could not be compiled no longer silently never
-  matches.** `LIKE 'a\'`, `LIKE '\'` and friends produced an uncompilable
-  regex whose error was swallowed, leaving a leaf that matched nothing and
-  reported nothing. `LIKE` no longer compiles anything, and the one malformed
-  pattern — a trailing unpaired escape — is reportable via the new validators.
+- **`LIKE` operands that could not be compiled now match literally.** The
+  translation turned the operand into a regex, so `LIKE '\Q'` and
+  `LIKE '\p{Foo}'` produced an expression that failed to compile; the error
+  was swallowed and the leaf silently matched nothing, reporting nothing.
+  `LIKE` no longer compiles anything, so those operands now match `Q` and
+  `p{Foo}` respectively, per the escape rule above.
 
 ## [0.8.3] - 2026-07-26
 

@@ -268,6 +268,28 @@ MAINTAINING.md.
   forces each caller to re-site the preparation, and a shim would silently preserve
   the defect.
 
+- **`LIKE`'s `\X` now means the literal `X`, for any `X`.** Previously a
+  backslash before anything other than `%`, `_` or `\` was passed into a
+  compiled regex verbatim, so `LIKE '\d'` matched any digit and `LIKE '\w'`
+  matched any word character. `LIKE` is a glob, not a regex: `\d` now matches
+  the single character `d`, which is what PostgreSQL and SQLite return.
+
+  This is a behaviour change on input that is accepted today and stays
+  accepted, and **no compile break warns of it**. A caller relying on the
+  regex-class behaviour gets different rows.
+
+- **`MATCHES_PATTERN` now requires the operand to compile standalone**, not
+  merely when anchored. The kernel wraps the operand as `\A(?:` + operand +
+  `)\z`, so an operand with a net-unmatched `)` escaped the group: `)|(`
+  became an alternation whose first branch matched the empty string at
+  position 0 — it matched every stored value. Such operands are now rejected
+  by [`ValidateLeafPattern`] and never match when evaluated.
+
+- **`ErrScanBudgetExhausted` is removed.** Server-imposed scan budgets left
+  the `Searcher` contract; time bounding belongs to the caller and memory
+  bounding is fixed by streaming. A backend returning it will not compile.
+  Remove the scan-budget path rather than substituting another sentinel.
+
 ### Added
 
 - **`MergeOrdered` helper.** A pure pull-stream merge of an already-ordered
@@ -458,6 +480,13 @@ MAINTAINING.md.
   spi.ErrInvalidFilterPath)` preserves your message text) — a refusal that
   does not unwrap to it now fails conformance.
 
+- **`ValidateLeafPattern(op FilterOp, value any) error`** and
+  **`ValidateConditionPatterns(cond predicate.Condition) error`** — validate
+  pattern operands against the same derivation the kernel evaluates with, so a
+  caller's boundary check cannot drift from what the kernel accepts. Errors
+  wrap the new **`ErrInvalidPattern`** and carry neither the operand nor the
+  anchored form.
+
 ### Changed
 
 - **`Filter.Path` now documents its grammar on the field.** The accepted form
@@ -517,6 +546,17 @@ MAINTAINING.md.
 - `UnmarshalModelNode` rejects a JSON-null child node with an error. The
   equivalent decoder this was derived from dereferences the nil and panics,
   which is reachable from persisted bytes.
+
+- **`LIKE`'s `%` and `_` now match newlines.** They compiled to `.*?` and `.`,
+  which exclude `\n` in RE2, so `LIKE '%'` did not match every string and a
+  multi-line value was unreachable. This contradicted the published grammar
+  ("any sequence of characters") and both SQL engines.
+
+- **A `LIKE` operand that could not be compiled no longer silently never
+  matches.** `LIKE 'a\'`, `LIKE '\'` and friends produced an uncompilable
+  regex whose error was swallowed, leaving a leaf that matched nothing and
+  reported nothing. `LIKE` no longer compiles anything, and the one malformed
+  pattern — a trailing unpaired escape — is reportable via the new validators.
 
 ## [0.8.3] - 2026-07-26
 

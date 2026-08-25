@@ -2,6 +2,8 @@ package spi
 
 import (
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -346,5 +348,88 @@ func TestLikeToRegex_Grammar(t *testing.T) {
 		if got != c.want {
 			t.Errorf("LIKE %q vs %q = %v, want %v", c.pattern, c.in, got, c.want)
 		}
+	}
+}
+
+func TestCompileMatchesPattern_AnchorEscapeRejected(t *testing.T) {
+	// anchor() is string concatenation, so a body with a net-unmatched ')'
+	// escapes the group: ")|(" becomes \A(?:)|()\z, an alternation whose
+	// first branch matches the empty string at position 0 — it matches EVERY
+	// stored value. These must be rejected, not accepted.
+	for _, operand := range []string{`)|(`, `)\z|(?:`, `)$|(`, `)x(`} {
+		if _, err := compileLeafPattern(FilterMatchesRegex, operand); err == nil {
+			t.Errorf("compileLeafPattern(MATCHES_PATTERN, %q) = nil error, want rejection", operand)
+		}
+	}
+}
+
+func TestCompileMatchesPattern_AcceptSet(t *testing.T) {
+	// Rejected: compiles bare, fails anchored (\Q swallows the wrapper's )\z).
+	if _, err := compileLeafPattern(FilterMatchesRegex, `\Q`); err == nil {
+		t.Error(`compileLeafPattern(MATCHES_PATTERN, "\\Q") = nil error, want rejection`)
+	}
+	// Accepted: legitimate patterns are unaffected by the bare requirement.
+	for _, operand := range []string{`a|b`, `^foo`, `A.*e`, ``} {
+		if _, err := compileLeafPattern(FilterMatchesRegex, operand); err != nil {
+			t.Errorf("compileLeafPattern(MATCHES_PATTERN, %q) = %v, want accepted", operand, err)
+		}
+	}
+}
+
+func TestCompileMatchesPattern_ErrorIsHonestAndCarriesNoInternals(t *testing.T) {
+	_, err := compileLeafPattern(FilterMatchesRegex, `[`)
+	if err == nil {
+		t.Fatal(`compileLeafPattern(MATCHES_PATTERN, "[") = nil error, want rejection`)
+	}
+	if !errors.Is(err, ErrInvalidPattern) {
+		t.Errorf("error %v does not wrap ErrInvalidPattern", err)
+	}
+	msg := err.Error()
+	// The BARE diagnostic. Anchored, RE2 reports "invalid escape sequence"
+	// about a \z the user never wrote.
+	if !strings.Contains(msg, "missing closing ]") {
+		t.Errorf("want the bare code %q, got %q", "missing closing ]", msg)
+	}
+	if strings.Contains(msg, `\A(?:`) {
+		t.Errorf("error leaks the anchored form: %q", msg)
+	}
+	if strings.Contains(msg, `[`) {
+		t.Errorf("error echoes the operand: %q", msg)
+	}
+}
+
+func TestCompileLeafPattern_TypedNilHazard(t *testing.T) {
+	// A non-pattern operator must yield an UNTYPED nil. A typed nil through
+	// the interface is non-nil, and evalStringOp would call a method on it.
+	for _, op := range []FilterOp{FilterEq, FilterContains, FilterIsNull, ""} {
+		m, err := compileLeafPattern(op, "anything")
+		if err != nil {
+			t.Errorf("compileLeafPattern(%q) = %v, want nil error", op, err)
+		}
+		if m != nil {
+			t.Errorf("compileLeafPattern(%q) returned a non-nil matcher %#v", op, m)
+		}
+	}
+	// The error paths must do the same.
+	if m, _ := compileLeafPattern(FilterLike, `a\`); m != nil {
+		t.Errorf("rejected LIKE returned a non-nil matcher %#v", m)
+	}
+	if m, _ := compileLeafPattern(FilterMatchesRegex, `[`); m != nil {
+		t.Errorf("rejected MATCHES_PATTERN returned a non-nil matcher %#v", m)
+	}
+}
+
+func TestCompileLeafPattern_DerivesOperandLikeTheKernel(t *testing.T) {
+	// Takes `any` and applies OperandString itself, so a caller cannot supply
+	// a differently-derived operand. A nil operand is "" here, never "<nil>".
+	m, err := compileLeafPattern(FilterLike, nil)
+	if err != nil {
+		t.Fatalf("compileLeafPattern(LIKE, nil) = %v", err)
+	}
+	if !m.matches("") {
+		t.Error("nil operand should derive the empty pattern, which matches only \"\"")
+	}
+	if m.matches("<nil>") {
+		t.Error(`nil operand derived "<nil>" instead of ""`)
 	}
 }

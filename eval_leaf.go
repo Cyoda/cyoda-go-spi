@@ -1,8 +1,10 @@
 package spi
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
+	"regexp/syntax"
 	"strings"
 
 	"github.com/google/uuid"
@@ -583,8 +585,78 @@ const regexpSpecialChars = "[](){}.*+?$^|#<>-="
 // anchor wraps a regex body so it must match the WHOLE stored string, matching
 // Java's Pattern.matcher(x).matches() semantics (Go's MatchString is otherwise
 // an unanchored substring search).
+//
+// It is string concatenation, so it is only sound for a body that parses
+// STANDALONE — see compileMatchesPattern.
 func anchor(body string) string {
 	return `\A(?:` + body + `)\z`
+}
+
+// --- pattern derivation ----------------------------------------------------
+
+type regexMatcher struct{ re *regexp.Regexp }
+
+func (m regexMatcher) matches(s string) bool { return m.re.MatchString(s) }
+
+// invalidPatternError reports a regex failure by its syntax CODE only. It must
+// never carry syntax.Error.Expr, which echoes the anchored expression and the
+// caller's operand into a client-facing 400.
+func invalidPatternError(op FilterOp, err error) error {
+	var se *syntax.Error
+	if errors.As(err, &se) {
+		return fmt.Errorf("%w: %s: %s", ErrInvalidPattern, op, se.Code)
+	}
+	return fmt.Errorf("%w: %s: operand is not a valid regular expression", ErrInvalidPattern, op)
+}
+
+// compileMatchesPattern requires the operand to parse STANDALONE as well as
+// compile ANCHORED.
+//
+// Anchoring is concatenation, so a body with a net-unmatched ')' escapes the
+// group: ")|(" becomes \A(?:)|()\z, an alternation whose first branch \A(?:)
+// matches the empty string at position 0 — it matches every stored value.
+// Requiring a standalone parse makes that family unrepresentable, because RE2
+// rejects an unmatched ')' on its own. The two accept-sets then agree in the
+// safe direction: nothing is accepted that matches more than it says.
+//
+// The standalone check is syntax.Parse, NOT a second regexp.Compile.
+// regexp.Compile is syntax.Parse plus program construction, so the parse alone
+// rejects exactly the same operands — and building a second program we would
+// throw away would make Prepare compile twice per query, breaking
+// TestPrepare_CompilesRegexExactlyOncePerQuery.
+//
+// The standalone parse is also the honest diagnostic. For "[", it reports
+// "missing closing ]"; the anchored form reports "invalid escape sequence"
+// about a \z the caller never wrote.
+func compileMatchesPattern(operand string) (patternMatcher, error) {
+	if _, err := syntax.Parse(operand, syntax.Perl); err != nil {
+		return nil, invalidPatternError(FilterMatchesRegex, err)
+	}
+	re, err := compileRegex(anchor(operand))
+	if err != nil {
+		return nil, invalidPatternError(FilterMatchesRegex, err)
+	}
+	return regexMatcher{re: re}, nil
+}
+
+// compileLeafPattern is the SINGLE derivation of what a pattern operand means.
+// Both the kernel (via ExpandLeaf) and validators (via ValidateLeafPattern)
+// route through it, so a validator cannot accept what the kernel refuses.
+//
+// It takes `any` and applies OperandString itself: a caller cannot supply a
+// differently-derived operand because it does not derive one.
+//
+// A nil matcher with a nil error means "this operator compiles no pattern".
+// Both nils must be UNTYPED — a typed-nil matcher through the interface is
+// non-nil and evalStringOp would call a method on it.
+func compileLeafPattern(op FilterOp, value any) (patternMatcher, error) {
+	switch op {
+	case FilterLike:
+		return parseLikePattern(OperandString(value))
+	case FilterMatchesRegex:
+		return compileMatchesPattern(OperandString(value))
+	}
+	return nil, nil
 }
 
 // likeToRegex ports Like.prepareSpecialCharacters: '%' → '.*?', '_' → '.', every

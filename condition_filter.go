@@ -578,10 +578,11 @@ func invalidPathError(path, reason string) error {
 	return fmt.Errorf("%w: jsonPath %q %s", ErrInvalidFilterPath, path, reason)
 }
 
-// MaxConditionDepth caps recursion in [ValidateConditionOperators] to defend
-// against stack exhaustion from a deeply nested predicate tree. Client-facing
-// parsers cap incoming requests at a smaller depth, but a programmatically
-// constructed tree bypasses that and can otherwise nest arbitrarily. 256 is
+// MaxConditionDepth caps recursion in [ValidateConditionOperators] and
+// [ValidateConditionPatterns] to defend against stack exhaustion from a deeply
+// nested predicate tree. Client-facing parsers cap incoming requests at a
+// smaller depth, but a programmatically constructed tree bypasses that and
+// can otherwise nest arbitrarily. 256 is
 // well above any realistic query and well below the stack-blow threshold.
 const MaxConditionDepth = 256
 
@@ -641,6 +642,10 @@ func OperatorNames() []string {
 // checks a caller can apply while walking its own input, and the third depends
 // on a pattern-cost bound this module has not settled. Passing this function
 // is not the same as having validated the condition.
+//
+// Pattern operands are now covered by [ValidateConditionPatterns] — validity
+// was blocked on reaching the kernel's derivation, not on the pattern-cost
+// bound, which remains unsettled and out of scope.
 func ValidateConditionOperators(cond predicate.Condition) error {
 	return validateOperatorsAtDepth(cond, 0)
 }
@@ -678,6 +683,60 @@ func validateOperatorsAtDepth(cond predicate.Condition, depth int) error {
 func checkOperator(op string) error {
 	if _, ok := LookupOperator(op); !ok {
 		return unknownOperatorError(op)
+	}
+	return nil
+}
+
+// ValidateConditionPatterns walks cond and validates every pattern operand
+// against the kernel's own derivation, so a caller can reject the whole request
+// at the boundary rather than mid-translation or, worse, discover it as an
+// empty result page.
+//
+// It mirrors [ValidateConditionOperators]'s recursion and shares its depth cap.
+// The two are complements and neither implies the other: this one checks
+// pattern OPERANDS and passes a misspelled operator (MapOperator returns the
+// zero FilterOp, which compiles no pattern); that one checks operator NAMES and
+// ignores operands. Call both.
+//
+// Errors wrap [ErrInvalidPattern] and name the offending leaf by jsonPath (or,
+// for a lifecycle leaf, by field), which is what makes them actionable against
+// a deep tree. They never carry the operand.
+func ValidateConditionPatterns(cond predicate.Condition) error {
+	return validatePatternsAtDepth(cond, 0)
+}
+
+func validatePatternsAtDepth(cond predicate.Condition, depth int) error {
+	if cond == nil {
+		return nil
+	}
+	if depth >= MaxConditionDepth {
+		return fmt.Errorf("condition depth exceeded (max %d)", MaxConditionDepth)
+	}
+	switch c := cond.(type) {
+	case *predicate.SimpleCondition:
+		return checkPattern(MapOperator(c.OperatorType), c.Value, c.JsonPath)
+	case *predicate.LifecycleCondition:
+		return checkPattern(MapOperator(c.OperatorType), c.Value, c.Field)
+	case *predicate.GroupCondition:
+		for _, child := range c.Conditions {
+			if err := validatePatternsAtDepth(child, depth+1); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *predicate.ArrayCondition:
+		// Positional values become equality leaves; no pattern operand.
+		return nil
+	default:
+		// Including FunctionCondition, which carries no operator.
+		return nil
+	}
+}
+
+// checkPattern names the leaf without echoing its operand.
+func checkPattern(op FilterOp, value any, location string) error {
+	if err := ValidateLeafPattern(op, value); err != nil {
+		return fmt.Errorf("%s: %w", location, err)
 	}
 	return nil
 }

@@ -648,3 +648,19 @@ func compileLeafPattern(op FilterOp, value any) (patternMatcher, error) {
 	}
 	return nil, nil
 }
+
+// ValidateLeafPattern reports whether value is usable as op's pattern operand,
+// using the SAME derivation the kernel evaluates with. A validator calling this
+// cannot accept an operand the kernel will refuse, or refuse one it accepts.
+//
+// Returns nil for every operator that carries no pattern, so a caller can pass
+// any leaf without switching on the operator first.
+//
+// It covers pattern VALIDITY only. Passing it is not the same as having
+// validated the condition — see [ValidateConditionOperators] for operator
+// names. Errors wrap [ErrInvalidPattern] and carry neither the operand nor the
+// anchored form.
+func ValidateLeafPattern(op FilterOp, value any) error {
+	_, err := compileLeafPattern(op, value)
+	return err
+}

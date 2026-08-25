@@ -184,12 +184,18 @@ the commercial backend's `anchorPattern` godoc records the same reasoning.
 Exporting "anchored compiles ⇒ valid" would delete that protection and publish a
 match-everything operand as contract.
 
-So `compileMatchesPattern` requires **both**:
+So `compileMatchesPattern` requires **both**. The standalone check is
+`syntax.Parse`, **not** a second `compileRegex`: `regexp.Compile` is
+`syntax.Parse` plus program construction, so the parse alone rejects exactly the
+same operands (verified over 200k randomized bodies at implementation time),
+while a second compile would build a program we discard AND make `Prepare`
+compile twice per query — breaking `TestPrepare_CompilesRegexExactlyOncePerQuery`,
+which this same spec requires to stay green.
 
 ```go
 func compileMatchesPattern(operand string) (patternMatcher, error) {
-	if _, err := compileRegex(operand); err != nil {
-		return nil, invalidPatternError(err) // bare parse: the honest diagnostic
+	if _, err := syntax.Parse(operand, syntax.Perl); err != nil {
+		return nil, invalidPatternError(err) // standalone parse: the honest diagnostic
 	}
 	re, err := compileRegex(anchor(operand))
 	if err != nil {
@@ -199,7 +205,7 @@ func compileMatchesPattern(operand string) (patternMatcher, error) {
 }
 ```
 
-A standalone-compilable body cannot contain a net-unmatched `)` — RE2 rejects it
+A standalone-parseable body cannot contain a net-unmatched `)` — RE2 rejects it
 — so anchoring becomes sound by construction, and the two accept-sets agree in
 the safe direction. `\Q` is still rejected (compiles bare, fails anchored);
 `)|(` and its family are now rejected; legitimate patterns are unaffected
@@ -261,7 +267,11 @@ the caller switching on operator names.
 - never the anchored form — `\A(?:` is an SPI implementation detail, and a
   consumer puts this error straight into a 400
   (`internal/domain/workflow/validate.go:290`);
-- for `MATCHES_PATTERN`, `syntax.Error.Code` only, never `syntax.Error.Expr`
+- for `MATCHES_PATTERN`, the **standalone** parse's `syntax.Error.Code` only,
+  never `syntax.Error.Expr`, and never a code from the anchored compile — once
+  the standalone parse succeeds, any anchored failure can only describe the
+  wrapper (`\Q` reports *"missing closing )"* about the `(?:` we prepended), so
+  that branch returns a wrapper-free message instead
   (which echoes the anchored expression: today `[` reports *"missing closing
   ]"*, anchored it reports *"invalid escape sequence `\z`"* — a construct the
   user never wrote);

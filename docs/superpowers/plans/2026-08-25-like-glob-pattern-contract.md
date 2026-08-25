@@ -1352,12 +1352,12 @@ Do not tag `v0.8.4`: per `MAINTAINING.md` it is cut once every milestone SPI cha
 grep -rn 'likeToRegex\|hasEscapeRune\|regexpSpecialChars' --include='*.go' . | wc -l  # 0
 grep -rn 'anchor(' --include='*.go' . | grep -v '_test' | grep -v 'func anchor' | wc -l # 1
 grep -rn 'compileRegex(' --include='*.go' . | grep -v '_test' | grep -v 'var compileRegex' | wc -l # 1 (the anchored compile; the standalone check is syntax.Parse)
-grep -rn 'A(?:' --include='*.go' . | wc -l                                            # 1
+grep -rn 'A(?:' --include='*.go' . | grep -v '^\S*:[0-9]*:\s*//' | grep -v 'strings.Contains' | wc -l  # 1 CONSTRUCTION site (anchor's body). Bare occurrences are 4: that body, two explanatory comments, and eval_leaf_test.go's assertion that the error does NOT leak the anchored form — the last must NOT be removed to satisfy a count.
 grep -rn 'ErrScanBudgetExhausted' --include='*.go' . | wc -l                          # 0
 grep -rn 'strRegex' --include='*.go' . | wc -l                                        # 0
 ```
 
 - [ ] `TestLike_Grammar`'s twelve rows pass **unedited**
 - [ ] `MaxConditionDepth`'s godoc names both walkers
-- [ ] No test in package `spi` calls `t.Parallel()`
+- [ ] No test in package `spi` calls `t.Parallel()` — check CALL sites, not substrings: `grep -rn '^\s*t\.Parallel()' --include='*.go' . | wc -l` is 0. A bare `t.Parallel()` grep returns 1, from a prescriptive comment in `prepared_filter_internal_test.go:15`.
 - [ ] No tag pushed

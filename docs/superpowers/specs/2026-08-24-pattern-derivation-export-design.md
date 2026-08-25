@@ -442,30 +442,31 @@ cyoda-go#475 is step 2, the commercial backend follows at its next bump.
   needs `case_sensitive_like`, while PostgreSQL's is already case-sensitive.
   Recorded on #516.
 
-## Needs a ruling
+## Rulings taken
 
-**1. `)|(` and #479's written fix.** #479's settled resolution — *"the validator
-adopts the kernel's anchored form, so there is exactly one derivation"* — stands,
-but its body also asks for a test asserting `)x(` is **accepted** rather than
-rejected. Under the bare-and-anchored rule above, `)x(` is rejected along with
-its match-everything siblings. `)x(` itself is benign (`\A(?:)x()\z` matches only
-`"x"`), but it cannot be separated from `)|(` by any rule simpler than "must
-compile standalone". Recommendation: take the safe rule and **amend #479's body**
-in the same session. Note the hole is in the *kernel*, not only the validator —
-today it is unreachable by accident, because the bare compile at the boundary
-happens to reject it.
+All three are settled; nothing here blocks planning.
 
-**2. Who wires `ValidateConditionPatterns`, and in which #516 step?** Without an
-owner the trailing-`\` 400 never ships and backends keep diverging on `a\`.
-#479 excludes LIKE by name; #487 item 9 is closed. Either widen #479 or add a
-step.
+**1. `MATCHES_PATTERN` requires a standalone compile.** `)x(` is now rejected
+along with its match-everything siblings — it cannot be separated from `)|(` by
+any rule simpler than "must compile standalone", and admitting it means
+admitting them. [cyoda-go#479](https://github.com/Cyoda/cyoda-go/issues/479)'s
+body has been amended: it previously asked for a test asserting `)x(` is
+accepted, and now carries the hole and the bare-and-anchored rule.
 
-**3. Does the commercial backend adopt the SPI kernel for pattern evaluation, or
-keep its fork behind a `spitest` Skip?** spi#38's "no second derivation copy"
-constraint is satisfied only under the first. Its own `likeToRegexBody` comment
-says adoption is the plan; this spec currently assumes the Skip.
+**2. #479 owns the wiring, for both operators.** Its "Not in scope: LIKE"
+section is replaced by "Also in scope: LIKE" — one call to
+`ValidateConditionPatterns` replaces two hand-rolled walks and covers the
+trailing-escape 400. It stays step 3 of #516 for one mechanical reason: cyoda-go
+cannot call a function the SPI has not shipped, so it needs the pin bump.
 
-**4. #487 item 9** — ruled: stays closed, the trailing-escape question answered
-as `400 INVALID_CONDITION`. Recorded at
+**3. The commercial backend adopts the kernel; it does not port the grammar.**
+Filed as [cyoda-go-cassandra#94](https://github.com/Cyoda/cyoda-go-cassandra/issues/94).
+Its fork (`search/predicate/operators.go:110`) diverges on `\X`, on `\%`/`\_`/`\\`,
+on newlines and on the trailing escape; deleting it in favour of the kernel is
+the whole fix, and its own comment already proposes that. Note its comment cites
+a **closed** issue (#82) whose work is undone — the async path still post-filters
+via `predicate.Match`. A `spitest` Skip covers the gap until it bumps.
+
+**4. #487 item 9** — closed, trailing-escape question answered as
+`400 INVALID_CONDITION`, recorded at
 [cyoda-go#516 (comment)](https://github.com/Cyoda/cyoda-go/issues/516#issuecomment-5411579870).
-Ruling 2 above is what makes it real.

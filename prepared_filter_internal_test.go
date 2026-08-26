@@ -15,7 +15,7 @@ import (
 // Must NOT be t.Parallel() and must not overlap any other test that touches
 // compileRegex — the indirection swap is itself a data race otherwise.
 func TestPrepare_CompilesRegexExactlyOncePerQuery(t *testing.T) {
-	for _, op := range []FilterOp{FilterMatchesRegex, FilterLike} {
+	for _, op := range []FilterOp{FilterMatchesRegex} {
 		t.Run(string(op), func(t *testing.T) {
 			calls := 0
 			orig := compileRegex
@@ -26,9 +26,6 @@ func TestPrepare_CompilesRegexExactlyOncePerQuery(t *testing.T) {
 			defer func() { compileRegex = orig }()
 
 			operand := "A.*"
-			if op == FilterLike {
-				operand = "A%"
-			}
 			p := Prepare(Filter{
 				Op:       op,
 				Source:   SourceData,
@@ -52,6 +49,50 @@ func TestPrepare_CompilesRegexExactlyOncePerQuery(t *testing.T) {
 				t.Errorf("compiled %d times across Prepare + 1000 Match calls, want exactly 1", calls)
 			}
 		})
+	}
+}
+
+// TestPrepare_TokenisesLikeExactlyOncePerQuery mirrors
+// TestPrepare_CompilesRegexExactlyOncePerQuery for LIKE. FilterLike was
+// dropped from that test when LIKE stopped reaching compileRegex (it has its
+// own glob tokeniser, parseLikePattern), but nothing replaced the guard —
+// this proves tokenisation still happens once per query, at Prepare time,
+// rather than once per row. Without it a future refactor moving
+// parseLikePattern into the per-row path would pass the rest of the suite.
+//
+// Must NOT be t.Parallel() and must not overlap any other test that touches
+// parseLikePattern — the indirection swap is itself a data race otherwise.
+func TestPrepare_TokenisesLikeExactlyOncePerQuery(t *testing.T) {
+	calls := 0
+	orig := parseLikePattern
+	parseLikePattern = func(operand string) (patternMatcher, error) {
+		calls++
+		return orig(operand)
+	}
+	defer func() { parseLikePattern = orig }()
+
+	operand := "A%"
+	p := Prepare(Filter{
+		Op:       FilterLike,
+		Source:   SourceData,
+		Path:     "name",
+		Value:    operand,
+		Declared: []DataType{String},
+	})
+
+	if calls != 1 {
+		t.Fatalf("Prepare tokenised %d times, want exactly 1", calls)
+	}
+
+	data := []byte(`{"name":"Alice"}`)
+	for i := 0; i < 1000; i++ {
+		if !p.Match(data, EntityMeta{}) {
+			t.Fatalf("Match = false on row %d, want true", i)
+		}
+	}
+
+	if calls != 1 {
+		t.Errorf("tokenised %d times across Prepare + 1000 Match calls, want exactly 1", calls)
 	}
 }
 

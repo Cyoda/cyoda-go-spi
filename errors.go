@@ -107,11 +107,6 @@ var ErrGroupCardinalityExceeded = errors.New("group cardinality exceeded ceiling
 // contract). The engine maps it to a client-facing 400.
 var ErrSearchResultLimitExceeded = errors.New("search result limit exceeded")
 
-// ErrScanBudgetExhausted is returned by a Searcher or streaming aggregator
-// whose residual (non-pushdown) scan examined more rows than its configured
-// scan budget before completing. The engine maps it to a client-facing 400.
-var ErrScanBudgetExhausted = errors.New("scan budget exhausted")
-
 // ErrAggregationNotPushdownable signals that a GroupedAggregator
 // implementation cannot safely push down a specific request shape; the
 // caller (typically the service layer) should fall through to the
@@ -146,6 +141,16 @@ var ErrStaleClaim = errors.New("write fenced: stale claim epoch")
 // translation failures mean the predicate is well-formed but not expressible
 // as a pushdown Filter, which is a different answer entirely.
 var ErrUnknownOperator = errors.New("unknown condition operator")
+
+// ErrInvalidPattern is returned by [ValidateLeafPattern] and
+// [ValidateConditionPatterns] for an operand that cannot be used as a pattern:
+// a LIKE operand ending in an unpaired escape, or a MATCHES_PATTERN operand
+// that does not compile.
+//
+// The wrapped message names the operator and the failure, and deliberately
+// carries NEITHER the operand NOR the anchored form the kernel compiles — a
+// caller puts this error into a client-facing 400, and both are internals.
+var ErrInvalidPattern = errors.New("invalid pattern")
 
 // ErrInvalidFilterPath is returned for a Filter.Path — or an OrderSpec.Path —
 // that falls outside the documented path grammar. See the "Grammar" and

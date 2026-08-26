@@ -17,7 +17,23 @@ const (
 	FilterContains   FilterOp = "contains"
 	FilterStartsWith FilterOp = "starts_with"
 	FilterEndsWith   FilterOp = "ends_with"
-	FilterLike       FilterOp = "like"
+
+	// FilterLike is a glob, not a regex. The grammar, which is PostgreSQL's
+	// and SQLite's `LIKE ... ESCAPE '\'`:
+	//
+	//   - '%'  any sequence of characters, including empty, INCLUDING newlines
+	//   - '_'  exactly one character (one rune), INCLUDING a newline
+	//   - '\X' the literal character X, for ANY X — so \%, \_ and \\ are literal
+	//     '%', '_' and '\', and \d is a literal 'd'
+	//   - anything else, itself
+	//
+	// The match is whole-string and case-sensitive. A trailing unpaired '\' is
+	// the only malformed pattern; every other operand matches something.
+	//
+	// This is deliberately NOT Cloud's Like.prepareSpecialCharacters, which
+	// translates to a regex and leaks RE2 escapes. cyoda-go leads this
+	// contract.
+	FilterLike FilterOp = "like"
 
 	FilterIsNull  FilterOp = "is_null"
 	FilterNotNull FilterOp = "not_null"

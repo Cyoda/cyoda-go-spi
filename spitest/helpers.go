@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 
 	spi "github.com/cyoda-platform/cyoda-go-spi"
 )
@@ -93,6 +94,15 @@ func newAttributedEntity(t *testing.T, modelName, id string, payload map[string]
 	e.Meta.ChangeUserKind = changeUserKind
 	e.Meta.ChangeExecutor = executor
 	return e
+}
+
+// entityDataString reads a top-level string field out of a returned entity's
+// marshalled payload.
+func entityDataString(t *testing.T, e *spi.Entity, field string) string {
+	t.Helper()
+	r := gjson.GetBytes(e.Data, field)
+	require.True(t, r.Exists(), "entity %s has no %q field", e.Meta.ID, field)
+	return r.String()
 }
 
 // iterSeq wraps a slice into an iter.Seq, matching the SaveAll interface.

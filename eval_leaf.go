@@ -1,8 +1,10 @@
 package spi
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
+	"regexp/syntax"
 	"strings"
 
 	"github.com/google/uuid"
@@ -100,7 +102,7 @@ type Expansion struct {
 
 	// kindStringOp payload.
 	strOperand string
-	strRegex   *regexp.Regexp // compiled+anchored pattern for LIKE / MATCHES_PATTERN
+	strMatch   patternMatcher // LIKE glob / MATCHES_PATTERN anchored regex; nil ⇒ never matches
 }
 
 // compileRegex is regexp.Compile behind a package var so an internal test can
@@ -136,15 +138,11 @@ func ExpandLeaf(op FilterOp, operand string, values []string, declared []DataTyp
 		FilterIEq, FilterINe, FilterIContains, FilterINotContains, FilterIStartsWith,
 		FilterINotStartsWith, FilterIEndsWith, FilterINotEndsWith:
 		e := Expansion{kind: kindStringOp, op: op, strOperand: operand}
-		switch op {
-		case FilterLike:
-			if re, err := compileRegex(anchor(likeToRegex(operand))); err == nil {
-				e.strRegex = re
-			}
-		case FilterMatchesRegex:
-			if re, err := compileRegex(anchor(operand)); err == nil {
-				e.strRegex = re
-			}
+		// Swallowed deliberately: Prepare's contract is that a leaf whose
+		// operand cannot be expanded becomes a leaf that never matches.
+		// Callers wanting a rejection ask ValidateLeafPattern FIRST.
+		if m, err := compileLeafPattern(op, operand); err == nil {
+			e.strMatch = m
 		}
 		return e, nil
 
@@ -494,7 +492,7 @@ func evalStringOp(e Expansion, s string) bool {
 	case FilterNotEndsWith:
 		return !strings.HasSuffix(s, op)
 	case FilterLike, FilterMatchesRegex:
-		return e.strRegex != nil && e.strRegex.MatchString(s)
+		return e.strMatch != nil && e.strMatch.matches(s)
 	case FilterIEq:
 		return strings.EqualFold(s, op)
 	case FilterINe:
@@ -574,63 +572,109 @@ func classifyStoredNumeric(d Decimal) DataType {
 
 func fold(s string) string { return strings.ToLower(s) }
 
-// --- LIKE grammar (Cloud queryable/Like.java prepareSpecialCharacters) -------
-
-// regexpSpecialChars mirrors Cloud Like.REGEXP_SPECIAL_CHARS: every char here is
-// escaped to a literal in the compiled pattern.
-const regexpSpecialChars = "[](){}.*+?$^|#<>-="
-
 // anchor wraps a regex body so it must match the WHOLE stored string, matching
 // Java's Pattern.matcher(x).matches() semantics (Go's MatchString is otherwise
 // an unanchored substring search).
+//
+// It is string concatenation, so it is only sound for a body that parses
+// STANDALONE — see compileMatchesPattern.
 func anchor(body string) string {
 	return `\A(?:` + body + `)\z`
 }
 
-// likeToRegex ports Like.prepareSpecialCharacters: '%' → '.*?', '_' → '.', every
-// regexp metacharacter escaped as a literal, '\' the escape char (\%, \_, \\ →
-// literal %, _, \). Case-sensitive; the caller anchors the result.
-func likeToRegex(s string) string {
-	if s == "" {
-		return ""
+// --- pattern derivation ----------------------------------------------------
+
+type regexMatcher struct{ re *regexp.Regexp }
+
+func (m regexMatcher) matches(s string) bool { return m.re.MatchString(s) }
+
+// invalidPatternError reports a regex failure by its syntax CODE only. It must
+// never carry syntax.Error.Expr, which echoes the anchored expression and the
+// caller's operand into a client-facing 400.
+//
+// It carries no operator name: naming the operator is the caller's job, in
+// the vocabulary that caller's own caller speaks — [ValidateLeafPattern] names
+// the FilterOp it was handed, [ValidateConditionPatterns] names the domain
+// operator string the user wrote. Naming it here would fix it to neither.
+func invalidPatternError(err error) error {
+	var se *syntax.Error
+	if errors.As(err, &se) {
+		return fmt.Errorf("%w: %s", ErrInvalidPattern, se.Code)
 	}
-	rs := []rune(s)
-	sb := make([]rune, 0, len(rs)*2)
-	for i := 0; i < len(rs); i++ {
-		c := rs[i]
-		switch {
-		case strings.ContainsRune(regexpSpecialChars, c):
-			sb = append(sb, '\\', c)
-		case c == '_':
-			if !hasEscapeRune(rs, i) {
-				sb = append(sb, '.')
-			} else {
-				sb = sb[:len(sb)-1] // drop the raw '\' appended by the else-branch
-				sb = append(sb, c)
-			}
-		case c == '%':
-			if !hasEscapeRune(rs, i) {
-				sb = append(sb, '.', '*', '?')
-			} else {
-				sb = sb[:len(sb)-1]
-				sb = append(sb, c)
-			}
-		default:
-			sb = append(sb, c)
-		}
-	}
-	return string(sb)
+	return fmt.Errorf("%w: operand is not a valid regular expression", ErrInvalidPattern)
 }
 
-// hasEscapeRune reports whether the rune at idx is escaped: an odd number of
-// immediately-preceding backslashes (Cloud Like.hasEscapeCharacter).
-func hasEscapeRune(rs []rune, idx int) bool {
-	if idx == 0 {
-		return false
+// compileMatchesPattern requires the operand to parse STANDALONE as well as
+// compile ANCHORED.
+//
+// Anchoring is concatenation, so a body with a net-unmatched ')' escapes the
+// group: ")|(" becomes \A(?:)|()\z, an alternation whose first branch \A(?:)
+// matches the empty string at position 0 — it matches every stored value.
+// Requiring a standalone parse makes that family unrepresentable, because RE2
+// rejects an unmatched ')' on its own. The two accept-sets then agree in the
+// safe direction: nothing is accepted that matches more than it says.
+//
+// The standalone check is syntax.Parse, NOT a second regexp.Compile.
+// regexp.Compile is syntax.Parse plus program construction, so the parse alone
+// rejects exactly the same operands — and building a second program we would
+// throw away would make Prepare compile twice per query, breaking
+// TestPrepare_CompilesRegexExactlyOncePerQuery.
+//
+// The standalone parse is also the honest diagnostic. For "[", it reports
+// "missing closing ]"; the anchored form reports "invalid escape sequence"
+// about a \z the caller never wrote.
+func compileMatchesPattern(operand string) (patternMatcher, error) {
+	if _, err := syntax.Parse(operand, syntax.Perl); err != nil {
+		return nil, invalidPatternError(err)
 	}
-	count := 0
-	for i := idx - 1; i >= 0 && rs[i] == '\\'; i-- {
-		count++
+	re, err := compileRegex(anchor(operand))
+	if err != nil {
+		// The bare parse above already succeeded, so any syntax.Error.Code
+		// here can only describe the \A(?:...)\z wrapper this function
+		// added — never the operand the caller wrote. Reporting it would
+		// point the caller at punctuation they never typed (e.g. a "missing
+		// closing )" about anchor's own "(?:"). Report the honest, generic
+		// fact instead: not usable as a whole-string pattern.
+		return nil, fmt.Errorf("%w: operand is not usable as a whole-string pattern", ErrInvalidPattern)
 	}
-	return count%2 == 1
+	return regexMatcher{re: re}, nil
+}
+
+// compileLeafPattern is the SINGLE derivation of what a pattern operand means.
+// Both the kernel (via ExpandLeaf) and validators (via ValidateLeafPattern)
+// route through it, so a validator cannot accept what the kernel refuses.
+//
+// It takes `any` and applies OperandString itself: a caller cannot supply a
+// differently-derived operand because it does not derive one.
+//
+// A nil matcher with a nil error means "this operator compiles no pattern".
+// Both nils must be UNTYPED — a typed-nil matcher through the interface is
+// non-nil and evalStringOp would call a method on it.
+func compileLeafPattern(op FilterOp, value any) (patternMatcher, error) {
+	switch op {
+	case FilterLike:
+		return parseLikePattern(OperandString(value))
+	case FilterMatchesRegex:
+		return compileMatchesPattern(OperandString(value))
+	}
+	return nil, nil
+}
+
+// ValidateLeafPattern reports whether value is usable as op's pattern operand,
+// using the SAME derivation the kernel evaluates with. A validator calling this
+// cannot accept an operand the kernel will refuse, or refuse one it accepts.
+//
+// Returns nil for every operator that carries no pattern, so a caller can pass
+// any leaf without switching on the operator first.
+//
+// It covers pattern VALIDITY only. Passing it is not the same as having
+// validated the condition — see [ValidateConditionOperators] for operator
+// names. Errors wrap [ErrInvalidPattern], name op (the exact FilterOp the
+// caller passed in — accurate here, since the caller supplied it), and carry
+// neither the operand nor the anchored form.
+func ValidateLeafPattern(op FilterOp, value any) error {
+	if _, err := compileLeafPattern(op, value); err != nil {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+	return nil
 }

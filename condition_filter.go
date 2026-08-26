@@ -133,10 +133,14 @@ import (
 //     [lo, hi] operand. Anything else leaves Filter.Values nil, ExpandLeaf
 //     errors, and the leaf silently no-matches. Check the arity before
 //     translating rather than diagnosing an empty result set afterwards.
-//   - PATTERN COMPILABILITY. An uncompilable MATCHES_PATTERN operand leaves
-//     the compiled program nil and the leaf silently returns false. Note the
-//     kernel compiles the ANCHORED form while a naive caller-side check would
-//     compile the raw operand, so the two accept sets are not identical.
+//   - PATTERN COMPILABILITY. An uncompilable MATCHES_PATTERN or LIKE operand
+//     (e.g. LIKE with a trailing unpaired escape) leaves the compiled
+//     program nil and the leaf silently returns false. Note the kernel
+//     compiles the ANCHORED form of MATCHES_PATTERN while a naive
+//     caller-side check would compile the raw operand, so the two accept
+//     sets are not identical — use [ValidateLeafPattern] (per leaf) or
+//     [ValidateConditionPatterns] (whole condition) rather than hand-rolling
+//     the check; they route through the same derivation the kernel does.
 func ConditionToFilter(cond predicate.Condition, fields map[string]FieldDescriptor) (Filter, error) {
 	if cond == nil {
 		return Filter{}, fmt.Errorf("condition is nil")
@@ -578,11 +582,12 @@ func invalidPathError(path, reason string) error {
 	return fmt.Errorf("%w: jsonPath %q %s", ErrInvalidFilterPath, path, reason)
 }
 
-// MaxConditionDepth caps recursion in [ValidateConditionOperators] to defend
-// against stack exhaustion from a deeply nested predicate tree. Client-facing
-// parsers cap incoming requests at a smaller depth, but a programmatically
-// constructed tree bypasses that and can otherwise nest arbitrarily. 256 is
-// well above any realistic query and well below the stack-blow threshold.
+// MaxConditionDepth caps recursion in [ValidateConditionOperators] and
+// [ValidateConditionPatterns] to defend against stack exhaustion from a deeply
+// nested predicate tree. Client-facing parsers cap incoming requests at a
+// smaller depth, but a programmatically constructed tree bypasses that and can
+// otherwise nest arbitrarily. 256 is well above any realistic query and well
+// below the stack-blow threshold.
 const MaxConditionDepth = 256
 
 // LookupOperator translates a domain operator string to a [FilterOp],
@@ -637,10 +642,16 @@ func OperatorNames() []string {
 // meant to remove.
 //
 // It covers ONLY operator names. The three operand obligations documented on
-// [ConditionToFilter] are deliberately not folded in: two are cheap local
-// checks a caller can apply while walking its own input, and the third depends
-// on a pattern-cost bound this module has not settled. Passing this function
-// is not the same as having validated the condition.
+// [ConditionToFilter] are deliberately not folded in: the object-operand and
+// BETWEEN-arity checks are cheap local checks a caller can apply while
+// walking its own input; the pattern-compilability check was blocked on
+// reaching the kernel's own pattern derivation, which [ValidateLeafPattern]
+// and [ValidateConditionPatterns] now expose. Passing this function is not
+// the same as having validated the condition.
+//
+// Pattern operands are now covered by [ValidateConditionPatterns]. A
+// pattern-cost bound (rejecting a syntactically valid but expensive pattern)
+// remains a separate, unsettled concern, out of scope for both functions.
 func ValidateConditionOperators(cond predicate.Condition) error {
 	return validateOperatorsAtDepth(cond, 0)
 }
@@ -678,6 +689,66 @@ func validateOperatorsAtDepth(cond predicate.Condition, depth int) error {
 func checkOperator(op string) error {
 	if _, ok := LookupOperator(op); !ok {
 		return unknownOperatorError(op)
+	}
+	return nil
+}
+
+// ValidateConditionPatterns walks cond and validates every pattern operand
+// against the kernel's own derivation, so a caller can reject the whole request
+// at the boundary rather than mid-translation or, worse, discover it as an
+// empty result page.
+//
+// It mirrors [ValidateConditionOperators]'s recursion and shares its depth cap.
+// The two are complements and neither implies the other: this one checks
+// pattern OPERANDS and passes a misspelled operator (MapOperator returns the
+// zero FilterOp, which compiles no pattern); that one checks operator NAMES and
+// ignores operands. Call both.
+//
+// Errors wrap [ErrInvalidPattern] and name the offending leaf by jsonPath (or,
+// for a lifecycle leaf, by field) and the operator string the caller wrote
+// (e.g. "MATCHES_PATTERN") — never the operand, and never the internal
+// FilterOp spelling ([ValidateLeafPattern] uses that vocabulary; this one
+// speaks the caller's).
+func ValidateConditionPatterns(cond predicate.Condition) error {
+	return validatePatternsAtDepth(cond, 0)
+}
+
+func validatePatternsAtDepth(cond predicate.Condition, depth int) error {
+	if cond == nil {
+		return nil
+	}
+	if depth >= MaxConditionDepth {
+		return fmt.Errorf("condition depth exceeded (max %d)", MaxConditionDepth)
+	}
+	switch c := cond.(type) {
+	case *predicate.SimpleCondition:
+		return checkPattern(MapOperator(c.OperatorType), c.OperatorType, c.Value, c.JsonPath)
+	case *predicate.LifecycleCondition:
+		return checkPattern(MapOperator(c.OperatorType), c.OperatorType, c.Value, c.Field)
+	case *predicate.GroupCondition:
+		for _, child := range c.Conditions {
+			if err := validatePatternsAtDepth(child, depth+1); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *predicate.ArrayCondition:
+		// Positional values become equality leaves; no pattern operand.
+		return nil
+	default:
+		// Including FunctionCondition, which carries no operator.
+		return nil
+	}
+}
+
+// checkPattern names the leaf and the operator the caller wrote (opName, e.g.
+// "MATCHES_PATTERN") — never the operand, and never the internal FilterOp
+// spelling. It calls compileLeafPattern directly rather than
+// [ValidateLeafPattern], which would name the FilterOp instead: one name per
+// error, in the vocabulary this caller's own caller used.
+func checkPattern(op FilterOp, opName string, value any, location string) error {
+	if _, err := compileLeafPattern(op, value); err != nil {
+		return fmt.Errorf("%s: %s: %w", location, opName, err)
 	}
 	return nil
 }

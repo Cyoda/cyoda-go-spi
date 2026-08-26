@@ -1448,3 +1448,113 @@ func TestNormalisePath(t *testing.T) {
 		}
 	})
 }
+
+func TestValidateConditionPatterns(t *testing.T) {
+	bad := &predicate.SimpleCondition{JsonPath: "$.name", OperatorType: "MATCHES_PATTERN", Value: `\Q`}
+	good := &predicate.SimpleCondition{JsonPath: "$.name", OperatorType: "MATCHES_PATTERN", Value: `a|b`}
+	badLike := &predicate.SimpleCondition{JsonPath: "$.name", OperatorType: "LIKE", Value: `a\`}
+
+	if err := spi.ValidateConditionPatterns(good); err != nil {
+		t.Errorf("valid pattern rejected: %v", err)
+	}
+	cases := map[string]struct {
+		cond   predicate.Condition
+		wantOp string
+	}{
+		// wantOp is the domain operator string the caller actually wrote
+		// (predicate.SimpleCondition.OperatorType) — the vocabulary
+		// ValidateConditionPatterns' errors speak, never the internal
+		// FilterOp spelling ("matches_regex").
+		"regex": {bad, "MATCHES_PATTERN"},
+		"like":  {badLike, "LIKE"},
+	}
+	for name, c := range cases {
+		err := spi.ValidateConditionPatterns(c.cond)
+		if err == nil {
+			t.Errorf("%s: invalid pattern accepted", name)
+			continue
+		}
+		if !errors.Is(err, spi.ErrInvalidPattern) {
+			t.Errorf("%s: error %v does not wrap ErrInvalidPattern", name, err)
+		}
+		// Actionable against a large tree: the leaf is named.
+		if !strings.Contains(err.Error(), "$.name") {
+			t.Errorf("%s: error does not name the leaf: %v", name, err)
+		}
+		// The operator name the caller wrote is safe to surface and must
+		// survive; the operand (checked elsewhere) must not.
+		if !strings.Contains(err.Error(), c.wantOp) {
+			t.Errorf("%s: error does not name the operator %q: %v", name, c.wantOp, err)
+		}
+		// Regression guard: the internal FilterOp spelling must never leak
+		// into a client-facing error — the caller never wrote "matches_regex".
+		if strings.Contains(err.Error(), "matches_regex") {
+			t.Errorf("%s: error leaks internal FilterOp spelling %q: %v", name, "matches_regex", err)
+		}
+	}
+
+	// Nested: the walker recurses into groups.
+	group := &predicate.GroupCondition{Operator: "AND", Conditions: []predicate.Condition{good, bad}}
+	if err := spi.ValidateConditionPatterns(group); err == nil {
+		t.Error("group containing an invalid pattern accepted")
+	}
+
+	// Lifecycle leaves are checked too, and named by Field.
+	lc := &predicate.LifecycleCondition{Field: "state", OperatorType: "LIKE", Value: `x\`}
+	err := spi.ValidateConditionPatterns(lc)
+	if err == nil || !strings.Contains(err.Error(), "state") {
+		t.Errorf("lifecycle leaf not checked or not named: %v", err)
+	}
+
+	// Arms that carry no operator, and nil.
+	for name, cond := range map[string]predicate.Condition{
+		"array":    &predicate.ArrayCondition{JsonPath: "$.tags", Values: []any{"a"}},
+		"function": &predicate.FunctionCondition{},
+	} {
+		if err := spi.ValidateConditionPatterns(cond); err != nil {
+			t.Errorf("%s condition should pass, got %v", name, err)
+		}
+	}
+	if err := spi.ValidateConditionPatterns(nil); err != nil {
+		t.Errorf("nil condition should pass, got %v", err)
+	}
+
+	// Non-pattern and unrecognised operators are not this function's job.
+	for _, op := range []string{"EQUALS", "NOT_AN_OPERATOR"} {
+		c := &predicate.SimpleCondition{JsonPath: "$.a", OperatorType: op, Value: `\Q`}
+		if err := spi.ValidateConditionPatterns(c); err != nil {
+			t.Errorf("operator %q should pass ValidateConditionPatterns, got %v", op, err)
+		}
+	}
+}
+
+func TestValidateConditionPatterns_DepthGuard(t *testing.T) {
+	var cond predicate.Condition = &predicate.SimpleCondition{
+		JsonPath: "$.a", OperatorType: "EQUALS", Value: "x",
+	}
+	for i := 0; i < spi.MaxConditionDepth+1; i++ {
+		cond = &predicate.GroupCondition{Operator: "AND", Conditions: []predicate.Condition{cond}}
+	}
+	if err := spi.ValidateConditionPatterns(cond); err == nil {
+		t.Error("depth guard did not fire")
+	}
+}
+
+func TestValidateLeafPattern(t *testing.T) {
+	err := spi.ValidateLeafPattern(spi.FilterMatchesRegex, `)|(`)
+	if err == nil {
+		t.Fatal("anchor-escape operand accepted")
+	}
+	// Accurate here: op is exactly what the caller passed in, so naming it
+	// back — in FilterOp's own spelling — is honest, unlike
+	// ValidateConditionPatterns, which speaks the caller's domain vocabulary.
+	if !strings.Contains(err.Error(), string(spi.FilterMatchesRegex)) {
+		t.Errorf("error does not name the FilterOp %q: %v", spi.FilterMatchesRegex, err)
+	}
+	if err := spi.ValidateLeafPattern(spi.FilterLike, `100%`); err != nil {
+		t.Errorf("valid LIKE operand rejected: %v", err)
+	}
+	if err := spi.ValidateLeafPattern(spi.FilterEq, `\Q`); err != nil {
+		t.Errorf("non-pattern operator should pass, got %v", err)
+	}
+}

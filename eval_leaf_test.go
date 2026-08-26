@@ -2,6 +2,8 @@ package spi
 
 import (
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -319,7 +321,7 @@ func TestExpandLeaf_TemporalDownscaleOpMutation(t *testing.T) {
 	}
 }
 
-func TestLikeToRegex_Grammar(t *testing.T) {
+func TestLike_Grammar(t *testing.T) {
 	cases := []struct {
 		pattern, in string
 		want        bool
@@ -334,7 +336,7 @@ func TestLikeToRegex_Grammar(t *testing.T) {
 		{`a\\b`, `a\b`, true},
 		{"1.2", "1.2", true},
 		{"1.2", "1x2", false},
-		{"[a]", "[a]", true}, // regex metachars escaped to literals
+		{"[a]", "[a]", true}, // regex metachars are literals — LIKE is a glob
 		{"a<b>c", "a<b>c", true},
 	}
 	for _, c := range cases {
@@ -346,5 +348,169 @@ func TestLikeToRegex_Grammar(t *testing.T) {
 		if got != c.want {
 			t.Errorf("LIKE %q vs %q = %v, want %v", c.pattern, c.in, got, c.want)
 		}
+	}
+}
+
+// TestLike_SQLParity pins the twelve probe rows from the spec's Why table
+// against the SQL column. PostgreSQL 17 and SQLite agree on every one, and so
+// does today's kernel.
+func TestLike_SQLParity(t *testing.T) {
+	cases := []struct {
+		pattern, in string
+		want        bool // what PostgreSQL and SQLite return
+	}{
+		{`\d`, "7", false},
+		{`\d`, "d", true},
+		{`\d`, `\d`, false},
+		{`\w`, "q", false},
+		{`a\nb`, "a\nb", false}, // \n is a literal 'n', not a newline
+		{`a\nb`, "anb", true},
+		{"a_b", "a\nb", true}, // _ matches a newline
+		{"%", "a\nb", true},   // % matches a newline
+		{`\Q`, "Q", true},
+		{`\Q`, `\Q`, false},
+		{`\p{Foo}`, "p{Foo}", true},
+		{`\p{Foo}`, "x", false},
+	}
+	for _, c := range cases {
+		exp, err := ExpandLeaf(FilterLike, c.pattern, nil, []DataType{String})
+		if err != nil {
+			t.Fatalf("ExpandLeaf(like %q) error: %v", c.pattern, err)
+		}
+		if got := EvalLeaf(exp, jsonStr(c.in)); got != c.want {
+			t.Errorf("LIKE %q vs %q = %v, want %v (SQL)", c.pattern, c.in, got, c.want)
+		}
+	}
+}
+
+// TestLike_MalformedOperandNeverMatches pins Prepare's documented contract: a
+// leaf whose operand cannot be expanded becomes a leaf that never matches. The
+// 400 happens at the request boundary, via ValidateConditionPatterns — not here.
+func TestLike_MalformedOperandNeverMatches(t *testing.T) {
+	exp, err := ExpandLeaf(FilterLike, `a\`, nil, []DataType{String})
+	if err != nil {
+		t.Fatalf("ExpandLeaf should not surface the error, got %v", err)
+	}
+	for _, in := range []string{"a", `a\`, "ab", ""} {
+		if EvalLeaf(exp, jsonStr(in)) {
+			t.Errorf("malformed LIKE operand matched %q", in)
+		}
+	}
+}
+
+// TestValidatorAgreesWithKernel is the anti-drift guard: for every corpus
+// operand, compileLeafPattern erroring must be exactly when the kernel ends up
+// with no matcher.
+func TestValidatorAgreesWithKernel(t *testing.T) {
+	corpus := []struct {
+		op      FilterOp
+		operand string
+	}{
+		{FilterLike, `%`}, {FilterLike, `a\`}, {FilterLike, `\`}, {FilterLike, `\d`},
+		{FilterLike, `a\\b`}, {FilterLike, ``},
+		{FilterMatchesRegex, `A.*e`}, {FilterMatchesRegex, `\Q`}, {FilterMatchesRegex, `)|(`},
+		{FilterMatchesRegex, `[`}, {FilterMatchesRegex, `a|b`}, {FilterMatchesRegex, ``},
+	}
+	for _, c := range corpus {
+		_, valErr := compileLeafPattern(c.op, c.operand)
+		exp, err := ExpandLeaf(c.op, c.operand, nil, []DataType{String})
+		if err != nil {
+			t.Fatalf("ExpandLeaf(%s, %q) error: %v", c.op, c.operand, err)
+		}
+		if (valErr != nil) != (exp.strMatch == nil) {
+			t.Errorf("skew for (%s, %q): validator err=%v, kernel matcher nil=%v",
+				c.op, c.operand, valErr, exp.strMatch == nil)
+		}
+	}
+}
+
+func TestCompileMatchesPattern_AnchorEscapeRejected(t *testing.T) {
+	// anchor() is string concatenation, so a body with a net-unmatched ')'
+	// escapes the group: ")|(" becomes \A(?:)|()\z, an alternation whose
+	// first branch matches the empty string at position 0 — it matches EVERY
+	// stored value. These must be rejected, not accepted.
+	for _, operand := range []string{`)|(`, `)\z|(?:`, `)$|(`, `)x(`} {
+		if _, err := compileLeafPattern(FilterMatchesRegex, operand); err == nil {
+			t.Errorf("compileLeafPattern(MATCHES_PATTERN, %q) = nil error, want rejection", operand)
+		}
+	}
+}
+
+func TestCompileMatchesPattern_AcceptSet(t *testing.T) {
+	// Rejected: compiles bare, fails anchored (\Q swallows the wrapper's )\z).
+	err := func() error { _, err := compileLeafPattern(FilterMatchesRegex, `\Q`); return err }()
+	if err == nil {
+		t.Fatal(`compileLeafPattern(MATCHES_PATTERN, "\\Q") = nil error, want rejection`)
+	}
+	// The bare parse succeeds for "\Q", so any syntax.Error.Code from the
+	// ANCHORED compile can only describe anchor's own \A(?:...)\z wrapper —
+	// never the operand. The message must not report on the wrapper's
+	// parentheses (e.g. a "missing closing )" about anchor's "(?:").
+	if msg := err.Error(); strings.ContainsAny(msg, "()") {
+		t.Errorf(`error for "\Q" mentions a paren, which can only describe anchor's wrapper: %q`, msg)
+	}
+	// Accepted: legitimate patterns are unaffected by the bare requirement.
+	for _, operand := range []string{`a|b`, `^foo`, `A.*e`, ``} {
+		if _, err := compileLeafPattern(FilterMatchesRegex, operand); err != nil {
+			t.Errorf("compileLeafPattern(MATCHES_PATTERN, %q) = %v, want accepted", operand, err)
+		}
+	}
+}
+
+func TestCompileMatchesPattern_ErrorIsHonestAndCarriesNoInternals(t *testing.T) {
+	_, err := compileLeafPattern(FilterMatchesRegex, `[`)
+	if err == nil {
+		t.Fatal(`compileLeafPattern(MATCHES_PATTERN, "[") = nil error, want rejection`)
+	}
+	if !errors.Is(err, ErrInvalidPattern) {
+		t.Errorf("error %v does not wrap ErrInvalidPattern", err)
+	}
+	msg := err.Error()
+	// The BARE diagnostic. Anchored, RE2 reports "invalid escape sequence"
+	// about a \z the user never wrote.
+	if !strings.Contains(msg, "missing closing ]") {
+		t.Errorf("want the bare code %q, got %q", "missing closing ]", msg)
+	}
+	if strings.Contains(msg, `\A(?:`) {
+		t.Errorf("error leaks the anchored form: %q", msg)
+	}
+	if strings.Contains(msg, `[`) {
+		t.Errorf("error echoes the operand: %q", msg)
+	}
+}
+
+func TestCompileLeafPattern_TypedNilHazard(t *testing.T) {
+	// A non-pattern operator must yield an UNTYPED nil. A typed nil through
+	// the interface is non-nil, and evalStringOp would call a method on it.
+	for _, op := range []FilterOp{FilterEq, FilterContains, FilterIsNull, ""} {
+		m, err := compileLeafPattern(op, "anything")
+		if err != nil {
+			t.Errorf("compileLeafPattern(%q) = %v, want nil error", op, err)
+		}
+		if m != nil {
+			t.Errorf("compileLeafPattern(%q) returned a non-nil matcher %#v", op, m)
+		}
+	}
+	// The error paths must do the same.
+	if m, _ := compileLeafPattern(FilterLike, `a\`); m != nil {
+		t.Errorf("rejected LIKE returned a non-nil matcher %#v", m)
+	}
+	if m, _ := compileLeafPattern(FilterMatchesRegex, `[`); m != nil {
+		t.Errorf("rejected MATCHES_PATTERN returned a non-nil matcher %#v", m)
+	}
+}
+
+func TestCompileLeafPattern_DerivesOperandLikeTheKernel(t *testing.T) {
+	// Takes `any` and applies OperandString itself, so a caller cannot supply
+	// a differently-derived operand. A nil operand is "" here, never "<nil>".
+	m, err := compileLeafPattern(FilterLike, nil)
+	if err != nil {
+		t.Fatalf("compileLeafPattern(LIKE, nil) = %v", err)
+	}
+	if !m.matches("") {
+		t.Error("nil operand should derive the empty pattern, which matches only \"\"")
+	}
+	if m.matches("<nil>") {
+		t.Error(`nil operand derived "<nil>" instead of ""`)
 	}
 }

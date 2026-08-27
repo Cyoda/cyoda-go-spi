@@ -128,14 +128,31 @@ it belongs to this step rather than to a separate issue.
 
 ## 5. Consequences for the design
 
-- **The quantifier cannot be derived from the path alone.** `$.tags[*]` and
-  `$.tags` compile to the *identical* gjson path (`convertJSONPath` drops a
-  trailing `[*]` run, `match.go:73-79`); today only the runtime shape of the
-  data distinguishes them. Emission must instead be driven by the **schema** —
-  the fields map already records `IsArray` at the `[*]` key — so the node is
-  decided at translation time, deterministically, for both spellings.
-- **A schema-less search loses implicit quantification** under schema-driven
-  emission, where the data-shape route quantifies today. Needs a stated answer.
+- **The quantifier IS derivable from the wire path — CORRECTED 2026-08-27.**
+  An earlier draft of this section said it was not, and concluded emission must
+  be schema-driven. That was wrong, and the error was a conflation: `$.tags[*]`
+  and `$.tags` are distinct as *written*, and it is `convertJSONPath` that
+  erases the difference when it compiles them to the identical gjson path
+  (`match.go:73-79`). That erasure is an artefact of gjson compilation, not a
+  property of the path. A node built from the wire path — which is what
+  `ConditionToFilter` receives — distinguishes the two spellings exactly.
+  Emission is therefore path-driven, and consulting the schema to decide it
+  would introduce a second source of truth that can disagree with what the
+  caller wrote.
+- **There is no such thing as a schema-less search — RETRACTED 2026-08-27.**
+  The earlier draft raised one as an open question. It cannot happen: every
+  entity is bound to a model, `validateOrExtend` extends that model's schema
+  additively on every write, and `loadFieldsMap` derives the fields map from
+  the model store on every search. A path that resolves against stored data is
+  in the fields map by construction. The question was invented, and nothing in
+  the design should answer it.
+- **The schema's role is VALIDATION, not emission.** The two spellings are
+  different assertions about the model — `$.items[*].sku` asserts `items` is an
+  array (or polymorphic with an array member), `$.items.sku` asserts `items` is
+  an object — and a query whose path shape contradicts the model is an error,
+  not something to interpret flexibly. `findUnknownPaths` already enforces
+  exactly this, because the fields-map keys carry the `[*]` hops; what it lacks
+  is that it does not always run (see §7).
 - **Positional subscripts must keep working.** `$.arr[0]` is a *different*
   contract (`docs/cloud-parity/positional-subscript-path.md`) and is not
   quantified; an `ArrayCondition` still translates to positional `tags.0` eq
@@ -149,3 +166,49 @@ on this machine. Their shape is taken from `#478`'s description
 (`/03` = `$.kids[*].kids[*].name EQUALS grandSon`) and not independently
 confirmed — but note that per §2(a) a nested wildcard **already evaluates
 correctly**, so `/03` is expected to pass today rather than fail.
+
+## 7. Path validation does not always run — found 2026-08-27
+
+Read from source at `cyoda-go@eb13ff9` (`release/v0.8.4`). Each of these is a
+path on which a search returns a result set having validated nothing, or having
+translated against an empty fields map. A failing test is owed for each before
+any fix.
+
+`SearchService.validateConditionPaths` (`internal/domain/search/service.go`)
+returns `nil` — validation passed — on three failures that are not passes:
+
+| line | condition | today |
+|---|---|---|
+| 1562-1569 | `s.factory.ModelStore(ctx)` errors | `slog.Debug` + `return nil` |
+| 1571-1582 | `loadFieldsMap` errors | `slog.Debug` + `return nil` |
+| 1583-1586 | `fields == nil` (descriptor carries no schema) | `return nil` |
+
+The first two are dependency failures. Under
+`.claude/rules/correctness-over-availability.md` an unavailable dependency that
+a correct result requires fails the operation; it does not downgrade it. Both
+comments justify the skip as letting "the matcher's own error path surface a
+useful error", but the matcher has no field-path check — it answers an empty
+page for an unknown path, which is indistinguishable from a legitimate empty
+result.
+
+Separately, all four `ConditionToFilter` call sites discard the fields-map
+error and translate with whatever they got:
+
+- `internal/domain/search/service.go:658` — `fields, _ := loadFieldsMap(...)`,
+  commented `// best-effort; nil-tolerant`
+- `internal/domain/search/service.go:1163`
+- `internal/domain/entity/service.go:1099`
+- `internal/domain/entity/grouped_stats_service.go:208`
+
+`ConditionToFilter`'s own godoc says a nil fields map yields an INTERNALLY
+INCONSISTENT filter — the eight comparison and ordering leaves annihilate to
+false while the other eighteen evaluate normally — so under `AND` rows that
+should have matched are dropped and under `OR` rows a failed comparison was
+meant to exclude are admitted. Both silent. The godoc's instruction is explicit:
+"Callers that cannot supply declared types should treat that as an error and
+refuse the query." Four callers do the opposite.
+
+This is not caused by the quantifier work and predates it. It is recorded here
+because it was found while establishing what the schema is consulted for, and
+because §5's corrected answer — the schema's role is validation — is only true
+if the validation actually runs.

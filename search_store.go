@@ -9,11 +9,33 @@ import (
 
 // SearchJob represents the persistent state of an async search operation.
 type SearchJob struct {
-	ID          string
-	TenantID    TenantID
-	Status      string // RUNNING, SUCCESSFUL, FAILED, CANCELLED
-	ModelRef    ModelRef
-	Condition   json.RawMessage
+	ID       string
+	TenantID TenantID
+	Status   string // RUNNING, SUCCESSFUL, FAILED, CANCELLED
+	ModelRef ModelRef
+
+	// Condition is the client's predicate in the DOMAIN wire syntax
+	// ([predicate.Condition] as JSON), deliberately NOT translated to a
+	// [Filter]. It is the one plugin-facing field that carries domain syntax;
+	// every other predicate surface here (Searcher.Search, Iterate,
+	// GroupedAggregate) takes a Filter.
+	//
+	// For a store the engine executes, this field is OPAQUE: persist it and
+	// return it unchanged. The engine reads it back and translates it itself.
+	//
+	// For a [SelfExecutingSearchStore] it is the input to execution, and the
+	// obligations on that interface apply — translate it with
+	// [ConditionToFilter], do not parse or evaluate it independently.
+	//
+	// The shape is settled and permanent. Carrying a translated Filter here
+	// instead was considered and rejected: [ConditionToFilter] and
+	// [FieldsMapFromSchema] already live in this module, so a self-executing
+	// store can translate with the kernel's own code, which is what actually
+	// prevents divergence. Moving the translation to submission time would
+	// also have to define what happens when a condition does not translate,
+	// at the one point the engine has already stepped out.
+	Condition json.RawMessage
+
 	PointInTime time.Time
 	SearchOpts  json.RawMessage
 	ResultCount int
@@ -49,6 +71,26 @@ type SearchJob struct {
 // side effect of CreateJob's own dispatch, not via a caller-driven stream)
 // and no-op Heartbeat, ClaimStale, and ClearResults — liveness and reclaim
 // are meaningless for a store that owns execution outright.
+//
+// # Predicate obligation
+//
+// This is the ONLY interface for which [SearchJob.Condition] is load-bearing:
+// an engine-executed store persists that field and never reads it, while a
+// self-executing store must act on it with no engine present.
+//
+// Such a store MUST derive its predicate through this module —
+// [FieldsMapFromSchema] over the model schema, then [ConditionToFilter], then
+// [Prepare] / [PreparedFilter.Match] — and MUST NOT ship its own condition
+// parser or leaf comparator. A second implementation of either is not a local
+// choice: it silently answers the same query differently from every other
+// backend, and it has already happened once, diverging on numeric precision,
+// BETWEEN inclusivity, absent-field handling for negative operators, pattern
+// anchoring and array comparison.
+//
+// Passing a nil or partial fields map does not satisfy this. An empty
+// declared-type set does not degrade uniformly — comparison leaves annihilate
+// while string and presence leaves evaluate normally — so the result is
+// internally inconsistent rather than empty. See [ConditionToFilter].
 type SelfExecutingSearchStore interface {
 	AsyncSearchStore
 	SelfExecuting()

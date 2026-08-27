@@ -507,6 +507,21 @@ MAINTAINING.md.
 
 ### Changed
 
+- **The `spitest` filter-path conformance table now pins the evaluator's own
+  metacharacters.** `filterPathRejects` covered the injection shapes, a
+  backslash and an asterisk, but not `?`, `#`, `|` or `!` — the four whose
+  acceptance is not an empty page but the WRONG page. Measured against gjson:
+  `?` is a single-character key wildcard (`a?b` is answered by a sibling
+  `aXb`), `|` is an alternative segment separator (`a|b` is answered by a
+  nested `a`→`b`, the `.` collision respelled), `#` is the array
+  count/projection segment, and `!` introduces a literal (`!true` is `true`
+  whatever the document holds). Every in-tree backend already refuses them —
+  they enforce `[A-Za-z0-9_-]` byte-for-byte — so this states an existing
+  obligation rather than adding one. A backend with a different evaluator is
+  held to the same table: its own metacharacters must be a subset of what the
+  grammar already excludes.
+  ([#43](https://github.com/Cyoda/cyoda-go-spi/issues/43))
+
 - **`Filter.Path` now documents its grammar on the field.** The accepted form
   is `segment ( "." segment )*` with `segment = 1*( ALPHA / DIGIT / "_" /
   "-" )`, ASCII only: no empty segment, no leading or trailing dot, no

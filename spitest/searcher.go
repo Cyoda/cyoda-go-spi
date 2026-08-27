@@ -259,6 +259,22 @@ var filterPathRejects = []string{
 	"$",                              // bare dollar
 	"héllo",                          // non-ASCII
 	"foo\x00bar",                     // NUL control byte
+	// The evaluator's own metacharacters. These are the entries that matter
+	// most, because a backend accepting one does not answer an empty page —
+	// it answers the WRONG page. Measured against gjson, the evaluator the
+	// reference implementation uses in memory: "?" is a single-character key
+	// wildcard, so "a?b" is answered by a sibling key "aXb"; "|" is an
+	// alternative segment separator, so "a|b" is answered by a nested a→b —
+	// the "." collision under another spelling; "#" is the array
+	// count/projection segment; and "!" introduces a literal, so "!true"
+	// evaluates to true whatever the document holds. A backend with a
+	// different evaluator must still refuse them: the grammar is the
+	// contract, and its own metacharacters have to be a subset of what the
+	// grammar already excludes or it has the same defect under another name.
+	"foo?bar", // single-character key wildcard
+	"foo#",    // array count/projection segment
+	"foo|bar", // alternative segment separator
+	"!true",   // literal, independent of the document
 }
 
 // filterPathAcceptsData are well-formed SourceData paths that must keep

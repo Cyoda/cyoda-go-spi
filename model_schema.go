@@ -321,23 +321,6 @@ func (n *ModelNode) ensureBranches() {
 	}
 }
 
-// dominantKind reproduces the single label the persisted format carried before
-// a node could spell its whole set: the sole branch, the container when a
-// scalar shares the node with one, and LEAF for a node that declares nothing.
-//
-// It exists only so the codec and the flattening keep their current behaviour
-// while the type changes underneath them. Both stop using it in the changes
-// that follow, and it goes with the second of them.
-func dominantKind(n *ModelNode) NodeKind {
-	if n.Object() != nil {
-		return KindObject
-	}
-	if n.Array() != nil {
-		return KindArray
-	}
-	return KindLeaf
-}
-
 // wireNode is the JSON representation of a [ModelNode]. It is the persisted
 // format written by the engine; field names and the kind spellings are fixed
 // by that format and are not free to change here.
@@ -626,24 +609,32 @@ func (n *ModelNode) buildFieldCache() *cachedFields {
 // collectFields walks the tree depth-first, appending a descriptor for every
 // searchable leaf. prefix is the JSONPath accumulated so far; inArray reports
 // whether the node's values are elements of an array.
+// A node is walked by the branches it carries, not by one label: a field
+// observed as several kinds declares each of them, and every branch a write
+// may take must be reachable here, since this is where a search looks up a
+// path's declared types.
 func collectFields(n *ModelNode, prefix string, inArray bool, out *[]FieldDescriptor) {
-	switch dominantKind(n) {
-	case KindLeaf:
+	// Scalar branch. A container node that ALSO carries one was observed
+	// holding a bare scalar, so its own path is a searchable leaf in addition
+	// to the container's contents. A node that declares no kind at all is the
+	// nullable marker: it declares NULL at its own path. A container that is
+	// merely nullable declares no scalar and emits nothing here.
+	if s := n.Scalar(); s != nil {
 		*out = append(*out, FieldDescriptor{
 			Path:    prefix,
-			Types:   n.DeclaredTypes(),
+			Types:   s.Types(),
 			IsArray: inArray,
 		})
+	} else if n.nullable && len(n.branches) == 0 {
+		*out = append(*out, FieldDescriptor{
+			Path:    prefix,
+			Types:   []DataType{Null},
+			IsArray: inArray,
+		})
+	}
 
-	case KindObject:
-		if s := n.Scalar(); s != nil {
-			*out = append(*out, FieldDescriptor{
-				Path:    prefix,
-				Types:   s.Types(),
-				IsArray: inArray,
-			})
-		}
-		o := n.Object()
+	// Object branch. Sorted keys, so the flattening is deterministic.
+	if o := n.Object(); o != nil {
 		keys := make([]string, 0, o.Len())
 		for k := range o.children {
 			keys = append(keys, k)
@@ -652,27 +643,29 @@ func collectFields(n *ModelNode, prefix string, inArray bool, out *[]FieldDescri
 		for _, k := range keys {
 			collectFields(o.children[k], prefix+"."+k, false, out)
 		}
-
-	case KindArray:
-		a := n.Array()
-		// An array whose element was never observed declares nothing. It must
-		// not emit an empty-typed leaf, which would match nothing while
-		// looking like a declared field.
-		if a.element == nil {
-			return
-		}
-		arrayPath := prefix + "[*]"
-		if dominantKind(a.element) == KindLeaf {
-			*out = append(*out, FieldDescriptor{
-				Path:    arrayPath,
-				Types:   a.element.DeclaredTypes(),
-				IsArray: true,
-			})
-			return
-		}
-		// Arrays of objects/arrays recurse under the "[*]" prefix. inArray is
-		// false for the nested fields: "$.items[*].price" is a scalar per
-		// item, not an array-valued field.
-		collectFields(a.element, arrayPath, false, out)
 	}
+
+	// Array branch. An array whose element was never observed declares
+	// nothing: it must not emit an empty-typed leaf, which would match nothing
+	// while looking like a declared field.
+	a := n.Array()
+	if a == nil || a.element == nil {
+		return
+	}
+	arrayPath := prefix + "[*]"
+	if a.element.Object() == nil && a.element.Array() == nil {
+		// The element is a scalar (or the nullable marker) and nothing else,
+		// so it IS the leaf. This is the one place IsArray is set.
+		*out = append(*out, FieldDescriptor{
+			Path:     arrayPath,
+			Types:    a.element.DeclaredTypes(),
+			IsArray:  true,
+			MaxWidth: a.maxWidth,
+		})
+		return
+	}
+	// Elements observed as objects or arrays recurse under the "[*]" prefix.
+	// inArray is false for the nested fields: "$.items[*].price" is a scalar
+	// per item, not an array-valued field.
+	collectFields(a.element, arrayPath, false, out)
 }

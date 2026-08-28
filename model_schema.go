@@ -18,7 +18,8 @@ import (
 // package — inference from sample documents, diff, merge, extend, validation,
 // unique-key derivation — deliberately stays in the engine: only the engine
 // may decide what a model's schema becomes, while every executor must agree
-// on how to read it.
+// on how to read it. The mutators below exist so the engine can build a tree
+// out of this type; the split is a statement of responsibility, not a lock.
 //
 // Read it as a contract, not as a helper: the key convention below is shared
 // with the engine, and a deviation does not fail loudly. A path that is
@@ -26,17 +27,16 @@ import (
 // Declared type set, which makes the leaf comparison match nothing. The
 // search then returns fewer rows with no error at all.
 
-// NodeKind indicates whether a [ModelNode] represents an object, an array, or
-// a leaf carrying primitive types.
+// NodeKind names one branch a [ModelNode] can carry.
 type NodeKind int
 
 const (
-	// KindLeaf represents a leaf node holding one or more primitive DataTypes.
+	// KindLeaf is the scalar branch: primitive DataTypes observed at the path.
 	KindLeaf NodeKind = iota
-	// KindObject represents an object node with named children. An object node
-	// may ALSO carry types of its own; see [ModelNode.Fields].
+	// KindObject is the object branch: named children.
 	KindObject
-	// KindArray represents an array node with an element descriptor.
+	// KindArray is the array branch: one element descriptor shared by every
+	// position.
 	KindArray
 )
 
@@ -56,103 +56,286 @@ func (k NodeKind) String() string {
 	}
 }
 
-// ModelNode is a node in a model's schema tree — the decoded form of
-// [ModelDescriptor.Schema].
-//
-// A node is one of three kinds. A KindObject node has named children and may
-// additionally carry a non-empty TypeSet, which is how a path observed as both
-// an object and a bare scalar is represented (see [ModelNode.Fields] for why
-// that case must not be dropped). A KindArray node has a single element
-// descriptor shared by every position. A KindLeaf node carries only types.
-//
-// Nodes are not safe for concurrent mutation. Build (or decode) a tree fully,
-// then treat it as read-only; the flattening in [ModelNode.Fields] is cached
-// and safe to call concurrently once the tree has stopped changing.
-type ModelNode struct {
-	kind     NodeKind
-	types    *TypeSet
-	children map[string]*ModelNode
-	element  *ModelNode
+// allKinds is the iteration order for [ModelNode.Kinds] and for the encoder,
+// so both are deterministic.
+var allKinds = [...]NodeKind{KindLeaf, KindObject, KindArray}
 
-	fieldCache atomic.Pointer[cachedFields]
-}
+// Branch is one kind a path has been observed as, together with what that
+// observation recorded.
+type Branch interface{ Kind() NodeKind }
 
-// NewObjectNode returns an object node with an empty children map and an empty
-// TypeSet.
-func NewObjectNode() *ModelNode {
-	return &ModelNode{
-		kind:     KindObject,
-		types:    NewTypeSet(),
-		children: make(map[string]*ModelNode),
-	}
-}
+// ScalarBranch records the primitive DataTypes a path was observed holding.
+// It NEVER holds NULL: null is not a scalar observation, it is the nullable
+// marker, and [ModelNode.Nullable] carries it.
+type ScalarBranch struct{ types *TypeSet }
 
-// NewLeafNode returns a leaf node seeded with the given DataType.
-func NewLeafNode(dt DataType) *ModelNode {
-	ts := NewTypeSet()
-	ts.Add(dt)
-	return &ModelNode{
-		kind:  KindLeaf,
-		types: ts,
-	}
-}
+// Kind implements [Branch].
+func (b *ScalarBranch) Kind() NodeKind { return KindLeaf }
 
-// NewArrayNode returns an array node whose elements are described by element.
-//
-// A nil element is legal and meaningful: it is the "array observed, but never
-// with any content" shape, which declares no leaf at all. Callers must not
-// substitute an empty leaf for it, because that would declare a field with an
-// empty type set — a leaf that matches nothing.
-func NewArrayNode(element *ModelNode) *ModelNode {
-	return &ModelNode{
-		kind:    KindArray,
-		types:   NewTypeSet(),
-		element: element,
-	}
-}
+// Types returns a sorted copy of the observed DataTypes.
+func (b *ScalarBranch) Types() []DataType { return b.types.Types() }
 
-// Kind returns the NodeKind of this node.
-func (n *ModelNode) Kind() NodeKind { return n.kind }
+// ObjectBranch records the named children a path was observed holding.
+type ObjectBranch struct{ children map[string]*ModelNode }
 
-// Types returns the TypeSet associated with this node. The TypeSet is the
-// node's own, not a copy: mutating it mutates the node.
-func (n *ModelNode) Types() *TypeSet { return n.types }
-
-// Element returns the element descriptor for an array node, or nil — both for
-// a non-array node and for an array whose content was never observed.
-func (n *ModelNode) Element() *ModelNode { return n.element }
+// Kind implements [Branch].
+func (b *ObjectBranch) Kind() NodeKind { return KindObject }
 
 // Children returns a shallow copy of the children map (the map is copied, the
-// child nodes are not), or nil when the node has no children map.
-func (n *ModelNode) Children() map[string]*ModelNode {
-	if n.children == nil {
-		return nil
-	}
-	result := make(map[string]*ModelNode, len(n.children))
-	for k, v := range n.children {
+// child nodes are not).
+func (b *ObjectBranch) Children() map[string]*ModelNode {
+	result := make(map[string]*ModelNode, len(b.children))
+	for k, v := range b.children {
 		result[k] = v
 	}
 	return result
 }
 
 // Child returns the named child, or nil if there is none.
-func (n *ModelNode) Child(name string) *ModelNode {
-	if n.children == nil {
-		return nil
-	}
-	return n.children[name]
+func (b *ObjectBranch) Child(name string) *ModelNode { return b.children[name] }
+
+// Len reports how many children the branch carries, without copying the map.
+func (b *ObjectBranch) Len() int { return len(b.children) }
+
+// ArrayBranch records that a path was observed holding an array, together with
+// the descriptor shared by every element.
+type ArrayBranch struct {
+	element  *ModelNode
+	maxWidth int
 }
 
-// SetChild adds or replaces a named child on this node and drops any cached
-// flattening, so a later [ModelNode.Fields] reflects the new shape. Dropping
-// the cache does not make concurrent build-and-read safe; it only makes
-// build-then-read correct.
-func (n *ModelNode) SetChild(name string, child *ModelNode) {
-	if n.children == nil {
-		n.children = make(map[string]*ModelNode)
+// Kind implements [Branch].
+func (b *ArrayBranch) Kind() NodeKind { return KindArray }
+
+// Element returns the descriptor shared by every position, or nil when the
+// array was observed but never with any content.
+//
+// A nil element is meaningful and must not be substituted with an empty leaf:
+// that would declare a field with an empty type set — a leaf that matches
+// nothing — where the truth is that nothing was declared at all.
+func (b *ArrayBranch) Element() *ModelNode { return b.element }
+
+// MaxWidth returns the widest array observed at this level, or zero. It is a
+// discovery-time statistic that the wire format does not carry, so it is zero
+// on any tree decoded from persisted bytes.
+func (b *ArrayBranch) MaxWidth() int { return b.maxWidth }
+
+// ModelNode is a node in a model's schema tree — the decoded form of
+// [ModelDescriptor.Schema].
+//
+// A node holds the SET of kinds the path has been observed as, and whether it
+// has been observed as null. A field observed in more than one kind carries
+// more than one branch, and every branch it carries is a kind the field
+// declares: a single label could only name one of three independent
+// observations, so every reader that dispatched on one lost the others.
+//
+// Nodes are not safe for concurrent mutation. Build (or decode) a tree fully,
+// then treat it as read-only; the flattening in [ModelNode.Fields] is cached
+// and safe to call concurrently once the tree has stopped changing.
+type ModelNode struct {
+	branches map[NodeKind]Branch
+	nullable bool
+
+	fieldCache atomic.Pointer[cachedFields]
+}
+
+// NewObjectNode returns a node carrying an empty object branch.
+func NewObjectNode() *ModelNode {
+	n := &ModelNode{branches: make(map[NodeKind]Branch, 1)}
+	n.branches[KindObject] = &ObjectBranch{children: make(map[string]*ModelNode)}
+	return n
+}
+
+// NewLeafNode returns a node carrying a scalar branch seeded with dt.
+//
+// NewLeafNode(Null) is the exception, and the reason nullability is a flag: a
+// path observed only as null has been observed as no kind at all, so the node
+// carries no branch and is merely nullable.
+func NewLeafNode(dt DataType) *ModelNode {
+	n := &ModelNode{branches: make(map[NodeKind]Branch, 1)}
+	n.AddScalarTypes(dt)
+	return n
+}
+
+// NewArrayNode returns a node carrying an array branch whose elements are
+// described by element. A nil element is legal — see [ArrayBranch.Element].
+func NewArrayNode(element *ModelNode) *ModelNode {
+	n := &ModelNode{branches: make(map[NodeKind]Branch, 1)}
+	n.branches[KindArray] = &ArrayBranch{element: element}
+	return n
+}
+
+// Scalar returns the node's scalar branch, or nil when the path was never
+// observed holding a primitive value.
+func (n *ModelNode) Scalar() *ScalarBranch {
+	b, ok := n.branches[KindLeaf]
+	if !ok {
+		return nil
 	}
-	n.children[name] = child
+	return b.(*ScalarBranch)
+}
+
+// Object returns the node's object branch, or nil when the path was never
+// observed holding an object.
+func (n *ModelNode) Object() *ObjectBranch {
+	b, ok := n.branches[KindObject]
+	if !ok {
+		return nil
+	}
+	return b.(*ObjectBranch)
+}
+
+// Array returns the node's array branch, or nil when the path was never
+// observed holding an array.
+func (n *ModelNode) Array() *ArrayBranch {
+	b, ok := n.branches[KindArray]
+	if !ok {
+		return nil
+	}
+	return b.(*ArrayBranch)
+}
+
+// Branch returns the branch for k, or nil when the node does not carry it.
+func (n *ModelNode) Branch(k NodeKind) Branch {
+	b, ok := n.branches[k]
+	if !ok {
+		return nil
+	}
+	return b
+}
+
+// Kinds returns the kinds this node declares, in ascending NodeKind order.
+// A node observed only as null declares none.
+func (n *ModelNode) Kinds() []NodeKind {
+	out := make([]NodeKind, 0, len(n.branches))
+	for _, k := range allKinds {
+		if _, ok := n.branches[k]; ok {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// IsPolymorphic reports whether the path was observed as more than one kind.
+// A monomorphic field is a set of one; the answer is derived, never stored.
+func (n *ModelNode) IsPolymorphic() bool { return len(n.branches) > 1 }
+
+// Nullable reports whether the path has been observed holding null.
+//
+// It is recorded only while the node carries no scalar branch: a scalar
+// declaration admits null anyway, which is the same collapse [TypeSet.Add]
+// applies when it drops NULL in the presence of a concrete type.
+func (n *ModelNode) Nullable() bool { return n.nullable }
+
+// DeclaredTypes returns the node's DataTypes in the spelling the field walk,
+// the exporters and the persisted form use: the scalar branch's types, or the
+// lone NULL marker when the node is nullable and carries no scalar branch, or
+// nil. The slice is a copy.
+func (n *ModelNode) DeclaredTypes() []DataType {
+	if s := n.Scalar(); s != nil {
+		return s.Types()
+	}
+	if n.nullable {
+		return []DataType{Null}
+	}
+	return nil
+}
+
+// AddScalarTypes records primitive observations at this path, establishing the
+// scalar branch if it does not exist. NULL among them is the nullable marker
+// and is routed to [ModelNode.SetNullable]; a concrete type clears the marker,
+// so the two orders agree.
+func (n *ModelNode) AddScalarTypes(dts ...DataType) {
+	for _, dt := range dts {
+		if dt == Null {
+			n.SetNullable()
+			continue
+		}
+		s := n.Scalar()
+		if s == nil {
+			s = &ScalarBranch{types: NewTypeSet()}
+			n.ensureBranches()
+			n.branches[KindLeaf] = s
+		}
+		s.types.Add(dt)
+		n.nullable = false
+	}
 	n.fieldCache.Store(nil)
+}
+
+// SetNullable records that this path has been observed holding null. It is a
+// no-op when the node carries a scalar branch, which already admits null.
+func (n *ModelNode) SetNullable() {
+	if n.Scalar() != nil {
+		return
+	}
+	n.nullable = true
+	n.fieldCache.Store(nil)
+}
+
+// SetChild adds or replaces a named child, establishing the object branch if
+// it does not exist, and drops the cached flattening so a later
+// [ModelNode.Fields] reflects the new shape. Dropping the cache does not make
+// concurrent build-and-read safe; it only makes build-then-read correct.
+func (n *ModelNode) SetChild(name string, child *ModelNode) {
+	o := n.Object()
+	if o == nil {
+		o = &ObjectBranch{children: make(map[string]*ModelNode)}
+		n.ensureBranches()
+		n.branches[KindObject] = o
+	}
+	o.children[name] = child
+	n.fieldCache.Store(nil)
+}
+
+// SetElement sets the descriptor shared by every array position, establishing
+// the array branch if it does not exist.
+func (n *ModelNode) SetElement(element *ModelNode) {
+	a := n.Array()
+	if a == nil {
+		a = &ArrayBranch{}
+		n.ensureBranches()
+		n.branches[KindArray] = a
+	}
+	a.element = element
+	n.fieldCache.Store(nil)
+}
+
+// ObserveArrayWidth records an observed array width, keeping the widest, and
+// establishes the array branch if it does not exist.
+func (n *ModelNode) ObserveArrayWidth(width int) {
+	a := n.Array()
+	if a == nil {
+		a = &ArrayBranch{}
+		n.ensureBranches()
+		n.branches[KindArray] = a
+	}
+	if width > a.maxWidth {
+		a.maxWidth = width
+	}
+}
+
+func (n *ModelNode) ensureBranches() {
+	if n.branches == nil {
+		n.branches = make(map[NodeKind]Branch, 1)
+	}
+}
+
+// dominantKind reproduces the single label the persisted format carried before
+// a node could spell its whole set: the sole branch, the container when a
+// scalar shares the node with one, and LEAF for a node that declares nothing.
+//
+// It exists only so the codec and the flattening keep their current behaviour
+// while the type changes underneath them. Both stop using it in the changes
+// that follow, and it goes with the second of them.
+func dominantKind(n *ModelNode) NodeKind {
+	if n.Object() != nil {
+		return KindObject
+	}
+	if n.Array() != nil {
+		return KindArray
+	}
+	return KindLeaf
 }
 
 // wireNode is the JSON representation of a [ModelNode]. It is the persisted
@@ -163,6 +346,24 @@ type wireNode struct {
 	Types    []string             `json:"types,omitempty"`
 	Children map[string]*wireNode `json:"children,omitempty"`
 	Element  *wireNode            `json:"element,omitempty"`
+}
+
+// toWire converts a ModelNode tree into a wireNode tree.
+func toWire(n *ModelNode) *wireNode {
+	w := &wireNode{Kind: dominantKind(n).String()}
+	for _, dt := range n.DeclaredTypes() {
+		w.Types = append(w.Types, dt.String())
+	}
+	if o := n.Object(); o != nil && o.Len() > 0 {
+		w.Children = make(map[string]*wireNode, o.Len())
+		for name, child := range o.children {
+			w.Children[name] = toWire(child)
+		}
+	}
+	if a := n.Array(); a != nil && a.element != nil {
+		w.Element = toWire(a.element)
+	}
+	return w
 }
 
 // fromWire converts a decoded wireNode tree into a ModelNode tree.
@@ -176,8 +377,7 @@ type wireNode struct {
 // here: a "children" object on a LEAF or ARRAY wire node is IGNORED, not
 // rejected. The engine's decoder consults w.Children only in the OBJECT case,
 // so tightening it here would make this decoder reject schemas the engine
-// accepts. That divergence is the more dangerous of the two, so it is tracked
-// upstream (Cyoda/cyoda-go#464) rather than fixed unilaterally.
+// accepts.
 func fromWire(w *wireNode) (*ModelNode, error) {
 	var n *ModelNode
 
@@ -204,15 +404,16 @@ func fromWire(w *wireNode) (*ModelNode, error) {
 				return nil, fmt.Errorf("array element: %w", err)
 			}
 		}
-		// An ARRAY with no element in the wire form is preserved as an ARRAY
-		// with Element()==nil — the unobserved-element seed shape. It must not
-		// be normalised into an empty leaf; see [NewArrayNode].
 		n = NewArrayNode(elem)
 
 	case "LEAF":
-		n = &ModelNode{
-			kind:  KindLeaf,
-			types: NewTypeSet(),
+		// A LEAF whose only type is NULL declares no kind: it is the nullable
+		// marker, and AddScalarTypes below records it as such. A LEAF with no
+		// types at all is an empty scalar branch, which is a different thing,
+		// so it is established here rather than left to the loop.
+		n = &ModelNode{branches: make(map[NodeKind]Branch, 1)}
+		if !onlyNull(w.Types) {
+			n.branches[KindLeaf] = &ScalarBranch{types: NewTypeSet()}
 		}
 
 	default:
@@ -224,10 +425,24 @@ func fromWire(w *wireNode) (*ModelNode, error) {
 		if !ok {
 			return nil, fmt.Errorf("unknown data type %q", name)
 		}
-		n.types.Add(dt)
+		n.AddScalarTypes(dt)
 	}
 
 	return n, nil
+}
+
+// onlyNull reports whether names is exactly the NULL marker — no concrete type
+// alongside it. Such a LEAF declares no kind.
+func onlyNull(names []string) bool {
+	if len(names) == 0 {
+		return false
+	}
+	for _, name := range names {
+		if name != Null.String() {
+			return false
+		}
+	}
+	return true
 }
 
 // UnmarshalModelNode decodes the persisted schema bytes of a model
@@ -243,6 +458,11 @@ func UnmarshalModelNode(data []byte) (*ModelNode, error) {
 		return nil, fmt.Errorf("failed to unmarshal schema: %w", err)
 	}
 	return fromWire(&w)
+}
+
+// MarshalModelNode encodes a [ModelNode] tree into the persisted schema bytes.
+func MarshalModelNode(n *ModelNode) ([]byte, error) {
+	return json.Marshal(toWire(n))
 }
 
 // FieldsMapFromSchema derives the flattened JSONPath -> FieldDescriptor
@@ -293,18 +513,18 @@ type cachedFields struct {
 //   - An array hop renders as "[*]" on the array's own path segment, never as
 //     an index: "$.tags[*]", "$.items[*].price".
 //   - IsArray is set only for a leaf reached directly as an array's element
-//     type (an ARRAY whose element is itself a KindLeaf). It is deliberately
-//     narrower than "anything under an array": neither "$.items[*].price"
-//     nor the self-descriptor of an object-or-scalar array element carries
-//     it. This matches the engine's flattening exactly — do not "generalise"
-//     it, because consumers key off the narrow meaning.
-//   - A KindObject node that also carries concrete (non-NULL) types emits a
-//     descriptor for its OWN path IN ADDITION to its children. This is the
-//     object-or-scalar shape, and dropping the self-descriptor turns every
-//     scalar comparison against such a path into a non-match.
-//   - A KindObject node whose only type is NULL emits no self-descriptor: NULL
-//     is the nullable marker, not a scalar observation, so the path stays a
-//     pure container.
+//     type (an array branch whose element carries only a scalar branch). It is
+//     deliberately narrower than "anything under an array": neither
+//     "$.items[*].price" nor the self-descriptor of an object-or-scalar array
+//     element carries it. This matches the engine's flattening exactly — do not
+//     "generalise" it, because consumers key off the narrow meaning.
+//   - A node that carries a scalar branch ALONGSIDE a container branch emits a
+//     descriptor for its OWN path IN ADDITION to the container's contents. This
+//     is the object-or-scalar shape, and dropping the self-descriptor turns
+//     every scalar comparison against such a path into a non-match.
+//   - A node observed only as null declares NULL at its own path. A container
+//     that is merely nullable emits no self-descriptor: null is the marker, not
+//     a scalar observation, so the path stays a pure container.
 //
 // The returned slice ALIASES the cache and is shared by every caller holding
 // this node, process-wide. Do not sort, append to, or otherwise mutate it;
@@ -335,7 +555,7 @@ func (n *ModelNode) fields() *cachedFields {
 	if cached := n.fieldCache.Load(); cached != nil {
 		return cached
 	}
-	// A concurrent SetChild cleared the cache again; the freshly built value
+	// A concurrent mutation cleared the cache again; the freshly built value
 	// is still a consistent snapshot, so return it rather than spin.
 	return cf
 }
@@ -354,80 +574,49 @@ func (n *ModelNode) buildFieldCache() *cachedFields {
 	return &cachedFields{list: list, byPath: byPath}
 }
 
-// concreteTypes returns ts's DataTypes with the NULL marker removed. A TypeSet
-// is either the NULL-only marker or a set of concrete types ([TypeSet.Add]
-// drops NULL once a concrete type is present), so this yields nil for a
-// nil/empty set or a NULL-only set, and the concrete types otherwise.
-//
-// It backs the object-node self-leaf emit: only a genuine object-or-scalar
-// polymorphism (a concrete scalar observed at an object path) becomes a
-// searchable leaf; a merely nullable object stays a pure container.
-func concreteTypes(ts *TypeSet) []DataType {
-	if ts == nil || ts.IsEmpty() {
-		return nil
-	}
-	all := ts.Types()
-	out := all[:0:0]
-	for _, dt := range all {
-		if dt == Null {
-			continue
-		}
-		out = append(out, dt)
-	}
-	return out
-}
-
 // collectFields walks the tree depth-first, appending a descriptor for every
 // searchable leaf. prefix is the JSONPath accumulated so far; inArray reports
 // whether the node's values are elements of an array.
 func collectFields(n *ModelNode, prefix string, inArray bool, out *[]FieldDescriptor) {
-	switch n.kind {
+	switch dominantKind(n) {
 	case KindLeaf:
 		*out = append(*out, FieldDescriptor{
 			Path:    prefix,
-			Types:   n.types.Types(), // Types() returns a copy
+			Types:   n.DeclaredTypes(),
 			IsArray: inArray,
 		})
 
 	case KindObject:
-		// A node observed as BOTH an object and a bare CONCRETE scalar (the
-		// polymorphic object-or-scalar shape the engine unions onto a
-		// KindObject node) carries a concrete TypeSet alongside its children.
-		// Emit a leaf for the object node's OWN path so the scalar-valued
-		// observations are directly searchable with a scalar operand — IN
-		// ADDITION to recursing into the children below, which is how the
-		// object-valued observations are reached. A PURE object (children
-		// only, empty TypeSet) emits nothing for itself: it has no scalar to
-		// compare against. A NULL-only TypeSet is the nullable marker, not a
-		// concrete observation, and likewise emits nothing.
-		if concrete := concreteTypes(n.types); len(concrete) > 0 {
+		if s := n.Scalar(); s != nil {
 			*out = append(*out, FieldDescriptor{
 				Path:    prefix,
-				Types:   concrete,
+				Types:   s.Types(),
 				IsArray: inArray,
 			})
 		}
-		keys := make([]string, 0, len(n.children))
-		for k := range n.children {
+		o := n.Object()
+		keys := make([]string, 0, o.Len())
+		for k := range o.children {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			collectFields(n.children[k], prefix+"."+k, false, out)
+			collectFields(o.children[k], prefix+"."+k, false, out)
 		}
 
 	case KindArray:
+		a := n.Array()
 		// An array whose element was never observed declares nothing. It must
 		// not emit an empty-typed leaf, which would match nothing while
 		// looking like a declared field.
-		if n.element == nil {
+		if a.element == nil {
 			return
 		}
 		arrayPath := prefix + "[*]"
-		if n.element.kind == KindLeaf {
+		if dominantKind(a.element) == KindLeaf {
 			*out = append(*out, FieldDescriptor{
 				Path:    arrayPath,
-				Types:   n.element.types.Types(),
+				Types:   a.element.DeclaredTypes(),
 				IsArray: true,
 			})
 			return
@@ -435,6 +624,6 @@ func collectFields(n *ModelNode, prefix string, inArray bool, out *[]FieldDescri
 		// Arrays of objects/arrays recurse under the "[*]" prefix. inArray is
 		// false for the nested fields: "$.items[*].price" is a scalar per
 		// item, not an array-valued field.
-		collectFields(n.element, arrayPath, false, out)
+		collectFields(a.element, arrayPath, false, out)
 	}
 }

@@ -420,38 +420,38 @@ func TestUnmarshalModelNodeShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UnmarshalModelNode: %v", err)
 	}
-	if root.Kind() != spi.KindObject {
-		t.Fatalf("root kind = %v, want KindObject", root.Kind())
+	if root.Object() == nil {
+		t.Fatalf("root kinds = %v, want the object branch", root.Kinds())
 	}
-	if got := len(root.Children()); got != 4 {
+	if got := root.Object().Len(); got != 4 {
 		t.Fatalf("root children = %d, want 4", got)
 	}
 
-	leaf := root.Child("leaf")
-	if leaf == nil || leaf.Kind() != spi.KindLeaf {
-		t.Fatalf("child leaf = %v, want a KindLeaf node", leaf)
+	leaf := root.Object().Child("leaf")
+	if leaf == nil || leaf.Scalar() == nil {
+		t.Fatalf("child leaf = %v, want a node carrying the scalar branch", leaf)
 	}
-	if types := leaf.Types().Types(); !typesEqual(types, []spi.DataType{spi.String}) {
+	if types := leaf.DeclaredTypes(); !typesEqual(types, []spi.DataType{spi.String}) {
 		t.Errorf("leaf types = %v, want [STRING]", types)
 	}
 
-	arr := root.Child("arr")
-	if arr == nil || arr.Kind() != spi.KindArray {
-		t.Fatalf("child arr = %v, want a KindArray node", arr)
+	arr := root.Object().Child("arr")
+	if arr == nil || arr.Array() == nil {
+		t.Fatalf("child arr = %v, want a node carrying the array branch", arr)
 	}
-	if arr.Element() == nil || arr.Element().Kind() != spi.KindLeaf {
-		t.Fatalf("arr element = %v, want a KindLeaf node", arr.Element())
+	if arr.Array().Element() == nil || arr.Array().Element().Scalar() == nil {
+		t.Fatalf("arr element = %v, want a node carrying the scalar branch", arr.Array().Element())
 	}
 
-	seed := root.Child("seed")
-	if seed == nil || seed.Kind() != spi.KindArray {
-		t.Fatalf("child seed = %v, want a KindArray node", seed)
+	seed := root.Object().Child("seed")
+	if seed == nil || seed.Array() == nil {
+		t.Fatalf("child seed = %v, want a node carrying the array branch", seed)
 	}
-	if seed.Element() != nil {
+	if seed.Array().Element() != nil {
 		t.Error("an ARRAY with no wire element must keep Element()==nil, not gain an empty leaf")
 	}
 
-	if root.Child("nope") != nil {
+	if root.Object().Child("nope") != nil {
 		t.Error("Child of an absent name must be nil")
 	}
 }
@@ -462,14 +462,14 @@ func TestChildrenIsACopy(t *testing.T) {
 	root := spi.NewObjectNode()
 	root.SetChild("a", spi.NewLeafNode(spi.String))
 
-	kids := root.Children()
+	kids := root.Object().Children()
 	delete(kids, "a")
 	kids["b"] = spi.NewLeafNode(spi.String)
 
-	if root.Child("a") == nil {
+	if root.Object().Child("a") == nil {
 		t.Error("deleting from the returned map must not remove the child")
 	}
-	if root.Child("b") != nil {
+	if root.Object().Child("b") != nil {
 		t.Error("adding to the returned map must not add a child")
 	}
 }

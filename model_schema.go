@@ -339,10 +339,17 @@ func dominantKind(n *ModelNode) NodeKind {
 }
 
 // wireNode is the JSON representation of a [ModelNode]. It is the persisted
-// format written by the engine; field names and the Kind spellings are fixed
+// format written by the engine; field names and the kind spellings are fixed
 // by that format and are not free to change here.
+//
+// "kind" and "kinds" are the same record at two widths. A node with at most
+// one branch writes "kind", which is what every model on disk already says,
+// so nearly every node serialises byte-identically and there is no migration.
+// A node declaring more than one kind writes "kinds", because a single label
+// could only ever name one of them.
 type wireNode struct {
-	Kind     string               `json:"kind"`
+	Kind     string               `json:"kind,omitempty"`
+	Kinds    []string             `json:"kinds,omitempty"`
 	Types    []string             `json:"types,omitempty"`
 	Children map[string]*wireNode `json:"children,omitempty"`
 	Element  *wireNode            `json:"element,omitempty"`
@@ -350,7 +357,22 @@ type wireNode struct {
 
 // toWire converts a ModelNode tree into a wireNode tree.
 func toWire(n *ModelNode) *wireNode {
-	w := &wireNode{Kind: dominantKind(n).String()}
+	w := &wireNode{}
+
+	kinds := n.Kinds()
+	if len(kinds) > 1 {
+		w.Kinds = make([]string, 0, len(kinds))
+		for _, k := range kinds {
+			w.Kinds = append(w.Kinds, k.String())
+		}
+	} else if len(kinds) == 1 {
+		w.Kind = kinds[0].String()
+	} else {
+		// A node that declares no kind is the nullable marker, and LEAF with a
+		// lone NULL is how it has always been spelled.
+		w.Kind = KindLeaf.String()
+	}
+
 	for _, dt := range n.DeclaredTypes() {
 		w.Types = append(w.Types, dt.String())
 	}
@@ -368,22 +390,77 @@ func toWire(n *ModelNode) *wireNode {
 
 // fromWire converts a decoded wireNode tree into a ModelNode tree.
 //
-// Unknown kinds and unknown type names are errors rather than skipped entries.
-// Silently dropping either would produce a structurally valid tree that
-// under-declares types, and an under-declared leaf comparison matches nothing
-// — a wrong answer with no error, which is worse than refusing to search.
+// Decoding is payload-driven as well as label-driven: a branch is restored
+// because the node names it OR because the payload carries it. That is what
+// lets a model persisted under the old single-label spelling come back whole.
+// A field observed as both an object and an array was written as
+// {"kind":"OBJECT", …, "element":…} — the label named one branch and the
+// payload held both — so reading the label alone dropped the array branch on
+// the first read back, and a predicate on it then declared no type and matched
+// nothing: fewer rows, no error.
 //
-// One inherited gap, preserved deliberately for parity rather than fixed
-// here: a "children" object on a LEAF or ARRAY wire node is IGNORED, not
-// rejected. The engine's decoder consults w.Children only in the OBJECT case,
-// so tightening it here would make this decoder reject schemas the engine
-// accepts.
+// Unknown kinds and unknown type names are errors rather than skipped entries,
+// and so is a node that ends up declaring nothing at all. Silently dropping
+// any of them would produce a structurally valid tree that under-declares
+// types, which is a wrong answer with no error — worse than refusing to search.
 func fromWire(w *wireNode) (*ModelNode, error) {
-	var n *ModelNode
+	names := w.Kinds
+	if len(names) == 0 && w.Kind != "" {
+		names = []string{w.Kind}
+	}
+	if len(names) == 0 {
+		// The payload can only ADD branches to the ones a node names; it
+		// cannot stand in for the record entirely. A node that names no kind
+		// was not written by the engine, and guessing its shape from whatever
+		// keys happen to be present would accept a schema nobody defined.
+		return nil, fmt.Errorf("unknown node kind %q", w.Kind)
+	}
 
-	switch w.Kind {
-	case "OBJECT":
-		n = NewObjectNode()
+	var named [len(allKinds)]bool
+	for _, name := range names {
+		switch name {
+		case KindLeaf.String():
+			named[KindLeaf] = true
+		case KindObject.String():
+			named[KindObject] = true
+		case KindArray.String():
+			named[KindArray] = true
+		default:
+			return nil, fmt.Errorf("unknown node kind %q", name)
+		}
+	}
+
+	nullable := false
+	concrete := make([]DataType, 0, len(w.Types))
+	for _, name := range w.Types {
+		dt, ok := ParseDataType(name)
+		if !ok {
+			return nil, fmt.Errorf("unknown data type %q", name)
+		}
+		if dt == Null {
+			nullable = true
+			continue
+		}
+		concrete = append(concrete, dt)
+	}
+
+	n := &ModelNode{branches: make(map[NodeKind]Branch, len(names))}
+
+	// The scalar branch. A named LEAF whose only type is the NULL marker is the
+	// one ambiguous spelling, and it resolves to the branchless marker: a
+	// scalar branch never holds NULL, so NULL standing alone cannot be one.
+	if len(concrete) > 0 || (named[KindLeaf] && !nullable) {
+		n.AddScalarTypes(concrete...)
+		if n.Scalar() == nil {
+			n.branches[KindLeaf] = &ScalarBranch{types: NewTypeSet()}
+		}
+	}
+	if nullable {
+		n.SetNullable()
+	}
+
+	if named[KindObject] || len(w.Children) > 0 {
+		n.branches[KindObject] = &ObjectBranch{children: make(map[string]*ModelNode, len(w.Children))}
 		for name, wChild := range w.Children {
 			if wChild == nil {
 				return nil, fmt.Errorf("child %q: null node", name)
@@ -394,8 +471,12 @@ func fromWire(w *wireNode) (*ModelNode, error) {
 			}
 			n.SetChild(name, child)
 		}
+	}
 
-	case "ARRAY":
+	if named[KindArray] || w.Element != nil {
+		// An array with no element in the wire form is preserved as an array
+		// branch with Element()==nil — the unobserved-element seed shape. It
+		// must not be normalised into an empty leaf; see [ArrayBranch.Element].
 		var elem *ModelNode
 		if w.Element != nil {
 			var err error
@@ -404,45 +485,13 @@ func fromWire(w *wireNode) (*ModelNode, error) {
 				return nil, fmt.Errorf("array element: %w", err)
 			}
 		}
-		n = NewArrayNode(elem)
-
-	case "LEAF":
-		// A LEAF whose only type is NULL declares no kind: it is the nullable
-		// marker, and AddScalarTypes below records it as such. A LEAF with no
-		// types at all is an empty scalar branch, which is a different thing,
-		// so it is established here rather than left to the loop.
-		n = &ModelNode{branches: make(map[NodeKind]Branch, 1)}
-		if !onlyNull(w.Types) {
-			n.branches[KindLeaf] = &ScalarBranch{types: NewTypeSet()}
-		}
-
-	default:
-		return nil, fmt.Errorf("unknown node kind %q", w.Kind)
+		n.branches[KindArray] = &ArrayBranch{element: elem}
 	}
 
-	for _, name := range w.Types {
-		dt, ok := ParseDataType(name)
-		if !ok {
-			return nil, fmt.Errorf("unknown data type %q", name)
-		}
-		n.AddScalarTypes(dt)
+	if len(n.branches) == 0 && !n.nullable {
+		return nil, fmt.Errorf("node declares no kind and carries no payload")
 	}
-
 	return n, nil
-}
-
-// onlyNull reports whether names is exactly the NULL marker — no concrete type
-// alongside it. Such a LEAF declares no kind.
-func onlyNull(names []string) bool {
-	if len(names) == 0 {
-		return false
-	}
-	for _, name := range names {
-		if name != Null.String() {
-			return false
-		}
-	}
-	return true
 }
 
 // UnmarshalModelNode decodes the persisted schema bytes of a model

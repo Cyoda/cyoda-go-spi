@@ -241,6 +241,33 @@ func (n *ModelNode) DeclaredTypes() []DataType {
 	return nil
 }
 
+// DeclareKind records that the path was observed as kind k, establishing an
+// empty branch when the node does not already carry one, and leaving an
+// existing branch untouched.
+//
+// A branch can be present and empty — an object with no children, an array
+// whose element was never observed, a scalar branch with no type yet. Nothing
+// in the payload distinguishes such a node from one never observed as that
+// kind at all; only the kind record does, which is why the set is stored
+// rather than inferred from whichever payload keys happen to be populated.
+func (n *ModelNode) DeclareKind(k NodeKind) {
+	if _, ok := n.branches[k]; ok {
+		return
+	}
+	n.ensureBranches()
+	switch k {
+	case KindLeaf:
+		n.branches[KindLeaf] = &ScalarBranch{types: NewTypeSet()}
+	case KindObject:
+		n.branches[KindObject] = &ObjectBranch{children: make(map[string]*ModelNode)}
+	case KindArray:
+		n.branches[KindArray] = &ArrayBranch{}
+	default:
+		return
+	}
+	n.fieldCache.Store(nil)
+}
+
 // AddScalarTypes records primitive observations at this path, establishing the
 // scalar branch if it does not exist. NULL among them is the nullable marker
 // and is routed to [ModelNode.SetNullable]; a concrete type clears the marker,

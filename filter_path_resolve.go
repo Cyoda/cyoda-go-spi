@@ -21,6 +21,12 @@ import "github.com/tidwall/gjson"
 //   - A missing key contributes one non-existent result rather than being
 //     dropped, so a presence test (e.g. IS_NULL) can see it.
 //
+// Data whose root is a JSON array resolves every hop to a non-existent
+// result: entity data is always a JSON document (a sample-data array body is
+// a collection of documents, not one document), so a root array is not a
+// shape entity data ever takes, and failing every hop closed is the correct
+// answer regardless.
+//
 // Each hop is resolved with [gjson.Result.Get], never a joined path string:
 // gjson resolves a numeric path segment against an array as an index, which
 // is exactly the data-driven behaviour this function must not exhibit. A hop

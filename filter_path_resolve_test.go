@@ -20,6 +20,11 @@ func TestResolvePath(t *testing.T) {
 		{"bare over array", `{"a":["A","B"]}`, "a", []string{`["A","B"]`}},
 		{"bare over empty array", `{"a":[]}`, "a", []string{`[]`}},
 		{"bare over absent", `{}`, "a", []string{"<absent>"}},
+		// A JSON null is a present value, not an absent one — Exists() is
+		// true and Type is Null. resultText renders it as the empty string
+		// (r.String() for a Null result), which is what distinguishes
+		// present-but-null from absent when a caller checks r.Exists().
+		{"bare over null", `{"a":null}`, "a", []string{""}},
 
 		// A wildcard addresses the elements, never the array, and never
 		// wraps a scalar into a one-element sequence.
@@ -35,10 +40,16 @@ func TestResolvePath(t *testing.T) {
 		{"index past end", `{"a":["A"]}`, "a[3]", []string{"<absent>"}},
 		{"index over empty array", `{"a":[]}`, "a[0]", []string{"<absent>"}},
 		{"index over scalar", `{"a":"A"}`, "a[0]", []string{"<absent>"}},
+		{"index over null", `{"a":null}`, "a[0]", []string{"<absent>"}},
+		{"index over absent field", `{}`, "a[0]", []string{"<absent>"}},
 
 		// A dotted numeric segment is a field name, not an index.
 		{"numeric field name", `{"obj":{"0":"Z"}}`, "obj.0", []string{"Z"}},
 		{"numeric segment is not an index", `{"tags":["A"]}`, "tags.0", []string{"<absent>"}},
+
+		// An ordinary non-numeric object-to-object hop, not preceded by a
+		// wildcard and not digit-named.
+		{"nested object field", `{"a":{"b":"B"}}`, "a.b", []string{"B"}},
 
 		// Nested hops flatten; an element missing the key contributes an
 		// absent value rather than being dropped, so IS_NULL can see it.
@@ -47,6 +58,7 @@ func TestResolvePath(t *testing.T) {
 		{"two hops", `{"o":[{"l":[{"s":"A"},{"s":"B"}]},{"l":[{"s":"C"}]}]}`, "o[*].l[*].s", []string{"A", "B", "C"}},
 		{"chained subscripts", `{"m":[["A","B"],["C"]]}`, "m[*][*]", []string{"A", "B", "C"}},
 		{"chained index", `{"m":[["A","B"],["C"]]}`, "m[0][1]", []string{"B"}},
+		{"mixed chained subscripts", `{"a":[[{"b":"B"}]]}`, "a[0][*].b", []string{"B"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

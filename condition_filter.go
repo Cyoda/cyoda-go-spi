@@ -552,19 +552,11 @@ func isPathNameByte(b byte) bool {
 // "accepted here" and "resolvable there" stay the same question.
 // TestValidateCondition_PathGrammarMatchesSPI (cyoda-go) pins the two against
 // each other.
+//
+// The digit-run half of this delegates to [IsArrayIndex] rather than scanning
+// its own copy — see that function's doc for why.
 func isSupportedSubscript(inner string) bool {
-	if inner == "*" {
-		return true
-	}
-	if inner == "" {
-		return false
-	}
-	for i := 0; i < len(inner); i++ {
-		if inner[i] < '0' || inner[i] > '9' {
-			return false
-		}
-	}
-	return true
+	return inner == "*" || IsArrayIndex(inner)
 }
 
 // disallowedCharReason renders the diagnostic for the first rune of s, which

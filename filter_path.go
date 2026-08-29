@@ -120,25 +120,29 @@ func parsePathSub(inner string) (PathSub, bool) {
 	if inner == "*" {
 		return PathSub{Wildcard: true}, true
 	}
-	if !isDigitsOnly(inner) {
+	if !IsArrayIndex(inner) {
 		return PathSub{}, false
 	}
 	idx, err := strconv.Atoi(inner)
 	if err != nil {
-		// Unreachable for a digits-only string short enough to appear in a
-		// path, but Atoi's error is cheaper to handle than to rule out.
+		// IsArrayIndex guarantees a non-empty ASCII-digit run, but not that it
+		// fits an int: a subscript of 19+ digits overflows here. Atoi's error
+		// is the cheapest way to catch that, and rejecting is the correct
+		// (safe, over-rejecting) response — there is no entity array long
+		// enough for such an index to ever be meaningful.
 		return PathSub{}, false
 	}
 	return PathSub{Index: idx}, true
 }
 
-// isDigitsOnly reports whether s is a non-empty run of ASCII digits — the
-// canonical "is this a well-formed array index" predicate for a filter-path
-// subscript. Defined once, here, and kept unexported so every other spelling
-// of the same check (the wire-path scanner's isSupportedSubscript, and the
-// consuming repo's schema.IsArrayIndex) can be pointed at this one instead of
-// carrying its own copy.
-func isDigitsOnly(s string) bool {
+// IsArrayIndex reports whether s is a non-empty run of ASCII digits — the
+// single, canonical "is this a well-formed array index" predicate for a
+// filter-path subscript body (the text between "[" and "]", once the
+// wildcard "*" case has been ruled out). Every other place in this module and
+// its consumers that needs the same check delegates here instead of scanning
+// its own copy: [isSupportedSubscript] in condition_filter.go does, and the
+// consuming repo's schema.IsArrayIndex is intended to be pointed at this one.
+func IsArrayIndex(s string) bool {
 	if s == "" {
 		return false
 	}

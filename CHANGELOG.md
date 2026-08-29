@@ -14,6 +14,33 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **A schema node holds the set of kinds it was observed as.** `ModelNode.Kind()`,
+  `.Types()`, `.Element()` and `.Children()` are replaced by `.Scalar()`,
+  `.Object()`, `.Array()` — each returning that branch or nil — plus `.Kinds()`,
+  `.Branch()`, `.IsPolymorphic()`, `.Nullable()` and `.DeclaredTypes()`. A single
+  label could only ever name one of three independent payload slots, so any
+  reader that dispatched on it lost the others.
+
+  Nullability is a flag rather than a `NULL` member of a type set, recorded only
+  while the node carries no scalar branch — the collapse `TypeSet.Add` already
+  applies when it drops `NULL` in the presence of a concrete type. A path
+  observed only as `null` therefore declares no kind at all.
+
+  The persisted form gains `"kinds"`. A node with at most one branch still
+  writes `"kind"`, so every monomorphic node — nullable or not — serialises
+  byte-identically to before and there is no migration. Decoding accepts both
+  spellings.
+
+  `ArrayInfo` is gone: `ObserveElement`, `Elements` and `IsUniform` had no
+  caller, and the live half — one observed maximum width — is now
+  `ArrayBranch.MaxWidth`, set through `ModelNode.ObserveArrayWidth`.
+
+  The mutators an engine needs to build a tree (`AddScalarTypes`, `SetNullable`,
+  `SetChild`, `SetElement`, `ObserveArrayWidth`) are exported. Deciding what a
+  model's schema becomes is still the engine's job alone; that split is a
+  statement of responsibility, not a lock, exactly as it already is for
+  `TypeSet.Add`.
+
 - **`ConditionToFilter` requires a condition's `jsonPath` to be JSON Path
   nomenclature: the `$.` leader is now mandatory.** This is a behaviour
   tightening on accepted input. Previously the leader was optional —
@@ -575,6 +602,17 @@ MAINTAINING.md.
   validate first — the engine does — see no change.
 
 ### Fixed
+
+- **`FieldsMapFromSchema` no longer drops a declared path on a field observed as
+  more than one kind.** Both the decoder and the flattening dispatched on the
+  node's single `kind` label, so the array branch of an object-and-array union
+  and the scalar branch of an array-and-scalar union were discarded — the label
+  named one branch while the payload carried both. A predicate on a dropped path
+  then found no declared type and matched nothing, so a backend that executes
+  searches itself answered with fewer rows and no error at all. Decoding is
+  payload-driven as well as label-driven now, and the flattening walks the
+  branch set — which is what the engine's own flattening already did, so this
+  closes a divergence between the two readers of the same bytes.
 
 - `UnmarshalModelNode` rejects a JSON-null child node with an error. The
   equivalent decoder this was derived from dereferences the nil and panics,

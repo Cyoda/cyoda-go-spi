@@ -95,18 +95,15 @@ type Filter struct {
 	//
 	// # Grammar
 	//
-	// A non-empty Path is a dotted identifier:
+	//	path      = segment ( "." segment )*
+	//	segment   = name subscript*
+	//	name      = 1*( ALPHA / DIGIT / "_" / "-" )   ; ASCII only
+	//	subscript = "[" ( "*" / 1*DIGIT ) "]"
 	//
-	//	path    = segment ( "." segment )*
-	//	segment = 1*( ALPHA / DIGIT / "_" / "-" )
-	//
-	// ASCII only. At least one segment; no empty segment (so no leading dot
-	// and no ".."), no trailing dot, and no other character at all — notably
-	// no whitespace, quote, backslash, semicolon, slash, asterisk, bracket,
-	// control byte, or non-ASCII rune. Bracketed array subscripts and
-	// wildcards ("tags[0]", "tags[*]") are outside the grammar; an array
-	// position is addressed as an ordinary numeric segment ("tags.0"), which
-	// is what [ConditionToFilter] produces for an ArrayCondition.
+	// This is the wire jsonPath grammar with the "$." leader removed. A
+	// bracket is an array subscript; a dotted numeric segment is a field
+	// whose name is that digit string. The two address different values and
+	// a backend MUST NOT collapse them — see docs/cloud-parity/path-grammar.md.
 	//
 	// The grammar is deliberately narrower than any backend's native JSON
 	// path syntax. It is the intersection every backend can serve, and on
@@ -116,6 +113,10 @@ type Filter struct {
 	//
 	// An EMPTY Path is legal and is not checked: tree operators (FilterAnd,
 	// FilterOr) and any leaf that addresses no field carry one.
+	//
+	// Parse it with ParseFilterPath and validate it with ValidateFilterPath.
+	// A second, independent spelling of the grammar is how a backend admits a
+	// form no resolver serves.
 	//
 	// # Rejection is mandatory
 	//

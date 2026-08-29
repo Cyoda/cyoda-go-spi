@@ -464,8 +464,8 @@ func fromWire(w *wireNode) (*ModelNode, error) {
 	// the branchless marker: a scalar branch never holds NULL, so NULL standing
 	// alone cannot be one. Where LEAF is named alongside another kind there is
 	// no ambiguity, and a kind the node names is never dropped.
-	soleLeaf := named[KindLeaf] && len(names) == 1
-	if len(concrete) > 0 || (named[KindLeaf] && !(nullable && soleLeaf)) {
+	isNullMarker := named[KindLeaf] && len(names) == 1 && nullable && len(concrete) == 0
+	if len(concrete) > 0 || (named[KindLeaf] && !isNullMarker) {
 		n.AddScalarTypes(concrete...)
 		if n.Scalar() == nil {
 			n.branches[KindLeaf] = &ScalarBranch{types: NewTypeSet()}

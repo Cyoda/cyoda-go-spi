@@ -20,6 +20,9 @@ import (
 // may decide what a model's schema becomes, while every executor must agree
 // on how to read it. The mutators below exist so the engine can build a tree
 // out of this type; the split is a statement of responsibility, not a lock.
+// What it does not license is mutating a node another component handed you: a
+// tree reaches its reader through a cache and is shared, so build or decode one
+// fully, then treat it as read-only.
 //
 // Read it as a contract, not as a helper: the key convention below is shared
 // with the engine, and a deviation does not fail loudly. A path that is
@@ -343,6 +346,11 @@ func (n *ModelNode) ObserveArrayWidth(width int) {
 	if width > a.maxWidth {
 		a.maxWidth = width
 	}
+	// maxWidth reaches FieldDescriptor.MaxWidth, so this drops the cached
+	// flattening like every other mutator. No current caller reads Fields()
+	// before setting the width, but the omission would be a silent-staleness
+	// trap on a type that plugins hold.
+	n.fieldCache.Store(nil)
 }
 
 func (n *ModelNode) ensureBranches() {
@@ -657,7 +665,7 @@ func collectFields(n *ModelNode, prefix string, inArray bool, out *[]FieldDescri
 	// to the container's contents. A node that declares no kind at all is the
 	// nullable marker: it declares NULL at its own path. A container that is
 	// merely nullable declares no scalar and emits nothing here.
-	if s := n.Scalar(); s != nil && (len(s.types.Types()) > 0 || len(n.branches) == 1) {
+	if s := n.Scalar(); s != nil && (!s.types.IsEmpty() || len(n.branches) == 1) {
 		*out = append(*out, FieldDescriptor{
 			Path:    prefix,
 			Types:   s.Types(),

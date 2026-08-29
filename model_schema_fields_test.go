@@ -147,3 +147,34 @@ func keysOf(m map[string]FieldDescriptor) []string {
 	}
 	return out
 }
+
+// A scalar branch that declares no types is not a searchable leaf on a node
+// that also declares a container — the same reasoning the array arm applies to
+// an unobserved element: an empty-typed descriptor matches nothing while
+// looking like a declared field. A node that declares ONLY that branch still
+// emits it, which is what a bare {"kind":"LEAF"} has always meant.
+func TestFieldsMap_EmptyScalarBranchBesideAContainer(t *testing.T) {
+	both := NewObjectNode()
+	both.SetChild("k", NewLeafNode(String))
+	both.DeclareKind(KindLeaf)
+
+	root := NewObjectNode()
+	root.SetChild("both", both)
+
+	got := root.FieldsMap()
+	if d, ok := got["$.both"]; ok {
+		t.Errorf("an empty scalar branch beside a container declares no leaf; got %+v", d)
+	}
+	if _, ok := got["$.both.k"]; !ok {
+		t.Error("its children are still declared")
+	}
+
+	// Alone, it is the bare LEAF node, and it keeps its descriptor.
+	only := &ModelNode{}
+	only.DeclareKind(KindLeaf)
+	solo := NewObjectNode()
+	solo.SetChild("only", only)
+	if _, ok := solo.FieldsMap()["$.only"]; !ok {
+		t.Error("a node declaring only the scalar branch still declares a leaf")
+	}
+}

@@ -258,6 +258,9 @@ func (n *ModelNode) DeclareKind(k NodeKind) {
 	switch k {
 	case KindLeaf:
 		n.branches[KindLeaf] = &ScalarBranch{types: NewTypeSet()}
+		// A scalar declaration admits null on its own, so the marker has
+		// nothing left to record — the same collapse AddScalarTypes applies.
+		n.nullable = false
 	case KindObject:
 		n.branches[KindObject] = &ObjectBranch{children: make(map[string]*ModelNode)}
 	case KindArray:
@@ -456,10 +459,13 @@ func fromWire(w *wireNode) (*ModelNode, error) {
 
 	n := &ModelNode{branches: make(map[NodeKind]Branch, len(names))}
 
-	// The scalar branch. A named LEAF whose only type is the NULL marker is the
-	// one ambiguous spelling, and it resolves to the branchless marker: a
-	// scalar branch never holds NULL, so NULL standing alone cannot be one.
-	if len(concrete) > 0 || (named[KindLeaf] && !nullable) {
+	// The scalar branch. A node whose ONLY named kind is LEAF and whose only
+	// type is the NULL marker is the one ambiguous spelling, and it resolves to
+	// the branchless marker: a scalar branch never holds NULL, so NULL standing
+	// alone cannot be one. Where LEAF is named alongside another kind there is
+	// no ambiguity, and a kind the node names is never dropped.
+	soleLeaf := named[KindLeaf] && len(names) == 1
+	if len(concrete) > 0 || (named[KindLeaf] && !(nullable && soleLeaf)) {
 		n.AddScalarTypes(concrete...)
 		if n.Scalar() == nil {
 			n.branches[KindLeaf] = &ScalarBranch{types: NewTypeSet()}
@@ -580,7 +586,12 @@ type cachedFields struct {
 //   - A node that carries a scalar branch ALONGSIDE a container branch emits a
 //     descriptor for its OWN path IN ADDITION to the container's contents. This
 //     is the object-or-scalar shape, and dropping the self-descriptor turns
-//     every scalar comparison against such a path into a non-match.
+//     every scalar comparison against such a path into a non-match. The scalar
+//     branch must declare a type for that: an empty one beside a container
+//     emits nothing, for the same reason an unobserved array element does — a
+//     descriptor with no types matches nothing while looking like a declared
+//     field. A node declaring ONLY an empty scalar branch still emits it, which
+//     is what a bare {"kind":"LEAF"} has always meant.
 //   - A node observed only as null declares NULL at its own path. A container
 //     that is merely nullable emits no self-descriptor: null is the marker, not
 //     a scalar observation, so the path stays a pure container.
@@ -646,7 +657,7 @@ func collectFields(n *ModelNode, prefix string, inArray bool, out *[]FieldDescri
 	// to the container's contents. A node that declares no kind at all is the
 	// nullable marker: it declares NULL at its own path. A container that is
 	// merely nullable declares no scalar and emits nothing here.
-	if s := n.Scalar(); s != nil {
+	if s := n.Scalar(); s != nil && (len(s.types.Types()) > 0 || len(n.branches) == 1) {
 		*out = append(*out, FieldDescriptor{
 			Path:    prefix,
 			Types:   s.Types(),

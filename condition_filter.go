@@ -255,7 +255,7 @@ func desugarArrayElementPath(jsonPath string, i int) string {
 			} else {
 				last.Subs = append(last.Subs, PathSub{Index: i})
 			}
-			return jsonPathLeader + renderPathHops(hops)
+			return jsonPathLeader + renderPathHops(hops, false)
 		}
 	}
 	if strings.HasSuffix(jsonPath, "[*]") {
@@ -264,11 +264,21 @@ func desugarArrayElementPath(jsonPath string, i int) string {
 	return jsonPath + fmt.Sprintf("[%d]", i)
 }
 
-// renderPathHops serializes hops back into the dotted "name[sub][sub]." wire
-// form ParseFilterPath parses, with no "$." leader — the inverse of
-// [ParseFilterPath] restricted to what [desugarArrayElementPath] needs: every
-// subscript rendered as either "[*]" (Wildcard) or "[N]" (a resolved index).
-func renderPathHops(hops []PathHop) string {
+// renderPathHops serializes hops back into the dotted "name[sub][sub]" wire
+// form [ParseFilterPath] parses, with no "$." leader — the module's one
+// hops-to-string serializer, the inverse of ParseFilterPath.
+//
+// foldToWildcard picks which of the two callers' renderings this produces:
+//   - false (desugarArrayElementPath): each subscript keeps its own form —
+//     "[*]" for Wildcard, "[N]" for a resolved Index.
+//   - true (foldSubscriptWildcards): every subscript renders as "[*]"
+//     regardless of its actual form, folding a positional subscript to the
+//     wildcard the fields-map records an array's element type under.
+//
+// The two used to be separate builders differing only in this one choice;
+// collapsed here so there is exactly one place that turns hops back into
+// text, matching the rest of the module's one-definition-per-rule discipline.
+func renderPathHops(hops []PathHop, foldToWildcard bool) string {
 	var b strings.Builder
 	for i, hop := range hops {
 		if i > 0 {
@@ -276,7 +286,7 @@ func renderPathHops(hops []PathHop) string {
 		}
 		b.WriteString(hop.Name)
 		for _, sub := range hop.Subs {
-			if sub.Wildcard {
+			if foldToWildcard || sub.Wildcard {
 				b.WriteString("[*]")
 			} else {
 				fmt.Fprintf(&b, "[%d]", sub.Index)
@@ -461,18 +471,7 @@ func foldSubscriptWildcards(key string) string {
 	if err != nil {
 		return key
 	}
-	var b strings.Builder
-	b.WriteString(jsonPathLeader)
-	for i, hop := range hops {
-		if i > 0 {
-			b.WriteByte('.')
-		}
-		b.WriteString(hop.Name)
-		for range hop.Subs {
-			b.WriteString("[*]")
-		}
-	}
-	return b.String()
+	return jsonPathLeader + renderPathHops(hops, true)
 }
 
 // NormalisePath returns raw in the "$."-prefixed convention, idempotently.

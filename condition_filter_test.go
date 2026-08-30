@@ -1742,6 +1742,22 @@ func TestDesugarCondition_AllNullIsTautology(t *testing.T) {
 	}
 }
 
+// TestDesugarCondition_EmptyValuesIsTautology pins a case distinct from
+// TestDesugarCondition_AllNullIsTautology above: Values is a literally EMPTY
+// slice (zero elements), not a slice of nils. The loop over c.Values simply
+// never executes either way, so both collapse to the same empty AND — but
+// that equivalence is a property of the range-over-nothing loop, not
+// something the all-null case exercises, and was unpinned before this test.
+func TestDesugarCondition_EmptyValuesIsTautology(t *testing.T) {
+	got := spi.DesugarCondition(&predicate.ArrayCondition{
+		JsonPath: "$.tags[*]", Values: []any{},
+	})
+	g, ok := got.(*predicate.GroupCondition)
+	if !ok || g.Operator != "AND" || len(g.Conditions) != 0 {
+		t.Fatalf("want an empty AND, got %#v", got)
+	}
+}
+
 func TestDesugarCondition_RecursesIntoGroups(t *testing.T) {
 	got := spi.DesugarCondition(&predicate.GroupCondition{
 		Operator: "OR",

@@ -87,6 +87,22 @@ func prepareNode(f Filter) preparedNode {
 	// Leaf — including a zero-Op child, which ExpandLeaf's default arm rejects.
 	n := preparedNode{op: f.Op, source: f.Source, path: f.Path}
 	if f.Source == SourceData {
+		if f.Path == "" {
+			// An empty Path is legal ONLY for a tree operator (FilterAnd /
+			// FilterOr, handled in the switch above and never reaching this
+			// branch) — it is how Filter.Path spells "addresses no field at
+			// all". A LEAF with an empty Path addresses no field either, so
+			// it must never resolve to anything, exactly like a path that
+			// fails to parse below: leaving hops nil and expanded false is
+			// what makes that so. Without this guard, ParseFilterPath("")
+			// succeeds with a nil hop slice — legal input, by design, for
+			// the tree-operator case — and ResolvePath(data, nil) resolves
+			// that nil hop slice to the parsed ROOT DOCUMENT, so a
+			// SourceData leaf with an empty Path matched every entity via a
+			// presence test and matched via equality whenever the operand
+			// happened to compare equal to the document's own gjson.Result.
+			return n
+		}
 		hops, err := ParseFilterPath(f.Path)
 		if err != nil {
 			// A path that fails to parse must never resolve to anything: leave

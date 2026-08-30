@@ -139,23 +139,29 @@ func parsePathSub(inner string) (PathSub, bool) {
 	if !IsArrayIndex(inner) {
 		return PathSub{}, false
 	}
-	idx, err := strconv.Atoi(inner)
+	idx, err := strconv.ParseInt(inner, 10, 32)
 	if err != nil {
-		// IsArrayIndex guarantees a non-empty ASCII-digit run, but not that it
-		// fits an int: a subscript of 19+ digits overflows here. Atoi's error
-		// is the cheapest way to catch that, and rejecting is the correct
-		// (safe, over-rejecting) response — there is no entity array long
-		// enough for such an index to ever be meaningful.
+		// IsArrayIndex guarantees a non-empty ASCII-digit run, but not that
+		// it fits the bound: ParseInt's bitSize-32 form rejects anything
+		// above math.MaxInt32, not just a run wide enough to overflow int64.
+		// int32 — not Go's int (int64 on every supported platform) — is the
+		// deliberate bound: it is the intersection every in-tree backend can
+		// address. PostgreSQL renders a positional index as a jsonb operand
+		// that must fit int32 or the query fails to parse; sqlite and the
+		// memory kernel both tolerate the wider range, so int32 is the
+		// binding constraint. Rejecting is the correct (safe, over-rejecting)
+		// response either way — there is no entity array long enough for
+		// such an index to ever be meaningful.
 		return PathSub{}, false
 	}
-	return PathSub{Index: idx}, true
+	return PathSub{Index: int(idx)}, true
 }
 
 // IsArrayIndex reports whether s is a non-empty run of ASCII digits — the
 // digit-class half of "is this a well-formed array index" for a filter-path
 // subscript body (the text between "[" and "]", once the wildcard "*" case
 // has been ruled out). It says nothing about magnitude: [parsePathSub] is the
-// full predicate, checking this and then that the run fits an int, and
+// full predicate, checking this and then that the run fits an int32, and
 // [scanPathHops] — the one scan loop both [ParseFilterPath] and
 // scanWirePathBody (condition_filter.go) build on — calls parsePathSub, not
 // this function directly, so the wire boundary and the parser agree on the

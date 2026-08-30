@@ -214,6 +214,64 @@ func TestPreparedFilter_ResolvesByPathSyntax(t *testing.T) {
 // before any hop is appended — so together the two rows cover parse failure
 // on both sides of that boundary, even though only the first is what makes
 // this test discriminating.
+// TestPreparedFilter_EmptyLeafPathNeverResolves pins that an empty Path on
+// a SourceData (or SourceMeta) LEAF addresses nothing, the same as a
+// malformed path — NOT the whole document. Filter.Path's doc comment says an
+// empty Path "is legal and is not checked" because the AND/OR tree operators
+// carry one instead of a leaf condition; that legality is about the tree
+// shape, not a license for a leaf to mean "match the root". Before this fix,
+// ParseFilterPath("") returned nil hops with no error, and ResolvePath with
+// nil hops resolves to the parsed root document — so a SourceData leaf with
+// an empty Path matched every entity via NOT_NULL, and even matched via
+// EQUALS whenever the operand happened to compare equal to the root's own
+// gjson.Result. This is not reachable through HTTP or gRPC today (every
+// transport requires a leaf's jsonPath/Path to be non-empty before it ever
+// reaches a Filter), but a caller constructing a Filter directly must not
+// get an answer-instead-of-refuse leaf.
+func TestPreparedFilter_EmptyLeafPathNeverResolves(t *testing.T) {
+	cases := []struct {
+		name string
+		doc  string
+		f    spi.Filter
+	}{
+		{"empty data path, presence test", `{"a":"x"}`,
+			spi.Filter{Op: spi.FilterNotNull, Path: "", Source: spi.SourceData}},
+		{"empty data path, string equality", `{"a":"x"}`,
+			spi.Filter{Op: spi.FilterEq, Path: "", Source: spi.SourceData,
+				Value: "x", Declared: []spi.DataType{spi.String}}},
+		// SourceMeta already resolved an empty Path to "nothing" before this
+		// fix — extractFilterMetaValue's switch has no "" case, so it falls
+		// to not-found — but pinned here so the SourceData fix above is not
+		// read as having introduced an asymmetry between the two sources.
+		{"empty meta path, presence test", `{"a":"x"}`,
+			spi.Filter{Op: spi.FilterNotNull, Path: "", Source: spi.SourceMeta}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := spi.Prepare(tc.f).Match([]byte(tc.doc), spi.EntityMeta{}); got {
+				t.Errorf("Match(%s) on %+v = true, want false: an empty leaf path must never resolve to the root document", tc.doc, tc.f)
+			}
+		})
+	}
+}
+
+// TestPreparedFilter_EmptyTreeOperatorStillLegal is the positive control:
+// an AND/OR node legitimately carries an empty Path (it addresses no field
+// at all — Children carry the real leaves), and TestPreparedFilter_EmptyLeafPathNeverResolves's
+// fix must not have made an empty-Path tree node itself refuse to prepare or
+// match.
+func TestPreparedFilter_EmptyTreeOperatorStillLegal(t *testing.T) {
+	f := spi.Filter{
+		Op: spi.FilterAnd,
+		Children: []spi.Filter{
+			{Op: spi.FilterEq, Path: "a", Source: spi.SourceData, Value: "x", Declared: []spi.DataType{spi.String}},
+		},
+	}
+	if got := spi.Prepare(f).Match([]byte(`{"a":"x"}`), spi.EntityMeta{}); !got {
+		t.Errorf("Match on AND node with empty Path = false, want true: an empty Path on a tree operator stays legal")
+	}
+}
+
 func TestPreparedFilter_MalformedPathNeverResolves(t *testing.T) {
 	cases := []struct {
 		name string

@@ -22,6 +22,35 @@ func TestLessByOrder_TiebreakByEntityID(t *testing.T) {
 	}
 }
 
+// TestLessByOrder_EmptyDataPathNeverResolves pins the sort-side twin of
+// TestPreparedFilter_EmptyLeafPathNeverResolves (prepared_filter_test.go).
+// orderLeafValue resolves s.Path through ParseFilterPath + ResolvePath, same
+// as a leaf's Match. ParseFilterPath("") legitimately succeeds with a nil
+// hop slice (the tree-operator convention this SPI's Filter.Path shares),
+// so before this fix ResolvePath(data, nil) returned the parsed ROOT
+// DOCUMENT as the sort key for an OrderSpec carrying an empty Path — every
+// entity therefore "had" a value to sort by (the entity's own document),
+// rather than being treated as missing (nulls-last) the way an addressless
+// leaf must be.
+func TestLessByOrder_EmptyDataPathNeverResolves(t *testing.T) {
+	specs := []spi.OrderSpec{{Path: "", Source: spi.SourceData, Kind: spi.OrderText}}
+	// z sorts before a by raw JSON text ({"n":9} < {"n":5} lexically is
+	// false, so pick documents where a root-document comparison would give
+	// the OPPOSITE answer to "both absent, fall through to entity_id asc":
+	// entity "z" holds the lexically-SMALLER document, entity "a" the
+	// lexically-larger one. If the empty path still resolved to the root
+	// document, "z" would sort first (smaller document). Since it must
+	// instead resolve to nothing for both, the tiebreak is entity_id asc,
+	// so "a" sorts first.
+	a, z := ent("a", `{"n":9}`), ent("z", `{"n":1}`)
+	if !spi.LessByOrder(a, z, specs) {
+		t.Fatal("an empty data path must resolve to nothing (both missing ⇒ equal ⇒ entity_id tiebreak), not the root document — expected \"a\" (by id) to sort first")
+	}
+	if spi.LessByOrder(z, a, specs) {
+		t.Fatal("reversed order must not also report less")
+	}
+}
+
 func TestLessByOrder_NullsLast(t *testing.T) {
 	specs := []spi.OrderSpec{{Path: "n", Source: spi.SourceData, Kind: spi.OrderNumeric}}
 	present, missing := ent("a", `{"n":5}`), ent("b", `{}`)

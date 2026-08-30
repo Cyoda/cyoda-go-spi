@@ -329,7 +329,7 @@ MAINTAINING.md.
       path      = segment ( "." segment )*
       segment   = name subscript*
       name      = 1*( ALPHA / DIGIT / "_" / "-" )   ; ASCII only
-      subscript = "[" ( "*" / 1*DIGIT ) "]"          ; the digit run must fit an int
+      subscript = "[" ( "*" / 1*DIGIT ) "]"          ; the digit run must fit an int32
 
   A bracket (`tags[0]`, `tags[*]`) is an array index. A dotted numeric
   segment (`tags.0`) is a field whose name is that digit string. **The two
@@ -340,7 +340,9 @@ MAINTAINING.md.
   the `spitest`/conformance entry below for what changes for an out-of-tree
   backend.
 
-  A positional index's digit run must fit an `int`; a run that overflows is
+  A positional index's digit run must fit an `int32` — not Go's `int`
+  (`int64` on every supported platform) — because `int32` is the
+  intersection every in-tree backend can address; a run that overflows is
   rejected the same as any other malformed subscript, not truncated or
   wrapped. This grammar and `cyoda-go`'s wire `jsonPath` grammar
   (`docs/cloud-parity/path-grammar.md` section 2) are the same production
@@ -357,7 +359,7 @@ MAINTAINING.md.
   that already rejected every bracket outright must instead accept the two
   well-formed subscript forms and reject everything else the grammar excludes
   (a slice, a union, a filter expression, a negative or signed index, an
-  index too large to fit an `int`, an unbalanced or unmatched bracket, a
+  index too large to fit an `int32`, an unbalanced or unmatched bracket, a
   chained subscript on a non-array).
 
 - **`ConditionToFilter` no longer refuses a well-formed subscripted path; it
@@ -839,6 +841,45 @@ it catches up.
   (plugin validators reject one on an `OrderSpec`), so this is always a
   0-or-1-value resolution and no ordering behavior changes for a
   non-colliding path. Covered by `TestLessByOrder_NumericSegmentIsNotAnIndex`.
+
+- **An empty leaf `Path` no longer resolves to the whole document.**
+  `Filter.Path`'s empty string is legal for a tree operator (`FilterAnd` /
+  `FilterOr` address no field of their own; `Children` carries the real
+  leaves), and `ParseFilterPath("")` legitimately succeeds with a nil hop
+  slice for that reason. `prepareNode` (`prepared_filter.go`) never
+  special-cased an empty `Path` on a `SourceData` leaf before delegating to
+  `ParseFilterPath`, so a leaf built with one got that same nil hop slice,
+  and `ResolvePath(data, nil)` resolves a nil hop slice to the parsed ROOT
+  DOCUMENT — a presence test on such a leaf matched every entity, and an
+  equality test matched whenever the operand happened to equal the
+  document's own `gjson.Result`. `orderLeafValue` (`order_compare.go`) had
+  the identical defect on the sort side. Both now resolve an empty
+  `SourceData` leaf `Path` to nothing, the same "never matches" outcome a
+  path that fails to parse already produces; a tree operator's empty `Path`
+  is untouched and stays legal. `SourceMeta` already resolved an empty path
+  to nothing (`extractFilterMetaValue`'s switch has no `""` case) and gains
+  a pinning test rather than a behavior change. Not reachable through any
+  in-tree HTTP or gRPC transport today — every one requires a leaf's
+  `jsonPath`/`Path` to be non-empty before it ever reaches a `Filter` — but
+  `PreparedFilter.Match` is the authoritative kernel every backend defers to
+  (memory directly, sqlite/postgres as their post-pushdown correctness
+  check), so the fix is effective everywhere without touching per-backend
+  pushdown code. Covered by `TestPreparedFilter_EmptyLeafPathNeverResolves`
+  and `TestLessByOrder_EmptyDataPathNeverResolves`.
+
+- **`ConditionToFilter` no longer re-desugars a condition tree once per
+  ancestor level.** It desugars the whole tree once via `DesugarCondition`
+  (whose own `GroupCondition` case already recurses into every descendant in
+  that one call), but `groupToFilter` recursed back through
+  `ConditionToFilter` for each child, re-running `DesugarCondition` on that
+  child's already-desugared subtree. For a depth-D chain of single-child AND
+  groups this telescoped into `D + (D-1) + ... + 1` = O(D²) group-node
+  revisits instead of O(D). `groupToFilter` now recurses into a new
+  unexported `desugaredToFilter` — `ConditionToFilter`'s post-desugar
+  dispatch, factored out — instead of `ConditionToFilter` itself, so the
+  desugar pass runs exactly once per `ConditionToFilter` call regardless of
+  tree depth. No output changes; this is a complexity fix only. Covered by
+  `TestConditionToFilter_DesugarIsNotReappliedPerLevel`.
 
 ## [0.8.3] - 2026-07-26
 

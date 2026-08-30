@@ -160,11 +160,14 @@ var ErrInvalidPattern = errors.New("invalid pattern")
 //
 // [ConditionToFilter] also returns it one step earlier, for the WIRE form: a
 // condition jsonPath that is not JSON Path nomenclature — no "$." leader, an
-// empty or trailing segment, bracket-quoted access, a disallowed character.
-// Note what it does NOT cover there: a valid but array-subscripted path
-// ("$.tags[*]") is unpushdownable rather than invalid, and fails with a plain
-// error so the caller falls back to in-memory evaluation instead of rejecting
-// a query that works.
+// empty or trailing segment, bracket-quoted access, a bracket spelling
+// outside the two supported subscript forms (the wildcard "[*]" and a
+// non-negative index that fits an int), or any other disallowed character.
+// Note what it does NOT cover there: a WELL-FORMED array-subscripted path
+// ("$.tags[*]", "$.arr[0]") is not invalid input at all — it translates like
+// any other well-formed path, because the kernel resolves a subscripted path
+// directly (see [ResolvePath]) rather than falling back to in-memory
+// evaluation.
 //
 // Like ErrUnknownOperator this means the INPUT is invalid, so a caller should
 // surface it as a client error rather than a storage failure. Backends declare

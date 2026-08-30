@@ -136,12 +136,16 @@ func parsePathSub(inner string) (PathSub, bool) {
 }
 
 // IsArrayIndex reports whether s is a non-empty run of ASCII digits — the
-// single, canonical "is this a well-formed array index" predicate for a
-// filter-path subscript body (the text between "[" and "]", once the
-// wildcard "*" case has been ruled out). Every other place in this module and
-// its consumers that needs the same check delegates here instead of scanning
-// its own copy: [isSupportedSubscript] in condition_filter.go does, and the
-// consuming repo's schema.IsArrayIndex is intended to be pointed at this one.
+// digit-class half of "is this a well-formed array index" for a filter-path
+// subscript body (the text between "[" and "]", once the wildcard "*" case
+// has been ruled out). It says nothing about magnitude: [parsePathSub] is the
+// full predicate, checking this and then that the run fits an int, and
+// [isSupportedSubscript] in condition_filter.go delegates to parsePathSub —
+// not to this function directly — so the wire boundary and the parser agree
+// on the complete rule, digit class and magnitude both. Every other place in
+// this module and its consumers that needs the digit-class check alone
+// delegates here instead of scanning its own copy: the consuming repo's
+// schema.IsArrayIndex is intended to be pointed at this one.
 func IsArrayIndex(s string) bool {
 	if s == "" {
 		return false

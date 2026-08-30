@@ -348,6 +348,60 @@ func TestConditionToFilter_DataLeaf_PositionalSubscriptDeclaredFoldsToWildcardKe
 	}
 }
 
+// TestConditionToFilter_SubscriptAcceptanceMatchesValidateFilterPath pins the
+// invariant that keeps the wire boundary and the plugin-facing parser from
+// drifting apart: a subscript body is well-formed WIRE syntax exactly when
+// [spi.ParseFilterPath] (via [spi.ValidateFilterPath]) can turn it into a
+// filter path.
+//
+// This must hold as an if-and-only-if, not just "the wire side is a subset":
+// ConditionToFilter is the boundary a caller crosses BEFORE a path ever
+// reaches a plugin, and every plugin validator downstream (schema import,
+// search, conditional delete) is built on ParseFilterPath. If the wire
+// scanner ever accepts a subscript body the parser rejects (or vice versa),
+// the engine translates a condition into a Filter that a plugin then bounces
+// with ErrInvalidFilterPath — a 400 for input the engine itself accepted.
+//
+// The digit-run overflow case is the one that actually caught a real drift:
+// IsArrayIndex only checks the byte class (digits), so a subscript with no
+// magnitude bound passed the wire scan, while parsePathSub additionally
+// requires strconv.Atoi to succeed and rejected it. A table pinning "same
+// verdict for every body" is what stops that gap from reopening.
+func TestConditionToFilter_SubscriptAcceptanceMatchesValidateFilterPath(t *testing.T) {
+	for _, body := range []string{
+		"0",
+		"12",
+		"*",
+		"999999999999999999999999999999", // overflows strconv.Atoi(int)
+		"18446744073709551616",           // one past uint64 max, well past int64 max
+		"-1",
+		"0:2",
+		"?(@.x)",
+		"",
+		" 0",
+		"0 ",
+		"+1",
+		"1e2",
+	} {
+		t.Run(body, func(t *testing.T) {
+			_, condErr := spi.ConditionToFilter(&predicate.SimpleCondition{
+				JsonPath: "$.a[" + body + "]", OperatorType: "EQUALS", Value: "v",
+			}, nil)
+			validateErr := spi.ValidateFilterPath("a[" + body + "]")
+
+			condRejects := condErr != nil
+			validateRejects := validateErr != nil
+			if condRejects != validateRejects {
+				t.Errorf("subscript body %q: ConditionToFilter rejects=%v (%v), ValidateFilterPath rejects=%v (%v) — must agree",
+					body, condRejects, condErr, validateRejects, validateErr)
+			}
+			if condRejects && !errors.Is(condErr, spi.ErrInvalidFilterPath) {
+				t.Errorf("subscript body %q: ConditionToFilter error %v does not wrap ErrInvalidFilterPath", body, condErr)
+			}
+		})
+	}
+}
+
 // TestConditionToFilter_LifecycleUnaffectedByPathLeader records that meta
 // ADDRESSING does not go through the wire-path rule at all: a lifecycle
 // condition names a member of the closed meta vocabulary

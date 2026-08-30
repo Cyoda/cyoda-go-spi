@@ -593,20 +593,31 @@ func isPathNameByte(b byte) bool {
 
 // isSupportedSubscript reports whether the text between "[" and "]" is one of
 // the two forms the stack can resolve: the wildcard, or a non-negative decimal
-// index (digits only — no sign, no whitespace, no exponent). Everything else (a
-// slice, a union, a filter expression, a negative or signed index) has no
-// equivalent in either evaluator.
+// index that fits an int. Everything else (a slice, a union, a filter
+// expression, a negative or signed index, or a digit run too large for an
+// int) has no equivalent in either evaluator.
+//
+// This delegates to [parsePathSub] — the SAME function [ParseFilterPath]
+// calls for a plugin-facing filter path — rather than re-deriving "is this a
+// well-formed subscript" from [IsArrayIndex] plus its own magnitude check.
+// A subscript body must be well-formed WIRE syntax exactly when the parser
+// can turn it into a [PathSub]: two independent definitions of "well-formed"
+// drift, and a body accepted by one and rejected by the other means
+// ConditionToFilter translates a condition into a Filter that
+// ValidateFilterPath then bounces — a client error surfacing one step later
+// than it should, for input the engine already accepted. This used to be
+// exactly that: IsArrayIndex checks the digit class only, with no magnitude
+// bound, so a subscript body that overflowed strconv.Atoi passed the wire
+// scan while parsePathSub rejected it.
 //
 // The engine's boundary check applies the same rule, reaching it through the
 // predicate its in-memory evaluator uses to rewrite a subscript for gjson, so
 // "accepted here" and "resolvable there" stay the same question.
 // TestValidateCondition_PathGrammarMatchesSPI (cyoda-go) pins the two against
 // each other.
-//
-// The digit-run half of this delegates to [IsArrayIndex] rather than scanning
-// its own copy — see that function's doc for why.
 func isSupportedSubscript(inner string) bool {
-	return inner == "*" || IsArrayIndex(inner)
+	_, ok := parsePathSub(inner)
+	return ok
 }
 
 // disallowedCharReason renders the diagnostic for the first rune of s, which

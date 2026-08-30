@@ -95,6 +95,18 @@ func orderLeafValue(e *Entity, s OrderSpec) (gjson.Result, bool) {
 	if s.Source == SourceMeta {
 		return orderMetaLeaf(e, s.Path)
 	}
+	if s.Path == "" {
+		// An empty Path addresses no field — legal only for a Filter tree
+		// operator, never for a sort key, which always names one scalar
+		// value per entity. ParseFilterPath("") legitimately succeeds with
+		// a nil hop slice (that tree-operator convention), and
+		// ResolvePath(data, nil) resolves a nil hop slice to the parsed
+		// ROOT DOCUMENT — so without this guard an empty-Path OrderSpec
+		// sorted by the entity's own document instead of being treated as
+		// missing. See the identical guard in prepareNode
+		// (prepared_filter.go) for the leaf-match side of the same defect.
+		return gjson.Result{}, false
+	}
 	hops, err := ParseFilterPath(s.Path)
 	if err != nil {
 		return gjson.Result{}, false

@@ -193,3 +193,37 @@ func TestPreparedFilter_ResolvesByPathSyntax(t *testing.T) {
 		})
 	}
 }
+
+// TestPreparedFilter_MalformedPathNeverResolves pins path-grammar.md's
+// requirement, stated in prepared_filter.go's prepareNode, that a path
+// failing to parse leaves the node unexpanded rather than falling through to
+// ExpandLeaf: a malformed path must never resolve to anything.
+//
+// A presence test is the case that actually discriminates. NOT_NULL over a
+// real, present value ("x") is true if the path resolved at all — so a
+// malformed path answering false here can only mean the parse failure
+// suppressed evaluation before ExpandLeaf/EvalLeaf ever ran. A comparison
+// operator alone would not prove this: it would also answer false for a
+// path that parsed fine but happened not to match the operand, so the
+// second row pairs a comparison with an operand that DOES match the real
+// data, to show the same suppression there too.
+func TestPreparedFilter_MalformedPathNeverResolves(t *testing.T) {
+	cases := []struct {
+		name string
+		doc  string
+		f    spi.Filter
+	}{
+		{"unclosed bracket, presence test", `{"a":["x"]}`,
+			spi.Filter{Op: spi.FilterNotNull, Path: "a[", Source: spi.SourceData}},
+		{"trailing char after subscript, matching comparison", `{"a":["x"]}`,
+			spi.Filter{Op: spi.FilterEq, Path: "a[0]b", Source: spi.SourceData,
+				Value: "x", Declared: []spi.DataType{spi.String}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := spi.Prepare(tc.f).Match([]byte(tc.doc), spi.EntityMeta{}); got {
+				t.Errorf("Match(%s) on %+v = true, want false: a path that fails to parse must never resolve", tc.doc, tc.f)
+			}
+		})
+	}
+}

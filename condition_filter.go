@@ -587,7 +587,7 @@ func containsBracketQuote(p string) bool {
 //	body      = segment ( "." segment )*
 //	segment   = name subscript*
 //	name      = 1*( ALPHA / DIGIT / "_" / "-" )        ; ASCII only
-//	subscript = "[" ( "*" / 1*DIGIT ) "]"              ; the digit run must fit an int
+//	subscript = "[" ( "*" / 1*DIGIT ) "]"              ; the digit run must fit an int32
 //
 // Built on [scanPathHops] — the module's one scan loop for this grammar,
 // shared with [ParseFilterPath] — discarding the parsed hops, which this

@@ -329,7 +329,7 @@ MAINTAINING.md.
       path      = segment ( "." segment )*
       segment   = name subscript*
       name      = 1*( ALPHA / DIGIT / "_" / "-" )   ; ASCII only
-      subscript = "[" ( "*" / 1*DIGIT ) "]"          ; the digit run must fit an int
+      subscript = "[" ( "*" / 1*DIGIT ) "]"          ; the digit run must fit an int32
 
   A bracket (`tags[0]`, `tags[*]`) is an array index. A dotted numeric
   segment (`tags.0`) is a field whose name is that digit string. **The two
@@ -340,7 +340,9 @@ MAINTAINING.md.
   the `spitest`/conformance entry below for what changes for an out-of-tree
   backend.
 
-  A positional index's digit run must fit an `int`; a run that overflows is
+  A positional index's digit run must fit an `int32` — not Go's `int`
+  (`int64` on every supported platform) — because `int32` is the
+  intersection every in-tree backend can address; a run that overflows is
   rejected the same as any other malformed subscript, not truncated or
   wrapped. This grammar and `cyoda-go`'s wire `jsonPath` grammar
   (`docs/cloud-parity/path-grammar.md` section 2) are the same production
@@ -357,7 +359,7 @@ MAINTAINING.md.
   that already rejected every bracket outright must instead accept the two
   well-formed subscript forms and reject everything else the grammar excludes
   (a slice, a union, a filter expression, a negative or signed index, an
-  index too large to fit an `int`, an unbalanced or unmatched bracket, a
+  index too large to fit an `int32`, an unbalanced or unmatched bracket, a
   chained subscript on a non-array).
 
 - **`ConditionToFilter` no longer refuses a well-formed subscripted path; it

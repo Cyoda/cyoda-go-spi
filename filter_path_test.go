@@ -53,6 +53,26 @@ func TestParseFilterPath_Rejects(t *testing.T) {
 	}
 }
 
+// TestParseFilterPath_SubscriptInt32Bound pins the magnitude bound at int32,
+// not Go's int (int64 on every supported platform). PostgreSQL renders a
+// filter path's positional index as a jsonb operand; an index above
+// math.MaxInt32 has no bounded representation any in-tree backend can
+// address, so it must be rejected the same way an int64-overflowing digit
+// run already is — wrapping ErrInvalidFilterPath — rather than accepted and
+// left to fail downstream as an ungraded 5xx.
+func TestParseFilterPath_SubscriptInt32Bound(t *testing.T) {
+	if _, err := ParseFilterPath("tags[2147483647]"); err != nil {
+		t.Errorf("ParseFilterPath(tags[2147483647]) (int32 max): unexpected error %v", err)
+	}
+	for _, p := range []string{"tags[2147483648]", "tags[4294967296]", "tags[99999999999999999999]"} {
+		if err := ValidateFilterPath(p); err == nil {
+			t.Errorf("ValidateFilterPath(%q): want error, got nil", p)
+		} else if !errors.Is(err, ErrInvalidFilterPath) {
+			t.Errorf("ValidateFilterPath(%q): error does not wrap ErrInvalidFilterPath: %v", p, err)
+		}
+	}
+}
+
 func equalHops(a, b []PathHop) bool {
 	if len(a) != len(b) {
 		return false

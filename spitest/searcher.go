@@ -268,7 +268,8 @@ var filterPathRejects = []string{
 	"a[0:2]",                         // slice syntax
 	"a[?(@.x)]",                      // filter-expression syntax
 	"a[0]b",                          // a name glued directly onto a subscript, no separator
-	"a[99999999999999999999]",        // index overflows int64 (parsePathSub's Atoi rejects it)
+	"a[2147483648]",                  // index overflows int32, the bound (math.MaxInt32+1)
+	"a[99999999999999999999]",        // index overflows int64 too, a fortiori
 	"$.status",                       // "$."-prefixed — a bare path is the contract
 	"$",                              // bare dollar
 	"héllo",                          // non-ASCII
@@ -305,9 +306,10 @@ var filterPathAcceptsData = []string{
 	// array position is addressed; that is tags[0] below. Collapsing the two
 	// is exactly the defect this table exists to catch.
 	"tags.0",
-	"tags[0]",      // array position via a positional bracket subscript
-	"tags[*]",      // array position via a wildcard bracket subscript
-	"items[*].sku", // chained: a wildcard subscript followed by a nested field
+	"tags[0]",          // array position via a positional bracket subscript
+	"tags[*]",          // array position via a wildcard bracket subscript
+	"items[*].sku",     // chained: a wildcard subscript followed by a nested field
+	"tags[2147483647]", // largest index that fits int32 (math.MaxInt32) — must still be accepted
 }
 
 // filterPathAcceptsMeta is the canonical meta vocabulary (see OrderSpec's doc

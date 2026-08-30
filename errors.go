@@ -162,7 +162,7 @@ var ErrInvalidPattern = errors.New("invalid pattern")
 // condition jsonPath that is not JSON Path nomenclature — no "$." leader, an
 // empty or trailing segment, bracket-quoted access, a bracket spelling
 // outside the two supported subscript forms (the wildcard "[*]" and a
-// non-negative index that fits an int), or any other disallowed character.
+// non-negative index that fits an int32), or any other disallowed character.
 // Note what it does NOT cover there: a WELL-FORMED array-subscripted path
 // ("$.tags[*]", "$.arr[0]") is not invalid input at all — it translates like
 // any other well-formed path, because the kernel resolves a subscripted path

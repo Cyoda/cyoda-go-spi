@@ -867,6 +867,20 @@ it catches up.
   pushdown code. Covered by `TestPreparedFilter_EmptyLeafPathNeverResolves`
   and `TestLessByOrder_EmptyDataPathNeverResolves`.
 
+- **`ConditionToFilter` no longer re-desugars a condition tree once per
+  ancestor level.** It desugars the whole tree once via `DesugarCondition`
+  (whose own `GroupCondition` case already recurses into every descendant in
+  that one call), but `groupToFilter` recursed back through
+  `ConditionToFilter` for each child, re-running `DesugarCondition` on that
+  child's already-desugared subtree. For a depth-D chain of single-child AND
+  groups this telescoped into `D + (D-1) + ... + 1` = O(D²) group-node
+  revisits instead of O(D). `groupToFilter` now recurses into a new
+  unexported `desugaredToFilter` — `ConditionToFilter`'s post-desugar
+  dispatch, factored out — instead of `ConditionToFilter` itself, so the
+  desugar pass runs exactly once per `ConditionToFilter` call regardless of
+  tree depth. No output changes; this is a complexity fix only. Covered by
+  `TestConditionToFilter_DesugarIsNotReappliedPerLevel`.
+
 ## [0.8.3] - 2026-07-26
 
 > Recorded retroactively. The v0.8.3 release did not carry out

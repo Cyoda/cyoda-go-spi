@@ -40,6 +40,36 @@ func TestLessByOrder_NullsLast(t *testing.T) {
 	}
 }
 
+// TestLessByOrder_NumericSegmentIsNotAnIndex pins path-grammar.md §3/§10's
+// addressing rule on the SORT surface: a bare hop named "0" is a field-name
+// lookup, never an array-index shortcut, regardless of what shape the stored
+// value turns out to be. gjson.GetBytes's own path syntax disagrees — it
+// resolves an all-digit segment against an array receiver as a positional
+// index — so a sort key that goes through gjson.GetBytes directly (bypassing
+// ParseFilterPath/ResolvePath) sees "obj.0" over {"obj":["X","Y"]} as "X",
+// diverging from every other resolver in the stack (spi.ResolvePath, and both
+// SQL backends, which return NULL/non-existent for the same shape). Both
+// present cases must therefore report ABSENT (aok=false), matching a missing
+// field, not the first array element.
+func TestLessByOrder_NumericSegmentIsNotAnIndex(t *testing.T) {
+	specs := []spi.OrderSpec{{Path: "obj.0", Source: spi.SourceData, Kind: spi.OrderText}}
+	// entity_id "a" holds the array element that alphabetically sorts AFTER
+	// entity_id "z"'s. A resolver that (wrongly) treats "obj.0" as array
+	// index 0 would order these by that value — "z" (element "A") before "a"
+	// (element "B") — the opposite of the entity_id tiebreak. Neither entity
+	// actually HAS a field literally named "0", so the correct answer is
+	// "both absent under this key", which falls through to the entity_id
+	// tiebreak: "a" < "z".
+	a := ent("a", `{"obj":["B","Y"]}`)
+	z := ent("z", `{"obj":["A","Y"]}`)
+	if !spi.LessByOrder(a, z, specs) {
+		t.Fatal("both absent under this key: expected entity_id tiebreak (\"a\" < \"z\"), got value-based ordering")
+	}
+	if spi.LessByOrder(z, a, specs) {
+		t.Fatal("both absent under this key: entity_id tiebreak must not reverse")
+	}
+}
+
 func TestLessByOrder_NumericAscDesc(t *testing.T) {
 	small, big := ent("a", `{"n":1}`), ent("b", `{"n":2}`)
 	asc := []spi.OrderSpec{{Path: "n", Source: spi.SourceData, Kind: spi.OrderNumeric}}

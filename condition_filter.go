@@ -587,100 +587,31 @@ func containsBracketQuote(p string) bool {
 //	body      = segment ( "." segment )*
 //	segment   = name subscript*
 //	name      = 1*( ALPHA / DIGIT / "_" / "-" )        ; ASCII only
-//	subscript = "[" ( "*" / 1*DIGIT ) "]"
+//	subscript = "[" ( "*" / 1*DIGIT ) "]"              ; the digit run must fit an int
 //
-// The whole body is scanned. An earlier version stopped at the first '[' and
-// accepted the remainder unread, which admitted unbalanced brackets, slices,
-// unions, filter expressions, negative indices and arbitrary trailing garbage
-// — none of which any evaluator in the stack resolves.
+// Built on [scanPathHops] — the module's one scan loop for this grammar,
+// shared with [ParseFilterPath] — discarding the parsed hops, which this
+// caller has no use for. The two used to be independent, hand-written copies
+// of the same scan, and the drift that split them apart went unnoticed for a
+// magnitude bound: this one had no check on a subscript's digit-run size,
+// while parsePathSub (reached from ParseFilterPath) did, so an overflowing
+// index passed the wire boundary and ConditionToFilter translated it into a
+// Filter that ValidateFilterPath then bounced — a client error surfacing one
+// step later than it should, for input the boundary had already accepted.
+// Sharing scanPathHops makes that class of drift impossible rather than
+// merely fixing this one instance of it.
 //
 // Errors are reported for the FIRST offending position, so the diagnostic
 // names the character the caller has to fix.
 func scanWirePathBody(body string, mkInvalid func(reason string) error) error {
-	i, n := 0, len(body)
-	for {
-		nameStart := i
-		for i < n && isPathNameByte(body[i]) {
-			i++
-		}
-		if i == nameStart {
-			if i == n {
-				return mkInvalid("ends in a trailing dot")
-			}
-			switch body[i] {
-			case '.':
-				return mkInvalid("contains an empty path segment")
-			case '[':
-				return mkInvalid("has an array subscript with no field name before it")
-			case ']':
-				return mkInvalid(`contains an unmatched "]"`)
-			default:
-				return mkInvalid(disallowedCharReason(body[i:]))
-			}
-		}
-		for i < n && body[i] == '[' {
-			rel := strings.IndexByte(body[i:], ']')
-			if rel < 0 {
-				return mkInvalid("has an unclosed array subscript")
-			}
-			inner := body[i+1 : i+rel]
-			if !isSupportedSubscript(inner) {
-				return mkInvalid(fmt.Sprintf(
-					"has an unsupported array subscript %q; only the wildcard [*] and a non-negative index (e.g. [0]) are supported",
-					"["+inner+"]"))
-			}
-			i += rel + 1
-		}
-		if i == n {
-			return nil
-		}
-		switch body[i] {
-		case '.':
-			i++
-			if i == n {
-				return mkInvalid("ends in a trailing dot")
-			}
-		case ']':
-			return mkInvalid(`contains an unmatched "]"`)
-		default:
-			return mkInvalid(disallowedCharReason(body[i:]))
-		}
-	}
+	_, err := scanPathHops(body, mkInvalid)
+	return err
 }
 
 // isPathNameByte reports whether b is admissible inside a path segment name.
 func isPathNameByte(b byte) bool {
 	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' ||
 		b >= '0' && b <= '9' || b == '_' || b == '-'
-}
-
-// isSupportedSubscript reports whether the text between "[" and "]" is one of
-// the two forms the stack can resolve: the wildcard, or a non-negative decimal
-// index that fits an int. Everything else (a slice, a union, a filter
-// expression, a negative or signed index, or a digit run too large for an
-// int) has no equivalent in either evaluator.
-//
-// This delegates to [parsePathSub] — the SAME function [ParseFilterPath]
-// calls for a plugin-facing filter path — rather than re-deriving "is this a
-// well-formed subscript" from [IsArrayIndex] plus its own magnitude check.
-// A subscript body must be well-formed WIRE syntax exactly when the parser
-// can turn it into a [PathSub]: two independent definitions of "well-formed"
-// drift, and a body accepted by one and rejected by the other means
-// ConditionToFilter translates a condition into a Filter that
-// ValidateFilterPath then bounces — a client error surfacing one step later
-// than it should, for input the engine already accepted. This used to be
-// exactly that: IsArrayIndex checks the digit class only, with no magnitude
-// bound, so a subscript body that overflowed strconv.Atoi passed the wire
-// scan while parsePathSub rejected it.
-//
-// The engine's boundary check applies the same rule, reaching it through the
-// predicate its in-memory evaluator uses to rewrite a subscript for gjson, so
-// "accepted here" and "resolvable there" stay the same question.
-// TestValidateCondition_PathGrammarMatchesSPI (cyoda-go) pins the two against
-// each other.
-func isSupportedSubscript(inner string) bool {
-	_, ok := parsePathSub(inner)
-	return ok
 }
 
 // disallowedCharReason renders the diagnostic for the first rune of s, which

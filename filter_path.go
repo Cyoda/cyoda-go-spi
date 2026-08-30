@@ -46,38 +46,54 @@ func ParseFilterPath(p string) ([]PathHop, error) {
 	if p == "" {
 		return nil, nil
 	}
+	return scanPathHops(p, func(reason string) error {
+		return invalidFilterPathError(p, reason)
+	})
+}
+
+// scanPathHops is the one scan loop for this grammar. Both callers that need
+// it — [ParseFilterPath], for the plugin-facing form, and scanWirePathBody
+// (condition_filter.go), for the wire jsonPath's leader-stripped remainder —
+// build on this rather than each keeping its own copy: a second independent
+// scan is exactly the drift class that let an overflowing subscript index
+// pass one copy's boundary check while this one's magnitude bound (inside
+// [parsePathSub]) rejected it. mkInvalid lets each caller attach its own
+// error sentinel and message spelling while sharing every character-level
+// decision — segment charset, subscript well-formedness, balanced brackets,
+// trailing-garbage rejection.
+func scanPathHops(body string, mkInvalid func(reason string) error) ([]PathHop, error) {
 	var hops []PathHop
-	i, n := 0, len(p)
+	i, n := 0, len(body)
 	for {
 		nameStart := i
-		for i < n && isPathNameByte(p[i]) {
+		for i < n && isPathNameByte(body[i]) {
 			i++
 		}
 		if i == nameStart {
 			if i == n {
-				return nil, invalidFilterPathError(p, "ends in a trailing dot")
+				return nil, mkInvalid("ends in a trailing dot")
 			}
-			switch p[i] {
+			switch body[i] {
 			case '.':
-				return nil, invalidFilterPathError(p, "contains an empty path segment")
+				return nil, mkInvalid("contains an empty path segment")
 			case '[':
-				return nil, invalidFilterPathError(p, "has an array subscript with no field name before it")
+				return nil, mkInvalid("has an array subscript with no field name before it")
 			case ']':
-				return nil, invalidFilterPathError(p, `contains an unmatched "]"`)
+				return nil, mkInvalid(`contains an unmatched "]"`)
 			default:
-				return nil, invalidFilterPathError(p, disallowedCharReason(p[i:]))
+				return nil, mkInvalid(disallowedCharReason(body[i:]))
 			}
 		}
-		hop := PathHop{Name: p[nameStart:i]}
-		for i < n && p[i] == '[' {
-			rel := strings.IndexByte(p[i:], ']')
+		hop := PathHop{Name: body[nameStart:i]}
+		for i < n && body[i] == '[' {
+			rel := strings.IndexByte(body[i:], ']')
 			if rel < 0 {
-				return nil, invalidFilterPathError(p, "has an unclosed array subscript")
+				return nil, mkInvalid("has an unclosed array subscript")
 			}
-			inner := p[i+1 : i+rel]
+			inner := body[i+1 : i+rel]
 			sub, ok := parsePathSub(inner)
 			if !ok {
-				return nil, invalidFilterPathError(p, fmt.Sprintf(
+				return nil, mkInvalid(fmt.Sprintf(
 					"has an unsupported array subscript %q; only the wildcard [*] and a non-negative index (e.g. [0]) are supported",
 					"["+inner+"]"))
 			}
@@ -88,19 +104,19 @@ func ParseFilterPath(p string) ([]PathHop, error) {
 		if i == n {
 			return hops, nil
 		}
-		switch p[i] {
+		switch body[i] {
 		case '.':
 			i++
 			if i == n {
-				return nil, invalidFilterPathError(p, "ends in a trailing dot")
+				return nil, mkInvalid("ends in a trailing dot")
 			}
 		case ']':
-			return nil, invalidFilterPathError(p, `contains an unmatched "]"`)
+			return nil, mkInvalid(`contains an unmatched "]"`)
 		default:
 			// The subscript loop above already consumed every "[...]" group
 			// immediately following the name, so a leftover '[' cannot reach
 			// here: this is always a byte that isn't a valid separator.
-			return nil, invalidFilterPathError(p, disallowedCharReason(p[i:]))
+			return nil, mkInvalid(disallowedCharReason(body[i:]))
 		}
 	}
 }
@@ -140,12 +156,12 @@ func parsePathSub(inner string) (PathSub, bool) {
 // subscript body (the text between "[" and "]", once the wildcard "*" case
 // has been ruled out). It says nothing about magnitude: [parsePathSub] is the
 // full predicate, checking this and then that the run fits an int, and
-// [isSupportedSubscript] in condition_filter.go delegates to parsePathSub —
-// not to this function directly — so the wire boundary and the parser agree
-// on the complete rule, digit class and magnitude both. Every other place in
-// this module and its consumers that needs the digit-class check alone
-// delegates here instead of scanning its own copy: the consuming repo's
-// schema.IsArrayIndex is intended to be pointed at this one.
+// [scanPathHops] — the one scan loop both [ParseFilterPath] and
+// scanWirePathBody (condition_filter.go) build on — calls parsePathSub, not
+// this function directly, so the wire boundary and the parser agree on the
+// complete rule, digit class and magnitude both. Every other place in this
+// module that needs the digit-class check alone delegates here instead of
+// scanning its own copy.
 func IsArrayIndex(s string) bool {
 	if s == "" {
 		return false

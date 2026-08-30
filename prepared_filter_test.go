@@ -133,3 +133,63 @@ func TestPreparedFilter_ConcurrentMatch(t *testing.T) {
 		}
 	}
 }
+
+// TestPreparedFilter_ResolvesByPathSyntax pins spec sections 3 and 5 of
+// docs/cloud-parity/path-grammar.md at the kernel: the leaf addresses exactly
+// what the path syntax says, never routing on the stored shape.
+func TestPreparedFilter_ResolvesByPathSyntax(t *testing.T) {
+	str := []spi.DataType{spi.String}
+	cases := []struct {
+		name string
+		doc  string
+		f    spi.Filter
+		want bool
+	}{
+		// A bare path does not unwrap an array.
+		{"bare eq over array", `{"a":["A","B"]}`,
+			spi.Filter{Op: spi.FilterEq, Path: "a", Source: spi.SourceData, Value: "A", Declared: str}, false},
+		{"bare eq over scalar", `{"a":"A"}`,
+			spi.Filter{Op: spi.FilterEq, Path: "a", Source: spi.SourceData, Value: "A", Declared: str}, true},
+
+		// A wildcard is existential over the elements and does not wrap a scalar.
+		{"wildcard eq over array", `{"a":["A","B"]}`,
+			spi.Filter{Op: spi.FilterEq, Path: "a[*]", Source: spi.SourceData, Value: "B", Declared: str}, true},
+		{"wildcard eq over scalar", `{"a":"A"}`,
+			spi.Filter{Op: spi.FilterEq, Path: "a[*]", Source: spi.SourceData, Value: "A", Declared: str}, false},
+
+		// A trailing wildcard is not the array's length.
+		{"wildcard is not length", `{"tags":["red","blue"]}`,
+			spi.Filter{Op: spi.FilterEq, Path: "tags[*]", Source: spi.SourceData, Value: "2", Declared: []spi.DataType{spi.Integer}}, false},
+
+		// Vacuity, per path-grammar.md section 5.
+		{"bare NOT_NULL over empty array", `{"a":[]}`,
+			spi.Filter{Op: spi.FilterNotNull, Path: "a", Source: spi.SourceData}, true},
+		{"wildcard NOT_NULL over empty array", `{"a":[]}`,
+			spi.Filter{Op: spi.FilterNotNull, Path: "a[*]", Source: spi.SourceData}, false},
+		{"wildcard IS_NULL over empty array", `{"a":[]}`,
+			spi.Filter{Op: spi.FilterIsNull, Path: "a[*]", Source: spi.SourceData}, false},
+		{"wildcard IS_NULL over null", `{"a":null}`,
+			spi.Filter{Op: spi.FilterIsNull, Path: "a[*]", Source: spi.SourceData}, false},
+		{"wildcard IS_NULL over absent", `{}`,
+			spi.Filter{Op: spi.FilterIsNull, Path: "a[*]", Source: spi.SourceData}, false},
+		{"positional IS_NULL over empty array", `{"a":[]}`,
+			spi.Filter{Op: spi.FilterIsNull, Path: "a[0]", Source: spi.SourceData}, true},
+
+		// An element missing the key is evaluated, not dropped.
+		{"element missing key IS_NULL", `{"items":[{"sku":"A"},{}]}`,
+			spi.Filter{Op: spi.FilterIsNull, Path: "items[*].sku", Source: spi.SourceData}, true},
+
+		// A numeric segment is a field name.
+		{"numeric field name", `{"obj":{"0":"Z"}}`,
+			spi.Filter{Op: spi.FilterEq, Path: "obj.0", Source: spi.SourceData, Value: "Z", Declared: str}, true},
+		{"numeric segment is not an index", `{"tags":["A"]}`,
+			spi.Filter{Op: spi.FilterEq, Path: "tags.0", Source: spi.SourceData, Value: "A", Declared: str}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := spi.Prepare(tc.f).Match([]byte(tc.doc), spi.EntityMeta{}); got != tc.want {
+				t.Errorf("Match(%s) on %+v = %v, want %v", tc.doc, tc.f, got, tc.want)
+			}
+		})
+	}
+}

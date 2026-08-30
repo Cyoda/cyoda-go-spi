@@ -52,10 +52,14 @@ import (
 // accepted as one.
 //
 // A WELL-FORMED array-subscripted path ("$.tags[*].name", "$.arr[0]",
-// "$.matrix[*][*]") is valid JSON Path but not expressible as a pushdown
-// filter. It fails with a plain error that does NOT wrap ErrInvalidFilterPath,
-// which is the signal to fall back to in-memory evaluation rather than to
-// reject the request. A malformed one is invalid input, per the list above.
+// "$.matrix[*][*]") TRANSLATES: the kernel resolves a subscripted path
+// directly (see [ResolvePath]), so it is pushdownable like any other path,
+// not a reason to fall back. A malformed one ("$.a[", "$.a[-1]", "$.a[0:2]",
+// "$.a[0];DROP") is invalid input, per the list above, and is rejected the
+// same way. The one remaining "valid but not expressible as a pushdown
+// filter" case is a [predicate.FunctionCondition]: it fails with a plain
+// error that does NOT wrap ErrInvalidFilterPath, which is the signal to fall
+// back to in-memory evaluation rather than to reject the request.
 //
 // # fields, and why nil is not a safe default
 //
@@ -174,14 +178,19 @@ func simpleToFilter(c *predicate.SimpleCondition, fields map[string]FieldDescrip
 		return Filter{}, unknownOperatorError(c.OperatorType)
 	}
 	// FieldsMap keys are always "$."-prefixed, and stripDollarDot has just
-	// guaranteed c.JsonPath is too, so this is an identity today. It is kept
-	// as the single key-construction convention — arrayToFilter builds its key
-	// through arrayElementPath, which normalises the same way — because a key
-	// that misses the map does not fail loudly: Declared comes back empty and
-	// the type-directed kernel expands a comparison leaf with no declared type
-	// into nothing, so a field that exists and holds matching data answers
-	// with an empty page.
-	key := NormalisePath(c.JsonPath)
+	// guaranteed c.JsonPath is too, so this first step is an identity today.
+	// It is kept as the single key-construction convention — arrayToFilter
+	// builds its key through arrayElementPath, which normalises the same way.
+	//
+	// A second fold is REQUIRED before this is used as a map key: the model
+	// tree records an array's element type ONCE, under the wildcard subscript
+	// ("$.tags[*]"), never once per index, so a positional subscript
+	// ("$.tags[0]") must canonicalise to the wildcard form before the lookup
+	// — see foldSubscriptWildcards. A key that misses the map does not fail
+	// loudly: Declared comes back empty and the type-directed kernel expands
+	// a comparison leaf with no declared type into nothing, so a field that
+	// exists and holds matching data answers with an empty page.
+	key := foldSubscriptWildcards(NormalisePath(c.JsonPath))
 	return Filter{
 		Op:       op,
 		Path:     stripped,
@@ -350,6 +359,58 @@ func arrayElementPath(rawPath string) string {
 	return p + "[*]"
 }
 
+// foldSubscriptWildcards canonicalises a "$."-prefixed wire jsonPath into the
+// fields-map LOOKUP key by folding every subscript — positional or wildcard —
+// to "[*]". "$.tags[0]" and "$.tags[*]" both fold to "$.tags[*]";
+// "$.items[2].sku" folds to "$.items[*].sku"; a path with no subscript is
+// returned unchanged.
+//
+// The model tree records an array's element type ONCE, under the wildcard
+// subscript, never once per index (see [arrayElementPath], which folds the
+// same way for an ArrayCondition's container path). Once stripDollarDot
+// stopped rejecting a well-formed positional subscript, "$.tags[0]" started
+// reaching the fields-map lookup for the first time — unfolded, that lookup
+// misses, Declared comes back empty, and per the kernel's type-directed
+// contract an empty declared set silently annihilates the eight comparison
+// and ordering operators to a non-match while the other eighteen keep
+// evaluating: an empty page for data that is present.
+//
+// Only the LOOKUP key is folded. This is never the return value that reaches
+// a caller — [Filter.Path] keeps the caller's positional spelling, and any
+// diagnostic names the path the request actually sent. This is also the
+// SINGLE such fold in the module: [arrayElementPath] and every other
+// fields-map key site route through here or reuse its result, rather than
+// each canonicalising subscripts on its own.
+//
+// Built on [ParseFilterPath] — the module's one parser for this grammar —
+// rather than a string replace, so the fold agrees with the grammar's own
+// notion of a subscript instead of a second, potentially drifting, copy of
+// it. key has already passed stripDollarDot's identical grammar by the time
+// this runs, so a parse failure here should not happen in practice; the
+// fallback (returning key unfolded) fails safe rather than panicking.
+func foldSubscriptWildcards(key string) string {
+	rest, ok := strings.CutPrefix(key, jsonPathLeader)
+	if !ok || !strings.Contains(rest, "[") {
+		return key
+	}
+	hops, err := ParseFilterPath(rest)
+	if err != nil {
+		return key
+	}
+	var b strings.Builder
+	b.WriteString(jsonPathLeader)
+	for i, hop := range hops {
+		if i > 0 {
+			b.WriteByte('.')
+		}
+		b.WriteString(hop.Name)
+		for range hop.Subs {
+			b.WriteString("[*]")
+		}
+	}
+	return b.String()
+}
+
 // NormalisePath returns raw in the "$."-prefixed convention, idempotently.
 //
 // It is exported because the "$."-prefixed form is the fields-map key
@@ -394,34 +455,33 @@ const jsonPathLeader = "$."
 //     function is the boundary between them; see Filter.Path's "Grammar"
 //     section, which this enforces on the post-leader remainder.
 //
-// # Two error classes, and why the difference matters
+// # One error class now
 //
-// Every engine caller treats a translation error as "not pushdownable, fall
-// back to in-memory evaluation". That is the right response to one kind of
-// failure and badly wrong for the other, so the two are distinguishable:
+// stripDollarDot fails only on INVALID PATH input: no "$." leader, nothing
+// after it, an empty or trailing segment, bracket-quoted property access, a
+// bracket spelling outside the two supported subscript forms, or any
+// character outside the grammar — including one that FOLLOWS a well-formed
+// subscript ("$.a[0];DROP"). Every one of these wraps [ErrInvalidFilterPath],
+// and a caller should surface it as a client error (400): the path is either
+// not JSON Path nomenclature at all, or names bracket syntax no evaluator in
+// the stack resolves, and falling back to in-memory evaluation would answer
+// an empty page for a field that exists instead of surfacing the mistake.
 //
-//   - INVALID PATH — no "$." leader, nothing after it, an empty or trailing
-//     segment, bracket-quoted property access, or any character outside the
-//     grammar. The path is not JSON Path nomenclature at all; a bare
-//     "variantId" is simply not a path. These wrap [ErrInvalidFilterPath] and
-//     a caller should surface them as a client error (400). Falling back
-//     instead would be worse than useless: the in-memory evaluator resolves a
-//     bare path happily, so the mistake would never surface, while a
-//     bracket-quoted one resolves to nothing and answers an empty page for a
-//     field that exists.
-//   - NOT PUSHDOWNABLE — a WELL-FORMED "$."-prefixed path using array
-//     subscript syntax ("$.tags[*].name", "$.arr[0]"). Valid JSON Path, and
-//     the in-memory evaluator serves it, so this stays a plain error and the
-//     fallback is the correct response. Promoting it to ErrInvalidFilterPath
-//     would turn working queries into 400s.
+// A WELL-FORMED "$."-prefixed path using array subscript syntax
+// ("$.tags[*].name", "$.arr[0]") is not special-cased here any more: it
+// passes through and translates like any other well-formed path, because the
+// kernel now resolves a subscripted path directly (see [ResolvePath]). This
+// function used to also produce a "not pushdownable, fall back" class for
+// that case; [ConditionToFilter]'s doc still describes that class, but it is
+// now produced one level up, for a [predicate.FunctionCondition] only —
+// stripDollarDot itself never returns it.
 //
-// A MALFORMED subscript ("$.a[", "$.a[0:2]", `$.a["x"]`, "$.a[0];DROP") is in
-// the first class, not the second: the whole path is scanned, subscripts
-// included, so bracket syntax outside the supported forms is invalid input.
-// It used to land in the fallback class because the scan stopped at the first
-// '[' and accepted whatever followed — and the in-memory evaluator resolves
-// none of those spellings, so the request answered an empty page for a field
-// that exists.
+// A MALFORMED subscript ("$.a[", "$.a[0:2]", `$.a["x"]`, "$.a[0];DROP") stays
+// rejected: the whole path is scanned, subscripts included, so bracket syntax
+// outside the supported forms is invalid input, not something a resolver is
+// asked to make sense of. An earlier version of the scan stopped at the first
+// '[' and accepted whatever followed, which is why this remains a dedicated
+// check rather than something the parser incidentally catches.
 func stripDollarDot(path string) (string, error) {
 	if !strings.HasPrefix(path, jsonPathLeader) {
 		return "", invalidPathError(path,
@@ -442,17 +502,10 @@ func stripDollarDot(path string) (string, error) {
 		return "", invalidPathError(path,
 			`bracket-quoted property access is not supported; use dotted access (e.g. "$.a.b")`)
 	}
-	hasSubscript, err := scanWirePathBody(stripped, func(reason string) error {
+	if err := scanWirePathBody(stripped, func(reason string) error {
 		return invalidPathError(path, reason)
-	})
-	if err != nil {
+	}); err != nil {
 		return "", err
-	}
-	if hasSubscript {
-		// Well-formed array subscript/wildcard syntax: valid JSON Path, not
-		// expressible as a pushdown filter. The unpushdownable class — a
-		// plain error, so the caller falls back to in-memory evaluation.
-		return "", fmt.Errorf("path %q contains non-pushdownable array-subscript syntax", path)
 	}
 	return stripped, nil
 }
@@ -465,9 +518,8 @@ func containsBracketQuote(p string) bool {
 }
 
 // scanWirePathBody validates the leader-stripped remainder of a wire jsonPath
-// against the segment grammar and reports whether it uses array-subscript
-// syntax. Diagnostics are built by mkInvalid so each caller can attach its own
-// sentinel and echo the full path.
+// against the segment grammar. Diagnostics are built by mkInvalid so each
+// caller can attach its own sentinel and echo the full path.
 //
 //	body      = segment ( "." segment )*
 //	segment   = name subscript*
@@ -481,8 +533,7 @@ func containsBracketQuote(p string) bool {
 //
 // Errors are reported for the FIRST offending position, so the diagnostic
 // names the character the caller has to fix.
-func scanWirePathBody(body string, mkInvalid func(reason string) error) (bool, error) {
-	hasSubscript := false
+func scanWirePathBody(body string, mkInvalid func(reason string) error) error {
 	i, n := 0, len(body)
 	for {
 		nameStart := i
@@ -491,46 +542,45 @@ func scanWirePathBody(body string, mkInvalid func(reason string) error) (bool, e
 		}
 		if i == nameStart {
 			if i == n {
-				return false, mkInvalid("ends in a trailing dot")
+				return mkInvalid("ends in a trailing dot")
 			}
 			switch body[i] {
 			case '.':
-				return false, mkInvalid("contains an empty path segment")
+				return mkInvalid("contains an empty path segment")
 			case '[':
-				return false, mkInvalid("has an array subscript with no field name before it")
+				return mkInvalid("has an array subscript with no field name before it")
 			case ']':
-				return false, mkInvalid(`contains an unmatched "]"`)
+				return mkInvalid(`contains an unmatched "]"`)
 			default:
-				return false, mkInvalid(disallowedCharReason(body[i:]))
+				return mkInvalid(disallowedCharReason(body[i:]))
 			}
 		}
 		for i < n && body[i] == '[' {
 			rel := strings.IndexByte(body[i:], ']')
 			if rel < 0 {
-				return false, mkInvalid("has an unclosed array subscript")
+				return mkInvalid("has an unclosed array subscript")
 			}
 			inner := body[i+1 : i+rel]
 			if !isSupportedSubscript(inner) {
-				return false, mkInvalid(fmt.Sprintf(
+				return mkInvalid(fmt.Sprintf(
 					"has an unsupported array subscript %q; only the wildcard [*] and a non-negative index (e.g. [0]) are supported",
 					"["+inner+"]"))
 			}
-			hasSubscript = true
 			i += rel + 1
 		}
 		if i == n {
-			return hasSubscript, nil
+			return nil
 		}
 		switch body[i] {
 		case '.':
 			i++
 			if i == n {
-				return false, mkInvalid("ends in a trailing dot")
+				return mkInvalid("ends in a trailing dot")
 			}
 		case ']':
-			return false, mkInvalid(`contains an unmatched "]"`)
+			return mkInvalid(`contains an unmatched "]"`)
 		default:
-			return false, mkInvalid(disallowedCharReason(body[i:]))
+			return mkInvalid(disallowedCharReason(body[i:]))
 		}
 	}
 }

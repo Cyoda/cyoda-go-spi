@@ -145,26 +145,30 @@ func TestConditionToFilter_BarePathRejected(t *testing.T) {
 	}
 }
 
-// TestConditionToFilter_ArrayWildcardStaysFallbackClass pins the OTHER half of
-// the error taxonomy, and it is the half easiest to break while tightening.
+// TestConditionToFilter_ArrayWildcardTranslates pins the OTHER half of the
+// error taxonomy, and it is the half easiest to break while tightening.
 //
-// "$.tags[*].name" is a well-formed JSON Path the engine's in-memory evaluator
-// genuinely serves (it rewrites "[*]" to gjson's "#"), so it must keep
-// producing the plain "not pushdownable" error that routes callers to that
-// fallback. Promoting it to ErrInvalidFilterPath would turn a working query
-// into a 400.
-func TestConditionToFilter_ArrayWildcardStaysFallbackClass(t *testing.T) {
-	for _, p := range []string{"$.items[*].name", "$.arr[0].field", "$.foo[*]"} {
-		t.Run(p, func(t *testing.T) {
-			_, err := spi.ConditionToFilter(&predicate.SimpleCondition{
-				JsonPath: p, OperatorType: "EQUALS", Value: "v",
+// "$.tags[*].name" is a well-formed JSON Path, and the kernel now resolves a
+// subscripted path directly (see [ResolvePath]), so it must translate to a
+// Filter cleanly rather than erroring at all. This used to be the
+// "not pushdownable, fall back to in-memory evaluation" class; the kernel
+// gaining a real resolver for subscripted paths retired that class for
+// well-formed subscript syntax — see stripDollarDot's doc.
+func TestConditionToFilter_ArrayWildcardTranslates(t *testing.T) {
+	for _, tc := range []struct{ in, wantPath string }{
+		{"$.items[*].name", "items[*].name"},
+		{"$.arr[0].field", "arr[0].field"},
+		{"$.foo[*]", "foo[*]"},
+	} {
+		t.Run(tc.in, func(t *testing.T) {
+			f, err := spi.ConditionToFilter(&predicate.SimpleCondition{
+				JsonPath: tc.in, OperatorType: "EQUALS", Value: "v",
 			}, nil)
-			if err == nil {
-				t.Fatalf("ConditionToFilter(%q): expected an error, got nil", p)
+			if err != nil {
+				t.Fatalf("ConditionToFilter(%q): unexpected error %v", tc.in, err)
 			}
-			if errors.Is(err, spi.ErrInvalidFilterPath) {
-				t.Errorf("ConditionToFilter(%q): error wraps ErrInvalidFilterPath (%v); a subscripted path is "+
-					"valid JSON Path the in-memory fallback evaluates — it must stay in the unpushdownable class", p, err)
+			if f.Path != tc.wantPath {
+				t.Errorf("ConditionToFilter(%q).Path = %q, want %q", tc.in, f.Path, tc.wantPath)
 			}
 		})
 	}
@@ -243,34 +247,104 @@ func TestConditionToFilter_MalformedSubscriptIsInvalidPath(t *testing.T) {
 	}
 }
 
-// TestConditionToFilter_WellFormedSubscriptStaysFallbackClass is the positive
-// control for the tightening above: every subscript form the grammar admits
-// ("[*]", a non-negative decimal index, chained and mid-path) must stay in the
-// unpushdownable class so the in-memory evaluator still serves it.
-func TestConditionToFilter_WellFormedSubscriptStaysFallbackClass(t *testing.T) {
-	for _, p := range []string{
-		"$.tags[*]",
-		"$.tags[*].name",
-		"$.arr[0]",
-		"$.arr[0].field",
-		"$.arr[12].a.b",
-		"$.matrix[*][*]",
-		"$.matrix[0][1]",
-		"$.orders[*].lines[*].sku",
-		"$.a[0][*].b",
+// TestConditionToFilter_WellFormedSubscriptTranslates is the positive control
+// for the tightening above: every subscript form the grammar admits ("[*]", a
+// non-negative decimal index, chained and mid-path) must translate to a
+// Filter with the subscript preserved in Filter.Path, not error.
+func TestConditionToFilter_WellFormedSubscriptTranslates(t *testing.T) {
+	for _, tc := range []struct{ in, wantPath string }{
+		{"$.tags[*]", "tags[*]"},
+		{"$.tags[*].name", "tags[*].name"},
+		{"$.arr[0]", "arr[0]"},
+		{"$.arr[0].field", "arr[0].field"},
+		{"$.arr[12].a.b", "arr[12].a.b"},
+		{"$.matrix[*][*]", "matrix[*][*]"},
+		{"$.matrix[0][1]", "matrix[0][1]"},
+		{"$.orders[*].lines[*].sku", "orders[*].lines[*].sku"},
+		{"$.a[0][*].b", "a[0][*].b"},
 	} {
-		t.Run(p, func(t *testing.T) {
-			_, err := spi.ConditionToFilter(&predicate.SimpleCondition{
-				JsonPath: p, OperatorType: "EQUALS", Value: "v",
+		t.Run(tc.in, func(t *testing.T) {
+			f, err := spi.ConditionToFilter(&predicate.SimpleCondition{
+				JsonPath: tc.in, OperatorType: "EQUALS", Value: "v",
 			}, nil)
-			if err == nil {
-				t.Fatalf("ConditionToFilter(%q): expected an error, got nil", p)
+			if err != nil {
+				t.Fatalf("ConditionToFilter(%q): unexpected error %v", tc.in, err)
 			}
-			if errors.Is(err, spi.ErrInvalidFilterPath) {
-				t.Errorf("ConditionToFilter(%q): error wraps ErrInvalidFilterPath (%v); a well-formed subscript is "+
-					"valid JSON Path the in-memory fallback evaluates — it must stay in the unpushdownable class", p, err)
+			if f.Path != tc.wantPath {
+				t.Errorf("ConditionToFilter(%q).Path = %q, want %q", tc.in, f.Path, tc.wantPath)
 			}
 		})
+	}
+}
+
+// TestSimpleToFilter_KeepsWellFormedSubscript pins simpleToFilter's part of
+// the same rule directly: a well-formed subscript translates rather than
+// falling back, whether or not the caller supplies a fields map that
+// declares the array's element type.
+func TestSimpleToFilter_KeepsWellFormedSubscript(t *testing.T) {
+	fields := map[string]spi.FieldDescriptor{
+		"$.tags[*]": {Types: []spi.DataType{spi.String}},
+	}
+	for _, tc := range []struct{ in, wantPath string }{
+		{"$.tags[0]", "tags[0]"},
+		{"$.tags[*]", "tags[*]"},
+		{"$.items[*].sku", "items[*].sku"},
+	} {
+		f, err := spi.ConditionToFilter(&predicate.SimpleCondition{
+			JsonPath: tc.in, OperatorType: "EQUALS", Value: "A",
+		}, fields)
+		if err != nil {
+			t.Fatalf("ConditionToFilter(%q): unexpected error %v", tc.in, err)
+		}
+		if f.Path != tc.wantPath {
+			t.Errorf("ConditionToFilter(%q).Path = %q, want %q", tc.in, f.Path, tc.wantPath)
+		}
+	}
+}
+
+// TestSimpleToFilter_StillRejectsMalformedSubscript pins the other side: the
+// subscript tightening in stripDollarDot did not loosen the malformed-bracket
+// rejection at all — only the well-formed class stopped erroring.
+func TestSimpleToFilter_StillRejectsMalformedSubscript(t *testing.T) {
+	for _, p := range []string{"$.a[-1]", "$.a[0:2]", "$.a[?(@.x)]", "$.a[", "$.a[0]b"} {
+		_, err := spi.ConditionToFilter(&predicate.SimpleCondition{
+			JsonPath: p, OperatorType: "EQUALS", Value: "A",
+		}, nil)
+		if !errors.Is(err, spi.ErrInvalidFilterPath) {
+			t.Errorf("ConditionToFilter(%q): want ErrInvalidFilterPath, got %v", p, err)
+		}
+	}
+}
+
+// TestConditionToFilter_DataLeaf_PositionalSubscriptDeclaredFoldsToWildcardKey
+// pins the fold required alongside the subscript tightening above: the model
+// tree records an array's element type ONCE, under the wildcard subscript
+// ("$.tags[*]"), never once per index. Once a well-formed positional
+// subscript stopped erroring out of simpleToFilter, "$.tags[0]" started
+// reaching the fields-map lookup for the first time — and without folding the
+// lookup key to the wildcard form, it misses: Declared comes back empty, and
+// per the kernel's type-directed contract an empty declared set silently
+// annihilates a comparison leaf to a non-match for data that is present.
+//
+// Filter.Path must still carry the caller's positional spelling — only the
+// lookup key folds.
+func TestConditionToFilter_DataLeaf_PositionalSubscriptDeclaredFoldsToWildcardKey(t *testing.T) {
+	fields := map[string]spi.FieldDescriptor{
+		"$.tags[*]": {Path: "$.tags[*]", Types: []spi.DataType{spi.String}, IsArray: true},
+	}
+	f, err := spi.ConditionToFilter(&predicate.SimpleCondition{
+		JsonPath: "$.tags[0]", OperatorType: "EQUALS", Value: "go",
+	}, fields)
+	if err != nil {
+		t.Fatalf("ConditionToFilter: %v", err)
+	}
+	if f.Path != "tags[0]" {
+		t.Errorf("Path = %q, want %q: the lookup key folds, Filter.Path does not", f.Path, "tags[0]")
+	}
+	want := []spi.DataType{spi.String}
+	if !reflect.DeepEqual(f.Declared, want) {
+		t.Errorf("Declared = %v, want %v: %q must resolve against the wildcard key %q",
+			f.Declared, want, "$.tags[0]", "$.tags[*]")
 	}
 }
 

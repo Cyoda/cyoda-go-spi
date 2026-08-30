@@ -34,6 +34,14 @@ type preparedNode struct {
 	source FieldSource
 	path   string
 
+	// hops is the parsed form of path, for SourceData leaves only: parsed
+	// once here in prepareNode so per-row Match does no parsing. A path that
+	// fails to parse leaves hops nil and expanded false — the same "never
+	// matches" a leaf that failed ExpandLeaf already produces, so a malformed
+	// path never resolves to anything rather than falling back to some other
+	// interpretation.
+	hops []PathHop
+
 	// exp is meaningful only when expanded is true. A leaf whose ExpandLeaf
 	// failed is a leaf that never matches — the same answer evalLeafFilter
 	// produced by absorbing the error into `matched && err == nil`, but stated
@@ -78,6 +86,18 @@ func prepareNode(f Filter) preparedNode {
 
 	// Leaf — including a zero-Op child, which ExpandLeaf's default arm rejects.
 	n := preparedNode{op: f.Op, source: f.Source, path: f.Path}
+	if f.Source == SourceData {
+		hops, err := ParseFilterPath(f.Path)
+		if err != nil {
+			// A path that fails to parse must never resolve to anything: leave
+			// the node unexpanded, which is already a non-match. Do not fall
+			// through to ExpandLeaf — an unexpanded node never reaches
+			// storedAll either way, but leaving hops nil here keeps that
+			// invariant explicit rather than incidental.
+			return n
+		}
+		n.hops = hops
+	}
 	exp, err := ExpandLeaf(f.Op, OperandString(f.Value), valuesToStrings(f.Values), f.Declared)
 	if err == nil {
 		n.exp = exp
@@ -115,13 +135,30 @@ func (n *preparedNode) match(data []byte, meta EntityMeta) bool {
 	if !n.expanded {
 		return false
 	}
-	return EvalLeaf(n.exp, n.stored(data, meta))
+	// A leaf holds when SOME addressed value satisfies it. A leaf addressing
+	// no values (an empty slice) is a non-match for every operator, presence
+	// tests included — see docs/cloud-parity/path-grammar.md section 5: a
+	// wildcard path over an empty array, a null or an absent field presents
+	// no elements, so IS_NULL and NOT_NULL both answer false there. Do not
+	// special-case an empty slice to "true for IS_NULL" — that would make the
+	// two presence tests complements on a wildcard path, which section 5
+	// deliberately rejects.
+	for _, r := range n.storedAll(data, meta) {
+		if EvalLeaf(n.exp, r) {
+			return true
+		}
+	}
+	return false
 }
 
-// stored resolves the value this leaf addresses, keeping gjson's .Raw so the
-// kernel can classify numerics and temporals precisely. Same contract as the
-// pre-split filterStoredResult: a missing data path yields a non-existent
-// Result, and SourceMeta values are bridged through metaGjsonResult.
+// storedAll resolves every value this leaf's path addresses, keeping gjson's
+// .Raw so the kernel can classify numerics and temporals precisely. A
+// SourceData leaf resolves through ResolvePath against the hops parsed once
+// in prepareNode, so the result set follows the path's syntax rather than the
+// stored value's shape (docs/cloud-parity/path-grammar.md section 3). A
+// SourceMeta leaf is not a data path and carries no subscript, so it keeps
+// its single bridged result through metaGjsonResult, same contract as the
+// pre-split filterStoredResult.
 //
 // KNOWN DIVERGENCE, deliberately not resolved here. A temporal meta field
 // (creationDate / lastUpdateTime) bridges to an RFC3339 string, and this
@@ -135,10 +172,10 @@ func (n *preparedNode) match(data []byte, meta EntityMeta) bool {
 // refuse it at the shared validation boundary, which makes both evaluators'
 // behaviour unreachable. Aligning here would specify semantics for a predicate
 // that is being withdrawn.
-func (n *preparedNode) stored(data []byte, meta EntityMeta) gjson.Result {
+func (n *preparedNode) storedAll(data []byte, meta EntityMeta) []gjson.Result {
 	if n.source == SourceMeta {
 		r, _ := metaGjsonResult(n.path, meta)
-		return r
+		return []gjson.Result{r}
 	}
-	return gjson.GetBytes(data, n.path)
+	return ResolvePath(data, n.hops)
 }

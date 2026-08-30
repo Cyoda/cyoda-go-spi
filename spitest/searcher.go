@@ -221,11 +221,21 @@ func searcherBoundedOrFail(t *testing.T, h Harness, inTx bool) {
 // backend.
 //
 // The tables below are the executable form of Filter.Path's documented
-// grammar: `segment ( "." segment )*` with `segment = 1*( ALPHA / DIGIT / "_"
-// / "-" )`, ASCII only. They are NOT a description of what the in-tree
-// backends happen to do — the same input must be classified the same way on
-// every backend, and a backend that quietly accepts what the others reject has
-// diverged even if nothing visibly breaks on it.
+// grammar:
+//
+//	path      = segment ( "." segment )*
+//	segment   = name subscript*
+//	name      = 1*( ALPHA / DIGIT / "_" / "-" )   ; ASCII only
+//	subscript = "[" ( "*" / 1*DIGIT ) "]"
+//
+// A bracket is an array subscript; a dotted numeric segment ("tags.0") is a
+// field whose name is that digit string, not an array position — the two
+// address different values and this suite must not collapse them any more
+// than a backend may (see docs/cloud-parity/path-grammar.md and
+// [spi.Filter.Path]'s own doc). They are NOT a description of what the
+// in-tree backends happen to do — the same input must be classified the same
+// way on every backend, and a backend that quietly accepts what the others
+// reject has diverged even if nothing visibly breaks on it.
 // ---------------------------------------------------------------------------
 
 // filterPathRejects are paths outside the grammar. Each must be refused with
@@ -233,12 +243,12 @@ func searcherBoundedOrFail(t *testing.T, h Harness, inTx bool) {
 // answer to a well-formed predicate and must stay distinguishable from a
 // malformed one.
 //
-// Two entries deserve naming. "$.status" is in the REJECT set on purpose: a
+// One entry deserves naming: "$.status" is in the REJECT set on purpose — a
 // bare path is the contract, because spi.ConditionToFilter strips the "$."
 // at the wire boundary, so a prefixed path never legitimately reaches a
-// plugin. And "tags[*]" / "tags[0]" are rejected because array positions are
-// addressed as ordinary numeric segments ("tags.0", in the accept set below),
-// not as bracketed subscripts.
+// plugin. A well-formed bracket subscript ("tags[0]", "tags[*]") is NOT
+// here — it is grammar-valid and belongs in the accept table below; only a
+// bracket spelling outside the two supported subscript forms stays rejected.
 var filterPathRejects = []string{
 	"foo';x",                         // quote + semicolon — the shape that diverged
 	"status';DROP TABLE entities;--", // full injection attempt
@@ -253,8 +263,12 @@ var filterPathRejects = []string{
 	".status",                        // leading dot (empty first segment)
 	"status.",                        // trailing dot
 	".",                              // a lone separator
-	"tags[0]",                        // bracketed subscript
-	"tags[*]",                        // wildcard subscript
+	"a[",                             // unclosed subscript
+	"a[-1]",                          // negative index — not one of the two supported forms
+	"a[0:2]",                         // slice syntax
+	"a[?(@.x)]",                      // filter-expression syntax
+	"a[0]b",                          // a name glued directly onto a subscript, no separator
+	"a[99999999999999999999]",        // index overflows int64 (parsePathSub's Atoi rejects it)
 	"$.status",                       // "$."-prefixed — a bare path is the contract
 	"$",                              // bare dollar
 	"héllo",                          // non-ASCII
@@ -286,7 +300,14 @@ var filterPathAcceptsData = []string{
 	"user-name", // hyphen — a valid JSON key, and safe inside a quoted path literal
 	"Status9",   // mixed case and digits
 	"a.b.c",     // nested
-	"tags.0",    // array position as an ordinary numeric segment
+	// A dotted digit segment addresses a FIELD NAMED "0" — an ordinary name
+	// under the grammar (name = ALPHA / DIGIT / "_" / "-"). It is NOT how an
+	// array position is addressed; that is tags[0] below. Collapsing the two
+	// is exactly the defect this table exists to catch.
+	"tags.0",
+	"tags[0]",      // array position via a positional bracket subscript
+	"tags[*]",      // array position via a wildcard bracket subscript
+	"items[*].sku", // chained: a wildcard subscript followed by a nested field
 }
 
 // filterPathAcceptsMeta is the canonical meta vocabulary (see OrderSpec's doc

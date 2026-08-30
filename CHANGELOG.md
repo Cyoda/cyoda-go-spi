@@ -52,13 +52,19 @@ MAINTAINING.md.
   (`ALPHA / DIGIT / "_" / "-"`, ASCII only) — several of which the old
   character-only check let through as malformed `Filter.Path` values.
 
-  Unchanged: a WELL-FORMED array-subscripted path (`$.tags[*].name`,
-  `$.arr[0]`, `$.matrix[*][*]`) is valid JSON Path but not pushdownable, and
-  still fails with a plain error that does NOT wrap `ErrInvalidFilterPath`.
-  That distinction is the point of the sentinel — callers translate a wrapped
-  error into a client error (400) and an unwrapped one into their
-  in-memory-evaluation fallback. A caller that treats every translation error
-  as "fall back" will not observe the tightening at all.
+  **No longer true as of this same `[Unreleased]` window: a WELL-FORMED
+  array-subscripted path (`$.tags[*].name`, `$.arr[0]`, `$.matrix[*][*]`) is
+  valid JSON Path AND NOW TRANSLATES**, instead of failing with a plain
+  unpushdownable error — see the "Filter.Path's grammar admits an array
+  subscript" and "`ConditionToFilter` no longer refuses a well-formed
+  subscripted path" entries below. The sentinel distinction itself is
+  unchanged and still the point: a wrapped error is a client error (400), an
+  unwrapped plain error is the caller's in-memory-evaluation fallback signal.
+  What changed is which condition types land in the unwrapped class — it now
+  holds only the ones `ConditionToFilter` genuinely cannot express (a
+  `FunctionCondition`, an unrecognised condition type), not a well-formed
+  subscripted path. A caller that treats every translation error as "fall
+  back" will not observe either change.
 
   **Subscripts are now scanned rather than short-circuited.** The grammar
   previously stopped reading at the first `[` and accepted the remainder
@@ -317,6 +323,151 @@ MAINTAINING.md.
   bounding is fixed by streaming. A backend returning it will not compile.
   Remove the scan-budget path rather than substituting another sentinel.
 
+- **`Filter.Path`'s grammar admits an array subscript.** The wire and
+  plugin-facing grammars are now the same shape minus the `"$."` leader:
+
+      path      = segment ( "." segment )*
+      segment   = name subscript*
+      name      = 1*( ALPHA / DIGIT / "_" / "-" )   ; ASCII only
+      subscript = "[" ( "*" / 1*DIGIT ) "]"          ; the digit run must fit an int
+
+  A bracket (`tags[0]`, `tags[*]`) is an array index. A dotted numeric
+  segment (`tags.0`) is a field whose name is that digit string. **The two
+  address different values, and a backend must not collapse them.** A field
+  can be declared as both an object and an array branch at once, in which
+  case `tags.0` and `tags[0]` are both valid statements about it and address
+  different data. `tags[0]` was previously outside the grammar entirely — see
+  the `spitest`/conformance entry below for what changes for an out-of-tree
+  backend.
+
+  A positional index's digit run must fit an `int`; a run that overflows is
+  rejected the same as any other malformed subscript, not truncated or
+  wrapped. This grammar and `cyoda-go`'s wire `jsonPath` grammar
+  (`docs/cloud-parity/path-grammar.md` section 2) are the same production
+  minus the `"$."` leader, kept from drifting apart by `ParseFilterPath` and
+  `IsArrayIndex` — see the `IsArrayIndex` entry below.
+
+  Migration for a plugin author with a hand-rolled `Filter.Path` parser or
+  renderer: accept and render the `subscript` production above. A backend
+  that renders `tags[0]` and `tags.0` to the same underlying query — the same
+  SQL column expression, the same document lookup — answers one of them
+  wrongly and must stop doing so; render them distinctly (see
+  `docs/cloud-parity/path-grammar.md` section 9's SQLite/PostgreSQL rendering
+  table for the two-column pattern this repo's own backends use). A backend
+  that already rejected every bracket outright must instead accept the two
+  well-formed subscript forms and reject everything else the grammar excludes
+  (a slice, a union, a filter expression, a negative or signed index, an
+  index too large to fit an `int`, an unbalanced or unmatched bracket, a
+  chained subscript on a non-array).
+
+- **`ConditionToFilter` no longer refuses a well-formed subscripted path; it
+  translates it.** `$.tags[*].name`, `$.arr[0]` and `$.matrix[*][*]` used to
+  be valid JSON Path but "unpushdownable" — a plain error that did not wrap
+  `ErrInvalidFilterPath`, so a caller fell back to in-memory evaluation. They
+  now translate to a `Filter` like any other well-formed path, because the
+  kernel resolves a subscripted path directly (see the leaf-comparison-kernel
+  entry below) rather than needing an in-memory fallback to serve it.
+
+  The plain-error, does-not-wrap-`ErrInvalidFilterPath` class this function
+  can still return now covers only condition types it cannot express at all —
+  a `FunctionCondition`, and an unrecognised `predicate.Condition`
+  implementation — not any well-formed path. A caller whose translate-failure
+  handling assumed "the only plain error is an unpushdownable subscript" no
+  longer holds; check what remains in that class before writing new fallback
+  logic against it.
+
+  Migration: a caller that special-cased array-subscripted paths as
+  "translate fails, fall back to memory" can delete that special case —
+  `ConditionToFilter` now serves them. A caller that inspected the error
+  message for the string "not pushdownable" or similar to detect this case
+  should instead check `errors.Is(err, spi.ErrInvalidFilterPath)`, which is
+  unaffected by this change.
+
+- **An `array` clause is rewritten into an `AND` of positional comparisons
+  before any evaluator sees it, via the new `DesugarCondition`.**
+  `ConditionToFilter` calls it first, so no evaluator — pushdown or
+  in-memory — ever sees a `predicate.ArrayCondition` again; `DesugarCondition`
+  is now the ONLY place the clause's positional semantics are defined.
+  `arrayToFilter` and `arrayElementPath` are gone — deleted, not deprecated,
+  because they encoded a second, competing definition of the same
+  desugaring.
+
+  **The clause's `jsonPath` must carry a trailing `[*]`.** A bare path
+  (`$.tags`) addresses the array itself, not its elements, and cannot carry a
+  positional test — `docs/cloud-parity/path-grammar.md` section 8. This
+  repo's `DesugarCondition` is total and does not itself reject a bare
+  `jsonPath` (it appends `[i]` rather than replacing a trailing `[*]`, so the
+  malformed input still fails downstream at the ordinary path-grammar check);
+  a caller enforcing the array-clause contract at its boundary must reject
+  the bare form itself rather than relying on this function to.
+
+  Migration: a caller building a `Filter` from an `ArrayCondition` by hand,
+  or maintaining its own copy of the old `arrayToFilter`/`arrayElementPath`
+  logic, must switch to `ConditionToFilter` (which now calls
+  `DesugarCondition` for you) or to `DesugarCondition` directly if it needs
+  the rewritten `predicate.Condition` tree rather than a `Filter`. There is
+  no compatibility shim; the two removed functions will not compile.
+
+- **The leaf-comparison kernel resolves a path by its syntax rather than the
+  stored shape.** `preparedNode` (the `Searcher`/in-memory evaluation path)
+  used to call `gjson.GetBytes` on the raw `Filter.Path`, which routes on
+  what the *stored value* looks like: a bare path over an array matched
+  existentially across its elements, and a `[*]` path reaching a scalar fell
+  through to comparing the scalar directly. It now parses the path once
+  (`ParseFilterPath`) and resolves it per row through the new `ResolvePath`,
+  which addresses exactly what `docs/cloud-parity/path-grammar.md` section 3
+  says: **a bare path never unwraps an array, a wildcard never wraps a
+  scalar, and a positional path (`tags[0]`) addresses exactly one position.**
+  A leaf now holds when SOME value the path addresses satisfies it.
+
+  **Vacuity consequence that bites: a wildcard path never answers the
+  array's own nullness.** `tags[*]` addresses elements and nothing else, so
+  an empty array, an explicit `null`, and an absent field all present zero
+  elements to it — `IS_NULL` and `NOT_NULL` both answer **false** for all
+  three. On a wildcard path the two presence tests are therefore **not
+  complements**; they are complements only where at least one element
+  exists. Ask about the array itself with the bare path (`tags`), which
+  separates the three states. A positional path (`tags[0]`) differs: it
+  addresses exactly one position, which may be absent, so `tags[0] IS_NULL`
+  holds over `[]` the way an ordinary absent field does. See
+  `docs/cloud-parity/path-grammar.md` section 5 for the full vacuity table.
+
+  Migration: a caller relying on a bare or wildcard path resolving by the
+  stored value's shape — matching an array existentially through a bare
+  path, or a scalar through a `[*]` path — must repoint the condition at the
+  syntax that now carries that meaning. A caller doing its own
+  `IS_NULL`/`NOT_NULL` bookkeeping alongside a wildcard leaf must not treat
+  the two as complementary; both are `false` over `[]`, `null`, and absent.
+
+- **`ModelNode`/schema surface: `IsArrayIndex` is now exported from this
+  module and is the single definition of a well-formed array index** — a
+  non-empty run of ASCII digits, checked for digit class only (magnitude is
+  `parsePathSub`'s job, layered on top). `isSupportedSubscript`
+  (`condition_filter.go`, the wire-path scanner) and `parsePathSub`
+  (`filter_path.go`, the plugin-facing parser) both delegate to it now
+  instead of each scanning its own copy — the prior duplication had let the
+  two independently drift on subscript magnitude (a 19+ digit index passed
+  one copy's check and failed the other's). A consuming repo's own
+  array-index predicate — `cyoda-go`'s `internal/domain/model/schema`
+  package carries one — should delegate to this exported definition rather
+  than keep its own digit-run loop, for the same reason. Migration: no
+  signature or behaviour change to an existing exported symbol; only a new
+  export to consolidate onto.
+
+**Conformance: `spitest`'s filter-path tables now demand the grammar above.**
+`filterPathRejects`/`filterPathAcceptsData` (`spitest/searcher.go`) moved
+`tags[0]`/`tags[*]` from the reject table to the accept table and added
+overflow, slice, union, filter-expression and unbalanced-bracket cases to the
+reject table. **A backend that has not implemented bracket-subscript
+translation will fail `Searcher/FilterPath/Grammar` (and
+`Iterable/FilterPath/Grammar`) on its next dependency update to this
+module.** Of the listed consumers in `KNOWN_CONSUMERS.md`, this lands
+directly on `cyoda-go`'s in-tree memory/sqlite/postgres plugins (which this
+same milestone already updates in lock-step) and, separately, on
+`cyoda-go-cassandra`, an out-of-tree plugin that must implement bracket
+subscripts before it next bumps its pin, or add a `Harness.Skip` entry while
+it catches up.
+
 ### Added
 
 - **`MergeOrdered` helper.** A pure pull-stream merge of an already-ordered
@@ -532,6 +683,43 @@ MAINTAINING.md.
   needs a `Harness.Skip` entry for `Searcher/Pattern/LikeGrammar` and/or
   `Searcher/Pattern/MalformedLike` until it does.
 
+- **`ParseFilterPath(p string) ([]PathHop, error)`** parses a plugin-facing
+  filter path — no `"$."` leader — into its hops, per the grammar on the
+  `Breaking` entry above. `PathHop{Name string; Subs []PathSub}` is one
+  segment; `PathSub{Wildcard bool; Index int}` is one bracketed subscript,
+  either the wildcard or a parsed non-negative index. An empty path parses to
+  a nil hop slice and is valid (tree operators carry one). The error, when
+  non-nil, wraps `ErrInvalidFilterPath`.
+
+- **`ValidateFilterPath(p string) error`** reports whether `p` is a
+  well-formed filter path without keeping the parsed hops — the boundary
+  check a plugin author writes when it only needs to accept or reject, not
+  resolve.
+
+- **`ResolvePath(data []byte, hops []PathHop) []gjson.Result`** resolves a
+  parsed filter path against one entity's JSON document and returns every
+  value the path addresses, in document order — the ONE resolver
+  `docs/cloud-parity/path-grammar.md` section 10 requires. A bare hop
+  contributes exactly one result whatever its shape, never unwrapped; a `[N]`
+  subscript contributes the element at that index or a non-existent result;
+  a `[*]` subscript contributes one result per element and none at all over
+  a non-array; a missing key contributes one non-existent result rather than
+  being dropped, so a presence test can see it.
+
+- **`DesugarCondition(c predicate.Condition) predicate.Condition`** rewrites
+  every `predicate.ArrayCondition` in `c`'s tree into a
+  `predicate.GroupCondition` (`AND`) of `predicate.SimpleCondition` `EQUALS`
+  leaves, one per non-null value, addressing its element by a bracket index.
+  See the `array`-clause entry under Breaking for the collapsing rules (a
+  single leaf collapses to a bare condition; an all-null `Values` collapses
+  to an empty, vacuously-true `AND`) and for why this is now the one place
+  the clause's semantics are defined.
+
+- **`IsArrayIndex(s string) bool`** is now exported: reports whether `s` is a
+  non-empty run of ASCII digits, the digit-class half of "is this a
+  well-formed array index." See the `IsArrayIndex` entry under Breaking for
+  what it replaces.
+
 ### Changed
 
 - **The `spitest` filter-path conformance table now pins the evaluator's own
@@ -549,21 +737,30 @@ MAINTAINING.md.
   grammar already excludes.
   ([#43](https://github.com/Cyoda/cyoda-go-spi/issues/43))
 
-- **`Filter.Path` now documents its grammar on the field.** The accepted form
-  is `segment ( "." segment )*` with `segment = 1*( ALPHA / DIGIT / "_" /
-  "-" )`, ASCII only: no empty segment, no leading or trailing dot, no
-  bracketed subscript or wildcard (an array position is an ordinary numeric
-  segment, `tags.0`), and no `"$."` prefix — `ConditionToFilter` strips that
-  at the wire boundary, so a path arrives at a plugin bare. An empty `Path`
-  stays legal and unchecked (tree operators carry one). A malformed non-empty
-  path MUST be rejected with an error rather than answered with an empty
-  result set, at both `FieldSource` values and anywhere in the tree.
+- **`Filter.Path` now documents its grammar on the field.** At the time of
+  this entry the accepted form was `segment ( "." segment )*` with
+  `segment = 1*( ALPHA / DIGIT / "_" / "-" )`, ASCII only: no empty segment,
+  no leading or trailing dot, no bracketed subscript or wildcard (an array
+  position was an ordinary numeric segment, `tags.0`), and no `"$."` prefix —
+  `ConditionToFilter` strips that at the wire boundary, so a path arrives at a
+  plugin bare. An empty `Path` stays legal and unchecked (tree operators carry
+  one). A malformed non-empty path MUST be rejected with an error rather than
+  answered with an empty result set, at both `FieldSource` values and
+  anywhere in the tree.
 
-  This is a documentation change, not a contract change: it writes down the
-  grammar the SQL backends' validators already enforced. It is called out
-  here because the grammar previously existed only inside those validators,
-  and a backend author reading the SPI had nothing to conform to — which is
-  how one backend came to accept silently what the others rejected.
+  **Superseded within this same `[Unreleased]` window:** the "no bracketed
+  subscript" clause above no longer holds — see "`Filter.Path`'s grammar
+  admits an array subscript" under Breaking, which is the current grammar.
+  Everything else in this entry (no empty/leading/trailing-dot segment, no
+  `"$."` prefix, mandatory rejection of a malformed non-empty path) still
+  holds.
+
+  This was a documentation change, not a contract change, at the time it
+  landed: it wrote down the grammar the SQL backends' validators already
+  enforced. It is called out here because the grammar previously existed only
+  inside those validators, and a backend author reading the SPI had nothing
+  to conform to — which is how one backend came to accept silently what the
+  others rejected.
 
 - **Point-in-time reads are documented as committed-only across the whole
   family.** `Searcher` and `EntityStore.GetPage` already stated it;
@@ -629,6 +826,19 @@ MAINTAINING.md.
   was swallowed and the leaf silently matched nothing, reporting nothing.
   `LIKE` no longer compiles anything, so those operands now match `Q` and
   `p{Foo}` respectively, per the escape rule above.
+
+- **`OrderSpec.Path` no longer treats a dotted numeric segment as an array
+  index.** `orderLeafValue` (`order_compare.go`) resolved a sort key with
+  `gjson.GetBytes` directly, and gjson resolves an all-digit path segment
+  against an array as a positional index — the same data-driven collapse
+  `docs/cloud-parity/path-grammar.md` forbids everywhere else. A sort key
+  `tags.0` meant to address a field named `"0"` inside an object at `tags`
+  could instead read element 0 of an array at `tags`, silently ordering rows
+  by the wrong value. It now resolves through `ParseFilterPath`/`ResolvePath`
+  like every other path in the module. A sort key never carries a subscript
+  (plugin validators reject one on an `OrderSpec`), so this is always a
+  0-or-1-value resolution and no ordering behavior changes for a
+  non-colliding path. Covered by `TestLessByOrder_NumericSegmentIsNotAnIndex`.
 
 ## [0.8.3] - 2026-07-26
 

@@ -52,10 +52,14 @@ import (
 // accepted as one.
 //
 // A WELL-FORMED array-subscripted path ("$.tags[*].name", "$.arr[0]",
-// "$.matrix[*][*]") is valid JSON Path but not expressible as a pushdown
-// filter. It fails with a plain error that does NOT wrap ErrInvalidFilterPath,
-// which is the signal to fall back to in-memory evaluation rather than to
-// reject the request. A malformed one is invalid input, per the list above.
+// "$.matrix[*][*]") TRANSLATES: the kernel resolves a subscripted path
+// directly (see [ResolvePath]), so it is pushdownable like any other path,
+// not a reason to fall back. A malformed one ("$.a[", "$.a[-1]", "$.a[0:2]",
+// "$.a[0];DROP") is invalid input, per the list above, and is rejected the
+// same way. The one remaining "valid but not expressible as a pushdown
+// filter" case is a [predicate.FunctionCondition]: it fails with a plain
+// error that does NOT wrap ErrInvalidFilterPath, which is the signal to fall
+// back to in-memory evaluation rather than to reject the request.
 //
 // # fields, and why nil is not a safe default
 //
@@ -146,20 +150,150 @@ func ConditionToFilter(cond predicate.Condition, fields map[string]FieldDescript
 		return Filter{}, fmt.Errorf("condition is nil")
 	}
 
-	switch c := cond.(type) {
+	switch c := DesugarCondition(cond).(type) {
 	case *predicate.SimpleCondition:
 		return simpleToFilter(c, fields)
 	case *predicate.LifecycleCondition:
 		return lifecycleToFilter(c)
 	case *predicate.GroupCondition:
 		return groupToFilter(c, fields)
-	case *predicate.ArrayCondition:
-		return arrayToFilter(c, fields)
 	case *predicate.FunctionCondition:
 		return Filter{}, fmt.Errorf("function conditions are not translatable to filters")
 	default:
 		return Filter{}, fmt.Errorf("unsupported condition type: %T", cond)
 	}
+}
+
+// DesugarCondition rewrites every [predicate.ArrayCondition] in cond's tree
+// into a [predicate.GroupCondition] (operator "AND") of
+// [predicate.SimpleCondition] EQUALS leaves, one per non-null value, each
+// addressing its element by a bracket index rather than the container's
+// wildcard. It recurses into [predicate.GroupCondition] children so a nested
+// array clause is rewritten too, and returns every other clause type
+// unchanged. [ConditionToFilter] calls it first, so no evaluator ever sees an
+// ArrayCondition — this is the ONLY place the clause's positional semantics
+// are defined; nothing downstream has a second opinion on what it means.
+//
+// A single non-null value collapses to the bare SimpleCondition rather than a
+// one-child group — an ordinary AND-of-one is a needless wrapper, and every
+// caller here just wants "this leaf's Filter", not "this group's Filter with
+// one child". An all-null Values collapses to an empty AND (Conditions has
+// length zero), which [groupToFilter] renders as [FilterAnd] with no
+// children — the empty-AND identity ("matches everything") already
+// established for a caller-written empty group, not a special case
+// reinvented here.
+//
+// This function is TOTAL: it never errors and never inspects jsonPath for
+// well-formedness. Per the path grammar, an array clause's jsonPath must
+// carry a trailing wildcard subscript ("$.tags[*]"), which desugars to
+// "$.tags[i]" by replacing that trailing "[*]" with "[i]"; a path with no
+// trailing wildcard has "[i]" appended instead (a bare "$.tags" yields
+// "$.tags[0]"). Rejecting the bare spelling is the engine's job at its
+// validation boundary — not this function's — so a caller-supplied jsonPath
+// that is not well-formed at all reaches the resulting SimpleCondition
+// unrejected here and is caught downstream by [stripDollarDot], the same as
+// it always was for any other malformed path.
+func DesugarCondition(c predicate.Condition) predicate.Condition {
+	switch v := c.(type) {
+	case *predicate.ArrayCondition:
+		return desugarArrayCondition(v)
+	case *predicate.GroupCondition:
+		children := make([]predicate.Condition, len(v.Conditions))
+		for i, child := range v.Conditions {
+			children[i] = DesugarCondition(child)
+		}
+		return &predicate.GroupCondition{Operator: v.Operator, Conditions: children}
+	default:
+		return c
+	}
+}
+
+// desugarArrayCondition is [DesugarCondition]'s ArrayCondition case. See that
+// function's doc for the collapsing rules (single leaf, all-null).
+func desugarArrayCondition(c *predicate.ArrayCondition) predicate.Condition {
+	var leaves []predicate.Condition
+	for i, val := range c.Values {
+		if val == nil {
+			continue
+		}
+		leaves = append(leaves, &predicate.SimpleCondition{
+			JsonPath:     desugarArrayElementPath(c.JsonPath, i),
+			OperatorType: "EQUALS",
+			Value:        val,
+		})
+	}
+	if len(leaves) == 1 {
+		return leaves[0]
+	}
+	return &predicate.GroupCondition{Operator: "AND", Conditions: leaves}
+}
+
+// desugarArrayElementPath rewrites an array clause's container jsonPath into
+// the element path for position i: a trailing "[*]" is REPLACED by "[i]"; a
+// path with no trailing wildcard has "[i]" APPENDED instead.
+//
+// Built on [ParseFilterPath] rather than string surgery, so this agrees with
+// the module's one definition of a well-formed subscript instead of a second,
+// potentially drifting, copy of it: the last hop's last subscript is what
+// gets replaced or extended, not merely whatever text happens to precede a
+// literal "[*]" suffix.
+//
+// jsonPath is not required to be well-formed here — this function is total,
+// per [DesugarCondition]'s doc — so a jsonPath that does not parse (missing
+// "$." leader, a malformed subscript, or anything else [ParseFilterPath]
+// rejects) falls back to a plain textual replace-or-append. That fallback
+// output is never itself valid (it is built from already-invalid input), so
+// it still reaches and fails at the same downstream check
+// ([stripDollarDot]) a malformed jsonPath always would have.
+func desugarArrayElementPath(jsonPath string, i int) string {
+	rest, ok := strings.CutPrefix(jsonPath, jsonPathLeader)
+	if ok {
+		if hops, err := ParseFilterPath(rest); err == nil && len(hops) > 0 {
+			last := &hops[len(hops)-1]
+			if n := len(last.Subs); n > 0 && last.Subs[n-1].Wildcard {
+				last.Subs[n-1] = PathSub{Index: i}
+			} else {
+				last.Subs = append(last.Subs, PathSub{Index: i})
+			}
+			return jsonPathLeader + renderPathHops(hops, false)
+		}
+	}
+	if strings.HasSuffix(jsonPath, "[*]") {
+		return jsonPath[:len(jsonPath)-len("[*]")] + fmt.Sprintf("[%d]", i)
+	}
+	return jsonPath + fmt.Sprintf("[%d]", i)
+}
+
+// renderPathHops serializes hops back into the dotted "name[sub][sub]" wire
+// form [ParseFilterPath] parses, with no "$." leader — the module's one
+// hops-to-string serializer, the inverse of ParseFilterPath.
+//
+// foldToWildcard picks which of the two callers' renderings this produces:
+//   - false (desugarArrayElementPath): each subscript keeps its own form —
+//     "[*]" for Wildcard, "[N]" for a resolved Index.
+//   - true (foldSubscriptWildcards): every subscript renders as "[*]"
+//     regardless of its actual form, folding a positional subscript to the
+//     wildcard the fields-map records an array's element type under.
+//
+// The two used to be separate builders differing only in this one choice;
+// collapsed here so there is exactly one place that turns hops back into
+// text, matching the rest of the module's one-definition-per-rule discipline.
+func renderPathHops(hops []PathHop, foldToWildcard bool) string {
+	var b strings.Builder
+	for i, hop := range hops {
+		if i > 0 {
+			b.WriteByte('.')
+		}
+		b.WriteString(hop.Name)
+		for _, sub := range hop.Subs {
+			if foldToWildcard || sub.Wildcard {
+				b.WriteString("[*]")
+			} else {
+				fmt.Fprintf(&b, "[%d]", sub.Index)
+			}
+		}
+	}
+	return b.String()
 }
 
 // simpleToFilter translates a SimpleCondition to a Filter with SourceData.
@@ -174,14 +308,18 @@ func simpleToFilter(c *predicate.SimpleCondition, fields map[string]FieldDescrip
 		return Filter{}, unknownOperatorError(c.OperatorType)
 	}
 	// FieldsMap keys are always "$."-prefixed, and stripDollarDot has just
-	// guaranteed c.JsonPath is too, so this is an identity today. It is kept
-	// as the single key-construction convention — arrayToFilter builds its key
-	// through arrayElementPath, which normalises the same way — because a key
-	// that misses the map does not fail loudly: Declared comes back empty and
-	// the type-directed kernel expands a comparison leaf with no declared type
-	// into nothing, so a field that exists and holds matching data answers
-	// with an empty page.
-	key := NormalisePath(c.JsonPath)
+	// guaranteed c.JsonPath is too, so this first step is an identity today.
+	// It is kept as the single key-construction convention.
+	//
+	// A second fold is REQUIRED before this is used as a map key: the model
+	// tree records an array's element type ONCE, under the wildcard subscript
+	// ("$.tags[*]"), never once per index, so a positional subscript
+	// ("$.tags[0]") must canonicalise to the wildcard form before the lookup
+	// — see foldSubscriptWildcards. A key that misses the map does not fail
+	// loudly: Declared comes back empty and the type-directed kernel expands
+	// a comparison leaf with no declared type into nothing, so a field that
+	// exists and holds matching data answers with an empty page.
+	key := foldSubscriptWildcards(NormalisePath(c.JsonPath))
 	return Filter{
 		Op:       op,
 		Path:     stripped,
@@ -295,59 +433,45 @@ func groupToFilter(c *predicate.GroupCondition, fields map[string]FieldDescripto
 	return Filter{Op: op, Children: children}, nil
 }
 
-// arrayToFilter translates an ArrayCondition into an AND group of positional
-// equality checks. Each non-nil value in the array becomes an equality filter
-// on the corresponding array index (e.g. "tags.0", "tags.2"). Nil entries mean
-// "skip this position". This makes individual checks pushable to SQL via
-// json_extract and correctly evaluable in post-filtering.
+// foldSubscriptWildcards canonicalises a "$."-prefixed wire jsonPath into the
+// fields-map LOOKUP key by folding every subscript — positional or wildcard —
+// to "[*]". "$.tags[0]" and "$.tags[*]" both fold to "$.tags[*]";
+// "$.items[2].sku" folds to "$.items[*].sku"; a path with no subscript is
+// returned unchanged.
 //
-// Declared is stamped on every positional leaf from the array ELEMENT's fields
-// entry — recorded under the base path with a trailing "[*]" (see
-// arrayElementPath) — when resolvable. An unresolvable element path leaves
-// Declared nil on those leaves, and per the kernel's type-directed contract an
-// empty declared set is a non-match for comparison operators.
-func arrayToFilter(c *predicate.ArrayCondition, fields map[string]FieldDescriptor) (Filter, error) {
-	basePath, err := stripDollarDot(c.JsonPath)
+// The model tree records an array's element type ONCE, under the wildcard
+// subscript, never once per index. Once stripDollarDot stopped rejecting a
+// well-formed positional subscript, "$.tags[0]" started reaching the
+// fields-map lookup — both directly, from a caller-written SimpleCondition,
+// and via [DesugarCondition]'s positional leaves — unfolded, that lookup
+// misses, Declared comes back empty, and per the kernel's type-directed
+// contract an empty declared set silently annihilates the eight comparison
+// and ordering operators to a non-match while the other eighteen keep
+// evaluating: an empty page for data that is present.
+//
+// Only the LOOKUP key is folded. This is never the return value that reaches
+// a caller — [Filter.Path] keeps the caller's positional spelling, and any
+// diagnostic names the path the request actually sent. This is also the
+// SINGLE such fold in the module: every fields-map key site routes through
+// here or reuses its result, rather than each canonicalising subscripts on
+// its own.
+//
+// Built on [ParseFilterPath] — the module's one parser for this grammar —
+// rather than a string replace, so the fold agrees with the grammar's own
+// notion of a subscript instead of a second, potentially drifting, copy of
+// it. key has already passed stripDollarDot's identical grammar by the time
+// this runs, so a parse failure here should not happen in practice; the
+// fallback (returning key unfolded) fails safe rather than panicking.
+func foldSubscriptWildcards(key string) string {
+	rest, ok := strings.CutPrefix(key, jsonPathLeader)
+	if !ok || !strings.Contains(rest, "[") {
+		return key
+	}
+	hops, err := ParseFilterPath(rest)
 	if err != nil {
-		return Filter{}, err
+		return key
 	}
-	declared := fields[arrayElementPath(c.JsonPath)].Types
-	var children []Filter
-	for i, val := range c.Values {
-		if val == nil {
-			continue
-		}
-		children = append(children, Filter{
-			Op:       FilterEq,
-			Path:     fmt.Sprintf("%s.%d", basePath, i),
-			Source:   SourceData,
-			Value:    val,
-			Declared: declared,
-		})
-	}
-	if len(children) == 0 {
-		// All positions are nil (don't-care) — matches everything.
-		// Return a tautology: an empty AND is true.
-		return Filter{Op: FilterAnd}, nil
-	}
-	if len(children) == 1 {
-		return children[0], nil
-	}
-	return Filter{Op: FilterAnd, Children: children}, nil
-}
-
-// arrayElementPath returns the fields-map key that addresses an
-// ArrayCondition's element type. The model tree records an array leaf under
-// its container path with a trailing "[*]" (so an ArrayCondition naming
-// "$.tags" addresses the element type recorded at "$.tags[*]"). This ensures
-// both the "$." prefix and the "[*]" suffix, tolerating callers that already
-// supply either.
-func arrayElementPath(rawPath string) string {
-	p := NormalisePath(rawPath)
-	if strings.HasSuffix(p, "[*]") {
-		return p
-	}
-	return p + "[*]"
+	return jsonPathLeader + renderPathHops(hops, true)
 }
 
 // NormalisePath returns raw in the "$."-prefixed convention, idempotently.
@@ -394,34 +518,33 @@ const jsonPathLeader = "$."
 //     function is the boundary between them; see Filter.Path's "Grammar"
 //     section, which this enforces on the post-leader remainder.
 //
-// # Two error classes, and why the difference matters
+// # One error class now
 //
-// Every engine caller treats a translation error as "not pushdownable, fall
-// back to in-memory evaluation". That is the right response to one kind of
-// failure and badly wrong for the other, so the two are distinguishable:
+// stripDollarDot fails only on INVALID PATH input: no "$." leader, nothing
+// after it, an empty or trailing segment, bracket-quoted property access, a
+// bracket spelling outside the two supported subscript forms, or any
+// character outside the grammar — including one that FOLLOWS a well-formed
+// subscript ("$.a[0];DROP"). Every one of these wraps [ErrInvalidFilterPath],
+// and a caller should surface it as a client error (400): the path is either
+// not JSON Path nomenclature at all, or names bracket syntax no evaluator in
+// the stack resolves, and falling back to in-memory evaluation would answer
+// an empty page for a field that exists instead of surfacing the mistake.
 //
-//   - INVALID PATH — no "$." leader, nothing after it, an empty or trailing
-//     segment, bracket-quoted property access, or any character outside the
-//     grammar. The path is not JSON Path nomenclature at all; a bare
-//     "variantId" is simply not a path. These wrap [ErrInvalidFilterPath] and
-//     a caller should surface them as a client error (400). Falling back
-//     instead would be worse than useless: the in-memory evaluator resolves a
-//     bare path happily, so the mistake would never surface, while a
-//     bracket-quoted one resolves to nothing and answers an empty page for a
-//     field that exists.
-//   - NOT PUSHDOWNABLE — a WELL-FORMED "$."-prefixed path using array
-//     subscript syntax ("$.tags[*].name", "$.arr[0]"). Valid JSON Path, and
-//     the in-memory evaluator serves it, so this stays a plain error and the
-//     fallback is the correct response. Promoting it to ErrInvalidFilterPath
-//     would turn working queries into 400s.
+// A WELL-FORMED "$."-prefixed path using array subscript syntax
+// ("$.tags[*].name", "$.arr[0]") is not special-cased here any more: it
+// passes through and translates like any other well-formed path, because the
+// kernel now resolves a subscripted path directly (see [ResolvePath]). This
+// function used to also produce a "not pushdownable, fall back" class for
+// that case; [ConditionToFilter]'s doc still describes that class, but it is
+// now produced one level up, for a [predicate.FunctionCondition] only —
+// stripDollarDot itself never returns it.
 //
-// A MALFORMED subscript ("$.a[", "$.a[0:2]", `$.a["x"]`, "$.a[0];DROP") is in
-// the first class, not the second: the whole path is scanned, subscripts
-// included, so bracket syntax outside the supported forms is invalid input.
-// It used to land in the fallback class because the scan stopped at the first
-// '[' and accepted whatever followed — and the in-memory evaluator resolves
-// none of those spellings, so the request answered an empty page for a field
-// that exists.
+// A MALFORMED subscript ("$.a[", "$.a[0:2]", `$.a["x"]`, "$.a[0];DROP") stays
+// rejected: the whole path is scanned, subscripts included, so bracket syntax
+// outside the supported forms is invalid input, not something a resolver is
+// asked to make sense of. An earlier version of the scan stopped at the first
+// '[' and accepted whatever followed, which is why this remains a dedicated
+// check rather than something the parser incidentally catches.
 func stripDollarDot(path string) (string, error) {
 	if !strings.HasPrefix(path, jsonPathLeader) {
 		return "", invalidPathError(path,
@@ -442,17 +565,10 @@ func stripDollarDot(path string) (string, error) {
 		return "", invalidPathError(path,
 			`bracket-quoted property access is not supported; use dotted access (e.g. "$.a.b")`)
 	}
-	hasSubscript, err := scanWirePathBody(stripped, func(reason string) error {
+	if err := scanWirePathBody(stripped, func(reason string) error {
 		return invalidPathError(path, reason)
-	})
-	if err != nil {
+	}); err != nil {
 		return "", err
-	}
-	if hasSubscript {
-		// Well-formed array subscript/wildcard syntax: valid JSON Path, not
-		// expressible as a pushdown filter. The unpushdownable class — a
-		// plain error, so the caller falls back to in-memory evaluation.
-		return "", fmt.Errorf("path %q contains non-pushdownable array-subscript syntax", path)
 	}
 	return stripped, nil
 }
@@ -465,106 +581,37 @@ func containsBracketQuote(p string) bool {
 }
 
 // scanWirePathBody validates the leader-stripped remainder of a wire jsonPath
-// against the segment grammar and reports whether it uses array-subscript
-// syntax. Diagnostics are built by mkInvalid so each caller can attach its own
-// sentinel and echo the full path.
+// against the segment grammar. Diagnostics are built by mkInvalid so each
+// caller can attach its own sentinel and echo the full path.
 //
 //	body      = segment ( "." segment )*
 //	segment   = name subscript*
 //	name      = 1*( ALPHA / DIGIT / "_" / "-" )        ; ASCII only
-//	subscript = "[" ( "*" / 1*DIGIT ) "]"
+//	subscript = "[" ( "*" / 1*DIGIT ) "]"              ; the digit run must fit an int
 //
-// The whole body is scanned. An earlier version stopped at the first '[' and
-// accepted the remainder unread, which admitted unbalanced brackets, slices,
-// unions, filter expressions, negative indices and arbitrary trailing garbage
-// — none of which any evaluator in the stack resolves.
+// Built on [scanPathHops] — the module's one scan loop for this grammar,
+// shared with [ParseFilterPath] — discarding the parsed hops, which this
+// caller has no use for. The two used to be independent, hand-written copies
+// of the same scan, and the drift that split them apart went unnoticed for a
+// magnitude bound: this one had no check on a subscript's digit-run size,
+// while parsePathSub (reached from ParseFilterPath) did, so an overflowing
+// index passed the wire boundary and ConditionToFilter translated it into a
+// Filter that ValidateFilterPath then bounced — a client error surfacing one
+// step later than it should, for input the boundary had already accepted.
+// Sharing scanPathHops makes that class of drift impossible rather than
+// merely fixing this one instance of it.
 //
 // Errors are reported for the FIRST offending position, so the diagnostic
 // names the character the caller has to fix.
-func scanWirePathBody(body string, mkInvalid func(reason string) error) (bool, error) {
-	hasSubscript := false
-	i, n := 0, len(body)
-	for {
-		nameStart := i
-		for i < n && isPathNameByte(body[i]) {
-			i++
-		}
-		if i == nameStart {
-			if i == n {
-				return false, mkInvalid("ends in a trailing dot")
-			}
-			switch body[i] {
-			case '.':
-				return false, mkInvalid("contains an empty path segment")
-			case '[':
-				return false, mkInvalid("has an array subscript with no field name before it")
-			case ']':
-				return false, mkInvalid(`contains an unmatched "]"`)
-			default:
-				return false, mkInvalid(disallowedCharReason(body[i:]))
-			}
-		}
-		for i < n && body[i] == '[' {
-			rel := strings.IndexByte(body[i:], ']')
-			if rel < 0 {
-				return false, mkInvalid("has an unclosed array subscript")
-			}
-			inner := body[i+1 : i+rel]
-			if !isSupportedSubscript(inner) {
-				return false, mkInvalid(fmt.Sprintf(
-					"has an unsupported array subscript %q; only the wildcard [*] and a non-negative index (e.g. [0]) are supported",
-					"["+inner+"]"))
-			}
-			hasSubscript = true
-			i += rel + 1
-		}
-		if i == n {
-			return hasSubscript, nil
-		}
-		switch body[i] {
-		case '.':
-			i++
-			if i == n {
-				return false, mkInvalid("ends in a trailing dot")
-			}
-		case ']':
-			return false, mkInvalid(`contains an unmatched "]"`)
-		default:
-			return false, mkInvalid(disallowedCharReason(body[i:]))
-		}
-	}
+func scanWirePathBody(body string, mkInvalid func(reason string) error) error {
+	_, err := scanPathHops(body, mkInvalid)
+	return err
 }
 
 // isPathNameByte reports whether b is admissible inside a path segment name.
 func isPathNameByte(b byte) bool {
 	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' ||
 		b >= '0' && b <= '9' || b == '_' || b == '-'
-}
-
-// isSupportedSubscript reports whether the text between "[" and "]" is one of
-// the two forms the stack can resolve: the wildcard, or a non-negative decimal
-// index (digits only — no sign, no whitespace, no exponent). Everything else (a
-// slice, a union, a filter expression, a negative or signed index) has no
-// equivalent in either evaluator.
-//
-// The engine's boundary check applies the same rule, reaching it through the
-// predicate its in-memory evaluator uses to rewrite a subscript for gjson, so
-// "accepted here" and "resolvable there" stay the same question.
-// TestValidateCondition_PathGrammarMatchesSPI (cyoda-go) pins the two against
-// each other.
-func isSupportedSubscript(inner string) bool {
-	if inner == "*" {
-		return true
-	}
-	if inner == "" {
-		return false
-	}
-	for i := 0; i < len(inner); i++ {
-		if inner[i] < '0' || inner[i] > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 // disallowedCharReason renders the diagnostic for the first rune of s, which
@@ -677,7 +724,7 @@ func validateOperatorsAtDepth(cond predicate.Condition, depth int) error {
 		return nil
 	case *predicate.ArrayCondition:
 		// Carries no operator — each positional value becomes an equality
-		// leaf in arrayToFilter. Nothing to check.
+		// leaf in DesugarCondition. Nothing to check.
 		return nil
 	default:
 		// Including FunctionCondition, which carries no operator either.

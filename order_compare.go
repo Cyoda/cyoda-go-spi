@@ -84,11 +84,26 @@ func compareOrderValues(av, bv gjson.Result, kind OrderKind) int {
 	}
 }
 
+// orderLeafValue resolves s.Path against e.Data through [ParseFilterPath] and
+// [ResolvePath] — the same addressing rule every other resolver in the stack
+// applies — rather than gjson.GetBytes's own path syntax, which resolves an
+// all-digit segment against an ARRAY receiver as a positional index. A sort
+// key never carries a subscript (see the plugin validators that reject one on
+// an OrderSpec), so this is always a 0-or-1-value resolution: absent, or the
+// single value the path names.
 func orderLeafValue(e *Entity, s OrderSpec) (gjson.Result, bool) {
 	if s.Source == SourceMeta {
 		return orderMetaLeaf(e, s.Path)
 	}
-	r := gjson.GetBytes(e.Data, s.Path)
+	hops, err := ParseFilterPath(s.Path)
+	if err != nil {
+		return gjson.Result{}, false
+	}
+	results := ResolvePath(e.Data, hops)
+	if len(results) != 1 {
+		return gjson.Result{}, false
+	}
+	r := results[0]
 	if !r.Exists() || r.Type == gjson.Null {
 		return gjson.Result{}, false
 	}

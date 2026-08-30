@@ -49,8 +49,10 @@ func TestConditionToFilter_PrefixedPathsAccepted(t *testing.T) {
 		{"$.address.city", "address.city"},
 		{"$.some-array.some-object", "some-array.some-object"},
 		{"$.a_b.C9", "a_b.C9"},
-		// A numeric segment is how an array position is addressed once
-		// arrayToFilter has expanded it; a caller may also write it directly.
+		// A numeric segment is an ordinary legal field name under the
+		// grammar (name = ALPHA / DIGIT / "_" / "-"), not a special form —
+		// it no longer has any connection to array-position addressing,
+		// which now uses a bracket subscript instead of a dotted digit.
 		{"$.tags.0", "tags.0"},
 		// The storage meta block addressed as a data path. It is not meta
 		// ADDRESSING — that is a lifecycle condition, which never reaches
@@ -77,7 +79,9 @@ func TestConditionToFilter_PrefixedPathsAccepted(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ConditionToFilter(%q): unexpected error: %v", tc.jsonPath, err)
 			}
-			if want := tc.wantPath + ".0"; f.Path != want {
+			// None of these carry a trailing "[*]", so DesugarCondition
+			// appends the bracket index rather than replacing one.
+			if want := tc.wantPath + "[0]"; f.Path != want {
 				t.Errorf("Path = %q, want %q", f.Path, want)
 			}
 		})
@@ -702,16 +706,19 @@ func TestConditionToFilter_Array(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Array conditions expand to AND of positional equality checks.
-	// Values: ["go", nil, "test"] → tags.0 = "go" AND tags.2 = "test"
+	// Array conditions desugar to an AND of positional equality checks
+	// addressed by bracket index, not a dotted numeric segment — a dotted
+	// segment reads as an object key to both SQL dialects, not an array
+	// index, and silently drops the row.
+	// Values: ["go", nil, "test"] → tags[0] = "go" AND tags[2] = "test"
 	if f.Op != spi.FilterAnd {
 		t.Errorf("Op = %s, want and for array condition", f.Op)
 	}
 	if len(f.Children) != 2 {
 		t.Fatalf("Children count = %d, want 2 (nil positions skipped)", len(f.Children))
 	}
-	if f.Children[0].Path != "tags.0" {
-		t.Errorf("Children[0].Path = %s, want tags.0", f.Children[0].Path)
+	if f.Children[0].Path != "tags[0]" {
+		t.Errorf("Children[0].Path = %s, want tags[0]", f.Children[0].Path)
 	}
 	if f.Children[0].Op != spi.FilterEq {
 		t.Errorf("Children[0].Op = %s, want eq", f.Children[0].Op)
@@ -719,8 +726,8 @@ func TestConditionToFilter_Array(t *testing.T) {
 	if f.Children[0].Value != "go" {
 		t.Errorf("Children[0].Value = %v, want go", f.Children[0].Value)
 	}
-	if f.Children[1].Path != "tags.2" {
-		t.Errorf("Children[1].Path = %s, want tags.2", f.Children[1].Path)
+	if f.Children[1].Path != "tags[2]" {
+		t.Errorf("Children[1].Path = %s, want tags[2]", f.Children[1].Path)
 	}
 	if f.Children[1].Value != "test" {
 		t.Errorf("Children[1].Value = %v, want test", f.Children[1].Value)
@@ -740,8 +747,8 @@ func TestConditionToFilter_ArraySingleValue(t *testing.T) {
 	if f.Op != spi.FilterEq {
 		t.Errorf("Op = %s, want eq for single-value array", f.Op)
 	}
-	if f.Path != "items.1" {
-		t.Errorf("Path = %s, want items.1", f.Path)
+	if f.Path != "items[1]" {
+		t.Errorf("Path = %s, want items[1]", f.Path)
 	}
 }
 
@@ -1030,10 +1037,14 @@ func TestConditionToFilter_LifecycleStringMeta_StampsDeclaredString(t *testing.T
 	}
 }
 
-// TestConditionToFilter_Array_StampsDeclaredFromFieldsMap verifies that
-// arrayToFilter's positional-equality leaves stamp Filter.Declared from the
-// array element's fields-map entry (recorded under the base path with a
-// trailing "[*]", per the model tree's flattening convention).
+// TestConditionToFilter_Array_StampsDeclaredFromFieldsMap verifies that an
+// array clause's desugared positional-equality leaves stamp Filter.Declared
+// from the array element's fields-map entry (recorded under the base path
+// with a trailing "[*]", per the model tree's flattening convention). Each
+// leaf resolves this the same way any ordinary SimpleCondition on a
+// positional subscript does — simpleToFilter's foldSubscriptWildcards folds
+// "$.tags[0]" back to the "$.tags[*]" lookup key — with no array-specific
+// declared-type logic left anywhere.
 func TestConditionToFilter_Array_StampsDeclaredFromFieldsMap(t *testing.T) {
 	fields := map[string]spi.FieldDescriptor{
 		"$.tags[*]": {Path: "$.tags[*]", Types: []spi.DataType{spi.String}, IsArray: true},
@@ -1057,10 +1068,11 @@ func TestConditionToFilter_Array_StampsDeclaredFromFieldsMap(t *testing.T) {
 	}
 }
 
-// TestConditionToFilter_Array_DeclaredNilWhenUnresolvable verifies that
-// arrayToFilter's positional leaves leave Declared nil when the array's
-// element path is not present in the fields map (e.g. a nil fields map) — the
-// kernel falls back to non-type-directed comparison for such leaves.
+// TestConditionToFilter_Array_DeclaredNilWhenUnresolvable verifies that an
+// array clause's desugared positional leaves leave Declared nil when the
+// array's element path is not present in the fields map (e.g. a nil fields
+// map) — the kernel falls back to non-type-directed comparison for such
+// leaves.
 func TestConditionToFilter_Array_DeclaredNilWhenUnresolvable(t *testing.T) {
 	cond := &predicate.ArrayCondition{
 		JsonPath: "$.tags",
@@ -1317,7 +1329,12 @@ func TestConditionToFilter_FieldsLookupUsesPrefixedKey(t *testing.T) {
 }
 
 func TestConditionToFilter_EmptyGroupIdentityEncodings(t *testing.T) {
-	t.Run("AllNilArrayYieldsNilChildren", func(t *testing.T) {
+	t.Run("AllNilArrayYieldsNonNilEmptyChildren", func(t *testing.T) {
+		// DesugarCondition turns an all-nil array into a literal empty AND
+		// GroupCondition (no bespoke tautology encoding of its own), so this
+		// now goes through the exact same groupToFilter path — and gets the
+		// exact same non-nil-empty-slice shape — as the caller-written empty
+		// group case below.
 		f, err := spi.ConditionToFilter(&predicate.ArrayCondition{
 			JsonPath: "$.arr", Values: []any{nil, nil},
 		}, nil)
@@ -1327,8 +1344,11 @@ func TestConditionToFilter_EmptyGroupIdentityEncodings(t *testing.T) {
 		if f.Op != spi.FilterAnd {
 			t.Fatalf("Op = %s, want and", f.Op)
 		}
-		if f.Children != nil {
-			t.Errorf("Children = %#v, want nil (the all-nil array tautology)", f.Children)
+		if f.Children == nil {
+			t.Error("Children = nil, want a non-nil empty slice (groupToFilter always allocates)")
+		}
+		if len(f.Children) != 0 {
+			t.Errorf("len(Children) = %d, want 0", len(f.Children))
 		}
 		if !spi.Prepare(f).Match([]byte(`{}`), spi.EntityMeta{}) {
 			t.Error("an empty AND must be the identity (match everything), not match nothing")
@@ -1684,5 +1704,71 @@ func TestValidateLeafPattern(t *testing.T) {
 	}
 	if err := spi.ValidateLeafPattern(spi.FilterEq, `\Q`); err != nil {
 		t.Errorf("non-pattern operator should pass, got %v", err)
+	}
+}
+
+func TestDesugarCondition_ArrayClause(t *testing.T) {
+	got := spi.DesugarCondition(&predicate.ArrayCondition{
+		JsonPath: "$.tags[*]",
+		Values:   []any{"A", nil, "C"},
+	})
+	g, ok := got.(*predicate.GroupCondition)
+	if !ok {
+		t.Fatalf("want *GroupCondition, got %T", got)
+	}
+	if g.Operator != "AND" || len(g.Conditions) != 2 {
+		t.Fatalf("want AND of 2, got %q of %d", g.Operator, len(g.Conditions))
+	}
+	want := []struct{ path, value string }{{"$.tags[0]", "A"}, {"$.tags[2]", "C"}}
+	for i, w := range want {
+		s, ok := g.Conditions[i].(*predicate.SimpleCondition)
+		if !ok {
+			t.Fatalf("child %d: want *SimpleCondition, got %T", i, g.Conditions[i])
+		}
+		if s.JsonPath != w.path || s.OperatorType != "EQUALS" || s.Value != w.value {
+			t.Errorf("child %d = {%q,%q,%v}, want {%q,EQUALS,%q}",
+				i, s.JsonPath, s.OperatorType, s.Value, w.path, w.value)
+		}
+	}
+}
+
+func TestDesugarCondition_AllNullIsTautology(t *testing.T) {
+	got := spi.DesugarCondition(&predicate.ArrayCondition{
+		JsonPath: "$.tags[*]", Values: []any{nil, nil},
+	})
+	g, ok := got.(*predicate.GroupCondition)
+	if !ok || g.Operator != "AND" || len(g.Conditions) != 0 {
+		t.Fatalf("want an empty AND, got %#v", got)
+	}
+}
+
+func TestDesugarCondition_RecursesIntoGroups(t *testing.T) {
+	got := spi.DesugarCondition(&predicate.GroupCondition{
+		Operator: "OR",
+		Conditions: []predicate.Condition{
+			&predicate.ArrayCondition{JsonPath: "$.tags[*]", Values: []any{"A"}},
+		},
+	})
+	g := got.(*predicate.GroupCondition)
+	if _, isArray := g.Conditions[0].(*predicate.ArrayCondition); isArray {
+		t.Fatal("nested ArrayCondition was not desugared")
+	}
+}
+
+func TestConditionToFilter_ArrayClauseProducesBracketPaths(t *testing.T) {
+	// The defect this closes: the positional leaf used to carry the dotted
+	// path "tags.0", which both SQL dialects read as a field named "0", so
+	// the row was dropped by the WHERE clause and no residual could recover it.
+	f, err := spi.ConditionToFilter(&predicate.ArrayCondition{
+		JsonPath: "$.tags[*]", Values: []any{"A"},
+	}, map[string]spi.FieldDescriptor{"$.tags[*]": {Types: []spi.DataType{spi.String}}})
+	if err != nil {
+		t.Fatalf("ConditionToFilter: %v", err)
+	}
+	if f.Path != "tags[0]" {
+		t.Errorf("Path = %q, want %q", f.Path, "tags[0]")
+	}
+	if len(f.Declared) != 1 || f.Declared[0] != spi.String {
+		t.Errorf("Declared = %v, want [String]", f.Declared)
 	}
 }

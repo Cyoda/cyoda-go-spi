@@ -150,20 +150,140 @@ func ConditionToFilter(cond predicate.Condition, fields map[string]FieldDescript
 		return Filter{}, fmt.Errorf("condition is nil")
 	}
 
-	switch c := cond.(type) {
+	switch c := DesugarCondition(cond).(type) {
 	case *predicate.SimpleCondition:
 		return simpleToFilter(c, fields)
 	case *predicate.LifecycleCondition:
 		return lifecycleToFilter(c)
 	case *predicate.GroupCondition:
 		return groupToFilter(c, fields)
-	case *predicate.ArrayCondition:
-		return arrayToFilter(c, fields)
 	case *predicate.FunctionCondition:
 		return Filter{}, fmt.Errorf("function conditions are not translatable to filters")
 	default:
 		return Filter{}, fmt.Errorf("unsupported condition type: %T", cond)
 	}
+}
+
+// DesugarCondition rewrites every [predicate.ArrayCondition] in cond's tree
+// into a [predicate.GroupCondition] (operator "AND") of
+// [predicate.SimpleCondition] EQUALS leaves, one per non-null value, each
+// addressing its element by a bracket index rather than the container's
+// wildcard. It recurses into [predicate.GroupCondition] children so a nested
+// array clause is rewritten too, and returns every other clause type
+// unchanged. [ConditionToFilter] calls it first, so no evaluator ever sees an
+// ArrayCondition — this is the ONLY place the clause's positional semantics
+// are defined; nothing downstream has a second opinion on what it means.
+//
+// A single non-null value collapses to the bare SimpleCondition rather than a
+// one-child group — an ordinary AND-of-one is a needless wrapper, and every
+// caller here just wants "this leaf's Filter", not "this group's Filter with
+// one child". An all-null Values collapses to an empty AND (Conditions has
+// length zero), which [groupToFilter] renders as [FilterAnd] with no
+// children — the empty-AND identity ("matches everything") already
+// established for a caller-written empty group, not a special case
+// reinvented here.
+//
+// This function is TOTAL: it never errors and never inspects jsonPath for
+// well-formedness. Per the path grammar, an array clause's jsonPath must
+// carry a trailing wildcard subscript ("$.tags[*]"), which desugars to
+// "$.tags[i]" by replacing that trailing "[*]" with "[i]"; a path with no
+// trailing wildcard has "[i]" appended instead (a bare "$.tags" yields
+// "$.tags[0]"). Rejecting the bare spelling is the engine's job at its
+// validation boundary — not this function's — so a caller-supplied jsonPath
+// that is not well-formed at all reaches the resulting SimpleCondition
+// unrejected here and is caught downstream by [stripDollarDot], the same as
+// it always was for any other malformed path.
+func DesugarCondition(c predicate.Condition) predicate.Condition {
+	switch v := c.(type) {
+	case *predicate.ArrayCondition:
+		return desugarArrayCondition(v)
+	case *predicate.GroupCondition:
+		children := make([]predicate.Condition, len(v.Conditions))
+		for i, child := range v.Conditions {
+			children[i] = DesugarCondition(child)
+		}
+		return &predicate.GroupCondition{Operator: v.Operator, Conditions: children}
+	default:
+		return c
+	}
+}
+
+// desugarArrayCondition is [DesugarCondition]'s ArrayCondition case. See that
+// function's doc for the collapsing rules (single leaf, all-null).
+func desugarArrayCondition(c *predicate.ArrayCondition) predicate.Condition {
+	var leaves []predicate.Condition
+	for i, val := range c.Values {
+		if val == nil {
+			continue
+		}
+		leaves = append(leaves, &predicate.SimpleCondition{
+			JsonPath:     desugarArrayElementPath(c.JsonPath, i),
+			OperatorType: "EQUALS",
+			Value:        val,
+		})
+	}
+	if len(leaves) == 1 {
+		return leaves[0]
+	}
+	return &predicate.GroupCondition{Operator: "AND", Conditions: leaves}
+}
+
+// desugarArrayElementPath rewrites an array clause's container jsonPath into
+// the element path for position i: a trailing "[*]" is REPLACED by "[i]"; a
+// path with no trailing wildcard has "[i]" APPENDED instead.
+//
+// Built on [ParseFilterPath] rather than string surgery, so this agrees with
+// the module's one definition of a well-formed subscript instead of a second,
+// potentially drifting, copy of it: the last hop's last subscript is what
+// gets replaced or extended, not merely whatever text happens to precede a
+// literal "[*]" suffix.
+//
+// jsonPath is not required to be well-formed here — this function is total,
+// per [DesugarCondition]'s doc — so a jsonPath that does not parse (missing
+// "$." leader, a malformed subscript, or anything else [ParseFilterPath]
+// rejects) falls back to a plain textual replace-or-append. That fallback
+// output is never itself valid (it is built from already-invalid input), so
+// it still reaches and fails at the same downstream check
+// ([stripDollarDot]) a malformed jsonPath always would have.
+func desugarArrayElementPath(jsonPath string, i int) string {
+	rest, ok := strings.CutPrefix(jsonPath, jsonPathLeader)
+	if ok {
+		if hops, err := ParseFilterPath(rest); err == nil && len(hops) > 0 {
+			last := &hops[len(hops)-1]
+			if n := len(last.Subs); n > 0 && last.Subs[n-1].Wildcard {
+				last.Subs[n-1] = PathSub{Index: i}
+			} else {
+				last.Subs = append(last.Subs, PathSub{Index: i})
+			}
+			return jsonPathLeader + renderPathHops(hops)
+		}
+	}
+	if strings.HasSuffix(jsonPath, "[*]") {
+		return jsonPath[:len(jsonPath)-len("[*]")] + fmt.Sprintf("[%d]", i)
+	}
+	return jsonPath + fmt.Sprintf("[%d]", i)
+}
+
+// renderPathHops serializes hops back into the dotted "name[sub][sub]." wire
+// form ParseFilterPath parses, with no "$." leader — the inverse of
+// [ParseFilterPath] restricted to what [desugarArrayElementPath] needs: every
+// subscript rendered as either "[*]" (Wildcard) or "[N]" (a resolved index).
+func renderPathHops(hops []PathHop) string {
+	var b strings.Builder
+	for i, hop := range hops {
+		if i > 0 {
+			b.WriteByte('.')
+		}
+		b.WriteString(hop.Name)
+		for _, sub := range hop.Subs {
+			if sub.Wildcard {
+				b.WriteString("[*]")
+			} else {
+				fmt.Fprintf(&b, "[%d]", sub.Index)
+			}
+		}
+	}
+	return b.String()
 }
 
 // simpleToFilter translates a SimpleCondition to a Filter with SourceData.
@@ -179,8 +299,7 @@ func simpleToFilter(c *predicate.SimpleCondition, fields map[string]FieldDescrip
 	}
 	// FieldsMap keys are always "$."-prefixed, and stripDollarDot has just
 	// guaranteed c.JsonPath is too, so this first step is an identity today.
-	// It is kept as the single key-construction convention — arrayToFilter
-	// builds its key through arrayElementPath, which normalises the same way.
+	// It is kept as the single key-construction convention.
 	//
 	// A second fold is REQUIRED before this is used as a map key: the model
 	// tree records an array's element type ONCE, under the wildcard subscript
@@ -304,61 +423,6 @@ func groupToFilter(c *predicate.GroupCondition, fields map[string]FieldDescripto
 	return Filter{Op: op, Children: children}, nil
 }
 
-// arrayToFilter translates an ArrayCondition into an AND group of positional
-// equality checks. Each non-nil value in the array becomes an equality filter
-// on the corresponding array index (e.g. "tags.0", "tags.2"). Nil entries mean
-// "skip this position". This makes individual checks pushable to SQL via
-// json_extract and correctly evaluable in post-filtering.
-//
-// Declared is stamped on every positional leaf from the array ELEMENT's fields
-// entry — recorded under the base path with a trailing "[*]" (see
-// arrayElementPath) — when resolvable. An unresolvable element path leaves
-// Declared nil on those leaves, and per the kernel's type-directed contract an
-// empty declared set is a non-match for comparison operators.
-func arrayToFilter(c *predicate.ArrayCondition, fields map[string]FieldDescriptor) (Filter, error) {
-	basePath, err := stripDollarDot(c.JsonPath)
-	if err != nil {
-		return Filter{}, err
-	}
-	declared := fields[arrayElementPath(c.JsonPath)].Types
-	var children []Filter
-	for i, val := range c.Values {
-		if val == nil {
-			continue
-		}
-		children = append(children, Filter{
-			Op:       FilterEq,
-			Path:     fmt.Sprintf("%s.%d", basePath, i),
-			Source:   SourceData,
-			Value:    val,
-			Declared: declared,
-		})
-	}
-	if len(children) == 0 {
-		// All positions are nil (don't-care) — matches everything.
-		// Return a tautology: an empty AND is true.
-		return Filter{Op: FilterAnd}, nil
-	}
-	if len(children) == 1 {
-		return children[0], nil
-	}
-	return Filter{Op: FilterAnd, Children: children}, nil
-}
-
-// arrayElementPath returns the fields-map key that addresses an
-// ArrayCondition's element type. The model tree records an array leaf under
-// its container path with a trailing "[*]" (so an ArrayCondition naming
-// "$.tags" addresses the element type recorded at "$.tags[*]"). This ensures
-// both the "$." prefix and the "[*]" suffix, tolerating callers that already
-// supply either.
-func arrayElementPath(rawPath string) string {
-	p := NormalisePath(rawPath)
-	if strings.HasSuffix(p, "[*]") {
-		return p
-	}
-	return p + "[*]"
-}
-
 // foldSubscriptWildcards canonicalises a "$."-prefixed wire jsonPath into the
 // fields-map LOOKUP key by folding every subscript — positional or wildcard —
 // to "[*]". "$.tags[0]" and "$.tags[*]" both fold to "$.tags[*]";
@@ -366,10 +430,10 @@ func arrayElementPath(rawPath string) string {
 // returned unchanged.
 //
 // The model tree records an array's element type ONCE, under the wildcard
-// subscript, never once per index (see [arrayElementPath], which folds the
-// same way for an ArrayCondition's container path). Once stripDollarDot
-// stopped rejecting a well-formed positional subscript, "$.tags[0]" started
-// reaching the fields-map lookup for the first time — unfolded, that lookup
+// subscript, never once per index. Once stripDollarDot stopped rejecting a
+// well-formed positional subscript, "$.tags[0]" started reaching the
+// fields-map lookup — both directly, from a caller-written SimpleCondition,
+// and via [DesugarCondition]'s positional leaves — unfolded, that lookup
 // misses, Declared comes back empty, and per the kernel's type-directed
 // contract an empty declared set silently annihilates the eight comparison
 // and ordering operators to a non-match while the other eighteen keep
@@ -378,9 +442,9 @@ func arrayElementPath(rawPath string) string {
 // Only the LOOKUP key is folded. This is never the return value that reaches
 // a caller — [Filter.Path] keeps the caller's positional spelling, and any
 // diagnostic names the path the request actually sent. This is also the
-// SINGLE such fold in the module: [arrayElementPath] and every other
-// fields-map key site route through here or reuse its result, rather than
-// each canonicalising subscripts on its own.
+// SINGLE such fold in the module: every fields-map key site routes through
+// here or reuses its result, rather than each canonicalising subscripts on
+// its own.
 //
 // Built on [ParseFilterPath] — the module's one parser for this grammar —
 // rather than a string replace, so the fold agrees with the grammar's own
@@ -730,7 +794,7 @@ func validateOperatorsAtDepth(cond predicate.Condition, depth int) error {
 		return nil
 	case *predicate.ArrayCondition:
 		// Carries no operator — each positional value becomes an equality
-		// leaf in arrayToFilter. Nothing to check.
+		// leaf in DesugarCondition. Nothing to check.
 		return nil
 	default:
 		// Including FunctionCondition, which carries no operator either.

@@ -149,8 +149,26 @@ func ConditionToFilter(cond predicate.Condition, fields map[string]FieldDescript
 	if cond == nil {
 		return Filter{}, fmt.Errorf("condition is nil")
 	}
+	return desugaredToFilter(DesugarCondition(cond), fields)
+}
 
-	switch c := DesugarCondition(cond).(type) {
+// desugaredToFilter is [ConditionToFilter]'s dispatch, factored out so
+// [groupToFilter] can recurse into it directly for each already-desugared
+// child rather than calling [ConditionToFilter] again.
+//
+// [DesugarCondition] fully recurses into every descendant of a
+// [predicate.GroupCondition] in ONE call (its own GroupCondition case walks
+// v.Conditions and desugars each), so by the time [ConditionToFilter] reaches
+// its switch, cond's WHOLE tree is already desugared — every descendant, not
+// just the direct children. A [groupToFilter] child is therefore always
+// already-desugared, and re-running [DesugarCondition] on it is pure
+// redundant work: it re-walks and re-allocates a `children` slice for every
+// group node in that child's subtree, and because this happened once per
+// ancestor level, a depth-D chain paid D + (D-1) + ... + 1 = O(D²) group-node
+// revisits instead of O(D). See
+// TestConditionToFilter_DesugarIsNotReappliedPerLevel.
+func desugaredToFilter(cond predicate.Condition, fields map[string]FieldDescriptor) (Filter, error) {
+	switch c := cond.(type) {
 	case *predicate.SimpleCondition:
 		return simpleToFilter(c, fields)
 	case *predicate.LifecycleCondition:
@@ -424,7 +442,10 @@ func groupToFilter(c *predicate.GroupCondition, fields map[string]FieldDescripto
 	}
 	children := make([]Filter, 0, len(c.Conditions))
 	for _, child := range c.Conditions {
-		f, err := ConditionToFilter(child, fields)
+		// child is already desugared — see desugaredToFilter's doc — so this
+		// calls the dispatch directly rather than [ConditionToFilter], which
+		// would re-run [DesugarCondition] on it.
+		f, err := desugaredToFilter(child, fields)
 		if err != nil {
 			return Filter{}, err
 		}

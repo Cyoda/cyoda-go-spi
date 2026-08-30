@@ -202,11 +202,18 @@ func TestPreparedFilter_ResolvesByPathSyntax(t *testing.T) {
 // A presence test is the case that actually discriminates. NOT_NULL over a
 // real, present value ("x") is true if the path resolved at all — so a
 // malformed path answering false here can only mean the parse failure
-// suppressed evaluation before ExpandLeaf/EvalLeaf ever ran. A comparison
-// operator alone would not prove this: it would also answer false for a
-// path that parsed fine but happened not to match the operand, so the
-// second row pairs a comparison with an operand that DOES match the real
-// data, to show the same suppression there too.
+// suppressed evaluation before ExpandLeaf/EvalLeaf ever ran. The second row
+// does not add that same discrimination: a comparison operator also answers
+// false for a path that parsed fine but happened not to match the operand,
+// and — verified directly — it stays green even under the mutation that
+// ignores the parse error entirely, because an ignored error leaves hops nil
+// and ResolvePath then returns the whole root document, which never equals a
+// scalar operand either way. What the row DOES pin is a different parser
+// failure point: "a[0]b"'s trailing-garbage check runs AFTER the "a[0]" hop
+// has already been appended, whereas row one's unclosed-bracket check fires
+// before any hop is appended — so together the two rows cover parse failure
+// on both sides of that boundary, even though only the first is what makes
+// this test discriminating.
 func TestPreparedFilter_MalformedPathNeverResolves(t *testing.T) {
 	cases := []struct {
 		name string

@@ -23,9 +23,9 @@ import (
 //
 //   - ExpandLeaf parses the operand once against the field's declared type set
 //     and produces an Expansion — the typed sub-conditions (numeric / temporal /
-//     other branches) plus a void flag or an error. This is the once-per-query
-//     work, and prepared_filter.go is what makes that true: Prepare calls it
-//     once per leaf and Match never calls it at all.
+//     other branches) — or an error. This is the once-per-query work, and
+//     prepared_filter.go is what makes that true: Prepare calls it once per
+//     leaf and Match never calls it at all.
 //   - EvalLeaf classifies a single stored gjson.Result and decides match/no-match
 //     against a pre-built Expansion. This is the per-row work.
 //
@@ -41,9 +41,10 @@ import (
 //   - BETWEEN uses precise same-type bounds (no double-widening quirk) and is
 //     EXCLUSIVE (an inclusive variant is a trivial later addition — see
 //     evalBetween).
-//   - String ops act only on a textual stored value; a string op against a
-//     non-textual (numeric/boolean) stored slot is a non-match and never
-//     stringifies the stored value.
+//   - String ops act only on a textual stored value; a string op never
+//     stringifies the stored value, so a string op against a non-textual
+//     (numeric/boolean) stored slot has no candidate to test — it follows
+//     operator polarity (see isNegativeOp), not an unconditional non-match.
 //   - BETWEEN_INCLUSIVE is BETWEEN's inclusive twin (lo <= v <= hi vs lo < v <
 //     hi); it shares BETWEEN's expansion/bucketing exactly and differs only in
 //     the final bound comparison (see rangeMatch in evalBetween).
@@ -76,13 +77,20 @@ type tempRange struct {
 }
 
 // Expansion is the once-per-query parse+bucket result of a single leaf. It is
-// opaque to callers — build it with ExpandLeaf and pass it to EvalLeaf. A void
-// expansion (>=1 declared type accepted the operand but every sub-condition was
-// dropped) evaluates to non-match for any stored value.
+// opaque to callers — build it with ExpandLeaf and pass it to EvalLeaf.
+//
+// A kindCompare expansion can have every numeric/temporal/other bucket empty
+// (>=1 declared type accepted the operand, but every sub-condition it produced
+// was then dropped — e.g. EQUALS against an imprecise value). That is not a
+// distinct "void" case: at eval time the stored value's own type family
+// simply has no candidate sub-condition, exactly like a declared type that
+// never accepted the operand in the first place. EvalLeaf answers such an
+// unsatisfiable comparison by operator polarity (isNegativeOp) — false for a
+// positive operator, true for a negative one — not with an unconditional
+// non-match; see evalCompare's hadCandidate contract.
 type Expansion struct {
 	kind expKind
 	op   FilterOp
-	void bool
 
 	// kindCompare branches (OR across families; only the family matching the
 	// stored value's own JSON kind participates).
@@ -203,10 +211,12 @@ func expandCompare(op FilterOp, operand string, declared []DataType) (Expansion,
 	if !engaged {
 		return Expansion{}, fmt.Errorf("ExpandLeaf: operand %q parses into no declared type", operand)
 	}
-	if len(e.numeric) == 0 && len(e.temporal) == 0 && len(e.others) == 0 {
-		// A type accepted the operand but every bucket dropped it → void.
-		return Expansion{kind: kindCompare, op: op, void: true}, nil
-	}
+	// A declared type may have accepted the operand yet dropped every
+	// sub-condition it produced (e.g. EQUALS against an imprecise value) —
+	// e.numeric/e.temporal/e.others are then all empty, same as a type that
+	// never accepted the operand. That is not a distinct case to construct
+	// here: evalCompare/EvalLeaf already treat an empty family as "no
+	// candidate" and answer by operator polarity (see Expansion's doc).
 	return e, nil
 }
 
@@ -344,18 +354,31 @@ func isNegativeOp(op FilterOp) bool {
 // matches the stored value's own JSON kind participates, which is exactly the
 // Cloud "a branch whose type-slot is absent is harmlessly false" behaviour.
 //
-// The second return, hadCandidate, reports whether the stored value's own type
-// family had at least one applicable sub-condition to test — regardless of
-// whether any of them matched. EvalLeaf uses it to decide the unsatisfiable
-// case: no candidate means the comparison could not even be attempted for that
-// value, and the answer then follows operator polarity (isNegativeOp) rather
-// than defaulting to false.
+// The second return, hadCandidate, reports whether the comparison for the
+// stored value's own type family is DECIDED — either a sub-condition was
+// actually tried (matched or not), or the value could not be read at all and
+// the family fails closed. EvalLeaf treats hadCandidate=false as the one case
+// still open to interpretation: no sub-condition even existed to try for that
+// family, so the answer follows operator polarity (isNegativeOp) rather than
+// defaulting to false. hadCandidate=true always means the answer above
+// (matched) is final and polarity plays no further part — that is what makes
+// "value unreadable" and "sub-condition tried and failed" the same outcome:
+// both report hadCandidate=true, matched=false, and EvalLeaf then answers
+// false for every operator, negatives included. Per
+// correctness-over-availability.md: a value the engine cannot read is a
+// fail-closed non-match, never a substituted answer that a negative operator
+// could flip to a match.
 func (e Expansion) evalCompare(stored gjson.Result) (matched bool, hadCandidate bool) {
 	switch stored.Type {
 	case gjson.Number:
 		dec, err := ParseDecimal(stored.Raw)
 		if err != nil {
-			return false, false
+			// The value could not be read (e.g. an exponent Decimal cannot
+			// represent) — NOT "no sub-condition existed to try". Fail closed
+			// for every operator: hadCandidate=true pins the answer to
+			// matched=false regardless of polarity, so a negative operator
+			// never rides an unreadable value into the result set.
+			return false, true
 		}
 		storedT := classifyStoredNumeric(dec)
 		for _, sc := range e.numeric {

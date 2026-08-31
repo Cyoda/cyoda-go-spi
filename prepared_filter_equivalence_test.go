@@ -30,8 +30,12 @@ package spi
 // NOT move automatically with a kernel change — it is a second, hand-rolled
 // reimplementation of the same "stored value's family has no candidate"
 // case, and it must be kept answering the SAME thing the kernel now does
-// (isNegativeOp, not a hardcoded false) or this file stops proving the fast
-// path and the kernel ever agreed.
+// (polarity for a genuine no-candidate, unconditional non-match for a value
+// the engine could not read) or this file stops proving the fast path and
+// the kernel ever agreed. It calls frozenIsNegativeOp, a second,
+// independently-maintained copy of isNegativeOp's switch — not the live
+// isNegativeOp — so a bug in isNegativeOp itself cannot move both sides of
+// the gate together and hide behind a green run.
 
 import (
 	"math/rand"
@@ -98,6 +102,26 @@ func frozenEvalLeafString(op FilterOp, operand string, values []string, declared
 	return EvalLeaf(exp, stored), nil
 }
 
+// frozenIsNegativeOp is a verbatim, INDEPENDENTLY maintained copy of
+// isNegativeOp's switch (eval_leaf.go). frozenEvalLeafFast calls this, never
+// the live isNegativeOp: if it called the live function, a bug introduced
+// into isNegativeOp itself would move both sides of the equivalence gate
+// identically and TestPrepare_EquivalentToFrozenMatchFilter would stay green
+// while catching nothing — exactly the divergence-blindness this whole file
+// exists to avoid (see the file header). Keep this list in sync BY HAND with
+// isNegativeOp; letting them drift apart defeats the point just as much as
+// sharing the function would.
+func frozenIsNegativeOp(op FilterOp) bool {
+	switch op {
+	case FilterNe, FilterINe,
+		FilterNotContains, FilterINotContains,
+		FilterNotStartsWith, FilterINotStartsWith,
+		FilterNotEndsWith, FilterINotEndsWith:
+		return true
+	}
+	return false
+}
+
 func frozenEvalLeafFast(op FilterOp, operand string, declared []DataType, stored gjson.Result) (matched, handled bool) {
 	if len(declared) != 1 {
 		return false, false
@@ -115,10 +139,11 @@ func frozenEvalLeafFast(op FilterOp, operand string, declared []DataType, stored
 			return false, true
 		}
 		if stored.Type != gjson.String {
-			// No candidate for the stored value's own family — same
+			// No candidate for the stored value's own family (a genuine
+			// type-family mismatch, not a read failure) — same
 			// unsatisfiable-comparison rule EvalLeaf/evalCompare applies:
 			// answer by operator polarity, not unconditionally false.
-			return isNegativeOp(op), true
+			return frozenIsNegativeOp(op), true
 		}
 		return cmpResult(strings.Compare(stored.String(), operand), op), true
 
@@ -131,11 +156,18 @@ func frozenEvalLeafFast(op FilterOp, operand string, declared []DataType, stored
 			return false, true
 		}
 		if stored.Type != gjson.Number {
-			return isNegativeOp(op), true
+			// Genuine type-family mismatch — follows polarity.
+			return frozenIsNegativeOp(op), true
 		}
 		storedDec, err := ParseDecimal(stored.Raw)
 		if err != nil {
-			return isNegativeOp(op), true
+			// The value could not be read (gjson already says it IS a
+			// Number) — NOT a no-candidate case. Fail closed for every
+			// operator, same as evalCompare's Number-arm ParseDecimal
+			// failure: a value the engine cannot read is a non-match, never
+			// a substituted answer a negative operator could flip to a
+			// match (correctness-over-availability.md).
+			return false, true
 		}
 		return cmpResult(storedDec.Cmp(opDec), op), true
 	}

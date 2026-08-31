@@ -89,10 +89,16 @@ func oracleRows() []evalRow {
 		{"not_contains ell on hello -> non-match (contains)", FilterNotContains, "ell", nil, []DataType{String}, strp(`"hello"`), false},
 		{"not_contains xyz on hello -> match (does not contain)", FilterNotContains, "xyz", nil, []DataType{String}, strp(`"hello"`), true},
 		{"not_contains ABC case-sensitive on abc -> match (case differs)", FilterNotContains, "ABC", nil, []DataType{String}, strp(`"abc"`), true},
-		// A string operator has no candidate against a non-textual stored slot
-		// (it never stringifies the stored value): unsatisfiable, so a
-		// negative string operator follows polarity and answers true — no
-		// integer's string form is ever tested, so "does not contain" holds.
+		// A string operator has no candidate against a non-textual stored slot:
+		// it never stringifies the stored value (documented divergence, see
+		// eval_leaf.go's Cloud-divergence list), so there is nothing to test
+		// it against. NOT_CONTAINS is a negative operator, so the
+		// unsatisfiable comparison follows polarity and answers true. This
+		// is NOT the numeric-precision rationale ($.n NE 12.5 on an INTEGER,
+		// where PostgreSQL's `<>` agrees) — PostgreSQL's LIKE-family
+		// coerces and disagrees here (`55 NOT LIKE '%5%'` is false), because
+		// SQL stringifies the numeric operand where cyoda-go deliberately
+		// does not.
 		{"not_contains on non-textual numeric -> match (unsatisfiable, follows polarity)", FilterNotContains, "5", nil, []DataType{Integer}, strp("55"), true},
 
 		{"not_starts_with on absent -> non-match", FilterNotStartsWith, "x", nil, []DataType{String}, nil, false},
@@ -100,7 +106,11 @@ func oracleRows() []evalRow {
 		{"not_starts_with he on hello -> non-match (starts with)", FilterNotStartsWith, "he", nil, []DataType{String}, strp(`"hello"`), false},
 		{"not_starts_with xy on hello -> match (does not start with)", FilterNotStartsWith, "xy", nil, []DataType{String}, strp(`"hello"`), true},
 		{"not_starts_with HE case-sensitive on hello -> match (case differs)", FilterNotStartsWith, "HE", nil, []DataType{String}, strp(`"hello"`), true},
-		// Same unsatisfiable-comparison rule as NOT_CONTAINS above.
+		// Same unsatisfiable-comparison rule as NOT_CONTAINS above: a string
+		// operator never stringifies a non-textual stored value, so there is
+		// no candidate to test and the negative operator follows polarity.
+		// (Not the numeric-precision/PostgreSQL rationale — see the comment
+		// on the NOT_CONTAINS row above.)
 		{"not_starts_with on non-textual numeric -> match (unsatisfiable, follows polarity)", FilterNotStartsWith, "5", nil, []DataType{Integer}, strp("55"), true},
 
 		{"not_ends_with on absent -> non-match", FilterNotEndsWith, "x", nil, []DataType{String}, nil, false},
@@ -108,7 +118,11 @@ func oracleRows() []evalRow {
 		{"not_ends_with lo on hello -> non-match (ends with)", FilterNotEndsWith, "lo", nil, []DataType{String}, strp(`"hello"`), false},
 		{"not_ends_with xy on hello -> match (does not end with)", FilterNotEndsWith, "xy", nil, []DataType{String}, strp(`"hello"`), true},
 		{"not_ends_with LO case-sensitive on hello -> match (case differs)", FilterNotEndsWith, "LO", nil, []DataType{String}, strp(`"hello"`), true},
-		// Same unsatisfiable-comparison rule as NOT_CONTAINS above.
+		// Same unsatisfiable-comparison rule as NOT_CONTAINS above: a string
+		// operator never stringifies a non-textual stored value, so there is
+		// no candidate to test and the negative operator follows polarity.
+		// (Not the numeric-precision/PostgreSQL rationale — see the comment
+		// on the NOT_CONTAINS row above.)
 		{"not_ends_with on non-textual numeric -> match (unsatisfiable, follows polarity)", FilterNotEndsWith, "5", nil, []DataType{Integer}, strp("55"), true},
 
 		{"like foo% -> foobar", FilterLike, "foo%", nil, []DataType{String}, strp(`"foobar"`), true},
@@ -163,9 +177,13 @@ func oracleRows() []evalRow {
 		{"20-digit precise eq -> match", FilterEq, "12345678901234567890", nil, []DataType{BigInteger}, strp("12345678901234567890"), true},
 		{"20-digit precise eq -> off-by-one at the 20th digit -> non-match", FilterEq, "12345678901234567890", nil, []DataType{BigInteger}, strp("12345678901234567891"), false},
 
-		// --- void (parses to a type but no surviving bucket) → non-match ----
-		{"void: [INT] eq 12.5 stored 12 -> non-match", FilterEq, "12.5", nil, []DataType{Integer}, strp("12"), false},
-		{"void: [INT] eq 12.5 stored 13 -> non-match", FilterEq, "12.5", nil, []DataType{Integer}, strp("13"), false},
+		// --- a type accepts the operand but every bucket drops it (no
+		// candidate sub-condition survives): EQ is a positive operator, so a
+		// no-candidate comparison is a non-match. (NE over the identical
+		// no-candidate expansion is a match — see
+		// TestEvalLeaf_UnsatisfiableComparisonFollowsPolarity.) -------------
+		{"no candidate: [INT] eq 12.5 stored 12 -> non-match", FilterEq, "12.5", nil, []DataType{Integer}, strp("12"), false},
+		{"no candidate: [INT] eq 12.5 stored 13 -> non-match", FilterEq, "12.5", nil, []DataType{Integer}, strp("13"), false},
 
 		// --- out-of-range numeric bucket → NOT_NULL degenerate (entity-search.md
 		// §6 Step 2 / worked example `[BYTE], LESS_THAN "300" -> NotNull`; cyoda-go
@@ -287,17 +305,31 @@ func TestExpandLeaf_TypeMismatchError(t *testing.T) {
 }
 
 func TestExpandLeaf_Void(t *testing.T) {
-	// [INTEGER] eq "12.5": operand IS numeric but every int bucket drops it → void.
+	// [INTEGER] eq "12.5": operand IS numeric but every int bucket drops it.
+	// Expansion no longer carries a distinct void flag — every bucket is
+	// simply empty, the same shape EvalLeaf treats as "no candidate" for the
+	// stored value's own type family (see Expansion's doc comment).
 	exp, err := ExpandLeaf(FilterEq, "12.5", nil, []DataType{Integer})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !exp.void {
-		t.Fatalf("expected void expansion for [INTEGER] eq 12.5")
+	if len(exp.numeric) != 0 || len(exp.temporal) != 0 || len(exp.others) != 0 {
+		t.Fatalf("expected every bucket empty for [INTEGER] eq 12.5, got numeric=%v temporal=%v others=%v",
+			exp.numeric, exp.temporal, exp.others)
 	}
-	// A void leaf evaluates to non-match for any stored value.
+	// A positive operator (EQ) with no candidate is a non-match.
 	if EvalLeaf(exp, gjson.Parse("12")) {
-		t.Errorf("void leaf must not match")
+		t.Errorf("EQ with no candidate must not match")
+	}
+	// A negative operator (NE) over the identical no-candidate expansion
+	// follows polarity and matches — the unsatisfiable-comparison rule this
+	// package's TestEvalLeaf_UnsatisfiableComparisonFollowsPolarity pins.
+	expNe, err := ExpandLeaf(FilterNe, "12.5", nil, []DataType{Integer})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !EvalLeaf(expNe, gjson.Parse("12")) {
+		t.Errorf("NE with no candidate must match (unsatisfiable comparison follows polarity)")
 	}
 }
 
@@ -554,6 +586,48 @@ func TestEvalLeaf_UnsatisfiableComparisonFollowsPolarity(t *testing.T) {
 	}
 }
 
+// TestEvalLeaf_UnreadableStoredValueFailsClosed pins
+// correctness-over-availability.md against Important-finding #1 from the
+// task-1 review: a stored value the engine CANNOT read (as opposed to one
+// whose type family has no sub-condition to try) must never be treated as
+// unsatisfiable-hence-polarity-flippable. It is a fail-closed non-match for
+// every operator, positive and negative — a value the engine cannot read
+// must never ride a negative operator into the result set as a substituted
+// "true".
+//
+// 0.1e-99999999999 is syntactically a valid JSON number (gjson types it
+// gjson.Number without complaint), but its scale overflows what Decimal can
+// represent, so ParseDecimal(stored.Raw) fails inside evalCompare's Number
+// arm. That is a read failure, not "no candidate for the Number family".
+func TestEvalLeaf_UnreadableStoredValueFailsClosed(t *testing.T) {
+	const unreadable = `0.1e-99999999999`
+
+	// Sanity: confirm the premise still holds — this value really is
+	// unparseable as a Decimal, and gjson really does type it as a Number.
+	if _, err := ParseDecimal(unreadable); err == nil {
+		t.Fatalf("test premise broken: ParseDecimal(%q) now succeeds", unreadable)
+	}
+	if typ := gjson.Parse(unreadable).Type; typ != gjson.Number {
+		t.Fatalf("test premise broken: gjson types %q as %v, want Number", unreadable, typ)
+	}
+
+	cases := []struct {
+		name string
+		op   FilterOp
+	}{
+		{"eq: positive operator, unreadable stored value -> non-match", FilterEq},
+		{"ne: negative operator, unreadable stored value -> non-match (NOT true)", FilterNe},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			exp, err := ExpandLeaf(c.op, "5", nil, []DataType{Integer})
+			require.NoError(t, err)
+			got := EvalLeaf(exp, gjson.Parse(unreadable))
+			require.False(t, got, "an unreadable stored value must fail closed regardless of operator polarity")
+		})
+	}
+}
+
 // TestEvalLeaf_UnsatisfiableComparisonReachabilityMatrix is spec §4.2's
 // "settled by test, not asserted": for every operator that CAN reach the
 // no-candidate path (determined by running the two scenarios below, not by
@@ -594,7 +668,11 @@ func TestEvalLeaf_UnsatisfiableComparisonReachabilityMatrix(t *testing.T) {
 		for _, c := range cases {
 			t.Run(string(c.op), func(t *testing.T) {
 				require.Equal(t, c.want, isNegativeOp(c.op), "table must agree with isNegativeOp")
-				exp, err := ExpandLeaf(c.op, "2024-01-01T00:00:00+02:00", nil, []DataType{String})
+				// Operand is a plain string ("bob") — nothing temporal about
+				// it. What makes this a no-candidate case is declared being
+				// [String] only while the STORED value is a JSON number, so
+				// e.numeric/e.temporal stay empty regardless of the operand.
+				exp, err := ExpandLeaf(c.op, "bob", nil, []DataType{String})
 				require.NoError(t, err)
 				got := EvalLeaf(exp, gjson.Parse("-5"))
 				require.Equal(t, c.want, got)

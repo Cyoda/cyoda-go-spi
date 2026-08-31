@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
 
@@ -88,21 +89,27 @@ func oracleRows() []evalRow {
 		{"not_contains ell on hello -> non-match (contains)", FilterNotContains, "ell", nil, []DataType{String}, strp(`"hello"`), false},
 		{"not_contains xyz on hello -> match (does not contain)", FilterNotContains, "xyz", nil, []DataType{String}, strp(`"hello"`), true},
 		{"not_contains ABC case-sensitive on abc -> match (case differs)", FilterNotContains, "ABC", nil, []DataType{String}, strp(`"abc"`), true},
-		{"not_contains on non-textual numeric -> non-match", FilterNotContains, "5", nil, []DataType{Integer}, strp("55"), false},
+		// A string operator has no candidate against a non-textual stored slot
+		// (it never stringifies the stored value): unsatisfiable, so a
+		// negative string operator follows polarity and answers true — no
+		// integer's string form is ever tested, so "does not contain" holds.
+		{"not_contains on non-textual numeric -> match (unsatisfiable, follows polarity)", FilterNotContains, "5", nil, []DataType{Integer}, strp("55"), true},
 
 		{"not_starts_with on absent -> non-match", FilterNotStartsWith, "x", nil, []DataType{String}, nil, false},
 		{"not_starts_with on null -> non-match", FilterNotStartsWith, "x", nil, []DataType{String}, strp("null"), false},
 		{"not_starts_with he on hello -> non-match (starts with)", FilterNotStartsWith, "he", nil, []DataType{String}, strp(`"hello"`), false},
 		{"not_starts_with xy on hello -> match (does not start with)", FilterNotStartsWith, "xy", nil, []DataType{String}, strp(`"hello"`), true},
 		{"not_starts_with HE case-sensitive on hello -> match (case differs)", FilterNotStartsWith, "HE", nil, []DataType{String}, strp(`"hello"`), true},
-		{"not_starts_with on non-textual numeric -> non-match", FilterNotStartsWith, "5", nil, []DataType{Integer}, strp("55"), false},
+		// Same unsatisfiable-comparison rule as NOT_CONTAINS above.
+		{"not_starts_with on non-textual numeric -> match (unsatisfiable, follows polarity)", FilterNotStartsWith, "5", nil, []DataType{Integer}, strp("55"), true},
 
 		{"not_ends_with on absent -> non-match", FilterNotEndsWith, "x", nil, []DataType{String}, nil, false},
 		{"not_ends_with on null -> non-match", FilterNotEndsWith, "x", nil, []DataType{String}, strp("null"), false},
 		{"not_ends_with lo on hello -> non-match (ends with)", FilterNotEndsWith, "lo", nil, []DataType{String}, strp(`"hello"`), false},
 		{"not_ends_with xy on hello -> match (does not end with)", FilterNotEndsWith, "xy", nil, []DataType{String}, strp(`"hello"`), true},
 		{"not_ends_with LO case-sensitive on hello -> match (case differs)", FilterNotEndsWith, "LO", nil, []DataType{String}, strp(`"hello"`), true},
-		{"not_ends_with on non-textual numeric -> non-match", FilterNotEndsWith, "5", nil, []DataType{Integer}, strp("55"), false},
+		// Same unsatisfiable-comparison rule as NOT_CONTAINS above.
+		{"not_ends_with on non-textual numeric -> match (unsatisfiable, follows polarity)", FilterNotEndsWith, "5", nil, []DataType{Integer}, strp("55"), true},
 
 		{"like foo% -> foobar", FilterLike, "foo%", nil, []DataType{String}, strp(`"foobar"`), true},
 		{"like foo% anchored -> xfoobar", FilterLike, "foo%", nil, []DataType{String}, strp(`"xfoobar"`), false},
@@ -513,4 +520,120 @@ func TestCompileLeafPattern_DerivesOperandLikeTheKernel(t *testing.T) {
 	if m.matches("<nil>") {
 		t.Error(`nil operand derived "<nil>" instead of ""`)
 	}
+}
+
+func TestEvalLeaf_UnsatisfiableComparisonFollowsPolarity(t *testing.T) {
+	cases := []struct {
+		name     string
+		op       FilterOp
+		operand  string
+		declared []DataType
+		stored   string
+		want     bool
+	}{
+		// Whole-expansion void: no declared type accepts the operand's value space.
+		{"eq int vs fractional", FilterEq, "12.5", []DataType{Integer}, `5`, false},
+		{"ne int vs fractional", FilterNe, "12.5", []DataType{Integer}, `5`, true},
+		// Polymorphic: String accepts "12.5", so the expansion is NOT void,
+		// but the numeric family still has no surviving sub-condition.
+		{"eq int|string vs fractional", FilterEq, "12.5", []DataType{Integer, String}, `5`, false},
+		{"ne int|string vs fractional", FilterNe, "12.5", []DataType{Integer, String}, `5`, true},
+		// Null and absent keep operator-semantics.md section 2: never match, negatives included.
+		{"ne over null", FilterNe, "12.5", []DataType{Integer}, `null`, false},
+		// A satisfiable comparison is untouched.
+		{"ne int vs integer operand", FilterNe, "13", []DataType{Integer}, `5`, true},
+		{"eq int vs integer operand", FilterEq, "5", []DataType{Integer}, `5`, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			exp, err := ExpandLeaf(c.op, c.operand, nil, c.declared)
+			require.NoError(t, err)
+			got := EvalLeaf(exp, gjson.Parse(c.stored))
+			require.Equal(t, c.want, got)
+		})
+	}
+}
+
+// TestEvalLeaf_UnsatisfiableComparisonReachabilityMatrix is spec §4.2's
+// "settled by test, not asserted": for every operator that CAN reach the
+// no-candidate path (determined by running the two scenarios below, not by
+// reading the switch statements), pin the exact answer EvalLeaf gives.
+//
+// Two families reach the no-candidate path, each exercised by one canonical
+// scenario that puts every operator in that family through it at once:
+//
+//   - kindCompare (EQ/NE/GT/GTE/LT/LTE): a field declared [String] only,
+//     compared against a stored JSON number. e.numeric and e.temporal are
+//     both empty regardless of op (String is the only declared type), so the
+//     numeric-kind stored value has no surviving sub-condition. (The
+//     single-declared-numeric-type void case is already covered by
+//     TestEvalLeaf_UnsatisfiableComparisonFollowsPolarity; GT/GTE/LT/LTE are
+//     NOT void there — the numeric bucket widens instead of dropping — so
+//     that scenario alone does not exercise all six compare operators.)
+//   - kindStringOp (every string operator, plain and I-prefixed, positive and
+//     negative): a field declared [String], compared against a non-textual
+//     stored value (JSON number or boolean) — string ops never stringify a
+//     non-textual stored value, so there is no candidate.
+//
+// Within each family every operator reaches the SAME no-candidate path, so
+// the answer is purely a function of isNegativeOp(op): false for a positive
+// operator, true for a negative one.
+func TestEvalLeaf_UnsatisfiableComparisonReachabilityMatrix(t *testing.T) {
+	t.Run("kindCompare: declared [String] vs stored number", func(t *testing.T) {
+		cases := []struct {
+			op   FilterOp
+			want bool
+		}{
+			{FilterEq, false},
+			{FilterNe, true},
+			{FilterGt, false},
+			{FilterGte, false},
+			{FilterLt, false},
+			{FilterLte, false},
+		}
+		for _, c := range cases {
+			t.Run(string(c.op), func(t *testing.T) {
+				require.Equal(t, c.want, isNegativeOp(c.op), "table must agree with isNegativeOp")
+				exp, err := ExpandLeaf(c.op, "2024-01-01T00:00:00+02:00", nil, []DataType{String})
+				require.NoError(t, err)
+				got := EvalLeaf(exp, gjson.Parse("-5"))
+				require.Equal(t, c.want, got)
+			})
+		}
+	})
+
+	t.Run("kindStringOp: declared [String] vs non-textual stored value", func(t *testing.T) {
+		cases := []struct {
+			op   FilterOp
+			want bool
+		}{
+			{FilterContains, false},
+			{FilterStartsWith, false},
+			{FilterEndsWith, false},
+			{FilterLike, false},
+			{FilterMatchesRegex, false},
+			{FilterNotContains, true},
+			{FilterNotStartsWith, true},
+			{FilterNotEndsWith, true},
+			{FilterIEq, false},
+			{FilterINe, true},
+			{FilterIContains, false},
+			{FilterINotContains, true},
+			{FilterIStartsWith, false},
+			{FilterINotStartsWith, true},
+			{FilterIEndsWith, false},
+			{FilterINotEndsWith, true},
+		}
+		for _, stored := range []string{"5", "true"} {
+			for _, c := range cases {
+				t.Run(string(c.op)+"/stored="+stored, func(t *testing.T) {
+					require.Equal(t, c.want, isNegativeOp(c.op), "table must agree with isNegativeOp")
+					exp, err := ExpandLeaf(c.op, "foo", nil, []DataType{String})
+					require.NoError(t, err)
+					got := EvalLeaf(exp, gjson.Parse(stored))
+					require.Equal(t, c.want, got)
+				})
+			}
+		}
+	})
 }

@@ -24,6 +24,14 @@ package spi
 // across the corpus, the hoist changed no answers. It does NOT guard the
 // kernel itself — a change to ExpandLeaf or EvalLeaf moves both sides
 // identically and this gate stays green regardless.
+//
+// Exception: frozenEvalLeafFast (single-declared-type String/UnboundDecimal,
+// the six comparable ops) bypasses ExpandLeaf/EvalLeaf entirely, so it does
+// NOT move automatically with a kernel change — it is a second, hand-rolled
+// reimplementation of the same "stored value's family has no candidate"
+// case, and it must be kept answering the SAME thing the kernel now does
+// (isNegativeOp, not a hardcoded false) or this file stops proving the fast
+// path and the kernel ever agreed.
 
 import (
 	"math/rand"
@@ -107,7 +115,10 @@ func frozenEvalLeafFast(op FilterOp, operand string, declared []DataType, stored
 			return false, true
 		}
 		if stored.Type != gjson.String {
-			return false, true
+			// No candidate for the stored value's own family — same
+			// unsatisfiable-comparison rule EvalLeaf/evalCompare applies:
+			// answer by operator polarity, not unconditionally false.
+			return isNegativeOp(op), true
 		}
 		return cmpResult(strings.Compare(stored.String(), operand), op), true
 
@@ -120,11 +131,11 @@ func frozenEvalLeafFast(op FilterOp, operand string, declared []DataType, stored
 			return false, true
 		}
 		if stored.Type != gjson.Number {
-			return false, true
+			return isNegativeOp(op), true
 		}
 		storedDec, err := ParseDecimal(stored.Raw)
 		if err != nil {
-			return false, true
+			return isNegativeOp(op), true
 		}
 		return cmpResult(storedDec.Cmp(opDec), op), true
 	}

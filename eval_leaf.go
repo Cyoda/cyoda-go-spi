@@ -300,20 +300,42 @@ func EvalLeaf(exp Expansion, stored gjson.Result) bool {
 		return false
 	}
 
-	if exp.void {
-		return false
-	}
-
 	switch exp.kind {
 	case kindStringOp:
 		if stored.Type != gjson.String {
-			return false // string op on a non-textual slot → non-match
+			// A string op has no candidate against a non-textual stored slot:
+			// it never stringifies the stored value, so there is nothing to
+			// test. Follow operator polarity rather than answering false
+			// unconditionally.
+			return isNegativeOp(exp.op)
 		}
 		return evalStringOp(exp, stored.String())
 	case kindCompare:
-		return exp.evalCompare(stored)
+		matched, hadCandidate := exp.evalCompare(stored)
+		if matched {
+			return true
+		}
+		if !hadCandidate {
+			return isNegativeOp(exp.op)
+		}
+		return false
 	case kindBetween:
 		return exp.evalBetween(stored)
+	}
+	return false
+}
+
+// isNegativeOp reports whether op asserts the ABSENCE of a relation. When no
+// sub-condition survives for the stored value's own type family, the comparison
+// is unsatisfiable for that value: a positive operator is false and a negative
+// one is true. Null and absent are handled earlier and never reach here.
+func isNegativeOp(op FilterOp) bool {
+	switch op {
+	case FilterNe, FilterINe,
+		FilterNotContains, FilterINotContains,
+		FilterNotStartsWith, FilterINotStartsWith,
+		FilterNotEndsWith, FilterINotEndsWith:
+		return true
 	}
 	return false
 }
@@ -321,26 +343,34 @@ func EvalLeaf(exp Expansion, stored gjson.Result) bool {
 // evalCompare runs the OR-over-branches comparison. Only the branch family that
 // matches the stored value's own JSON kind participates, which is exactly the
 // Cloud "a branch whose type-slot is absent is harmlessly false" behaviour.
-func (e Expansion) evalCompare(stored gjson.Result) bool {
+//
+// The second return, hadCandidate, reports whether the stored value's own type
+// family had at least one applicable sub-condition to test — regardless of
+// whether any of them matched. EvalLeaf uses it to decide the unsatisfiable
+// case: no candidate means the comparison could not even be attempted for that
+// value, and the answer then follows operator polarity (isNegativeOp) rather
+// than defaulting to false.
+func (e Expansion) evalCompare(stored gjson.Result) (matched bool, hadCandidate bool) {
 	switch stored.Type {
 	case gjson.Number:
 		dec, err := ParseDecimal(stored.Raw)
 		if err != nil {
-			return false
+			return false, false
 		}
 		storedT := classifyStoredNumeric(dec)
 		for _, sc := range e.numeric {
 			if !IsAssignableTo(storedT, sc.Type) {
 				continue
 			}
+			hadCandidate = true
 			if sc.NotNull {
-				return true // bare existence test: a present numeric of an assignable type
+				return true, true // bare existence test: a present numeric of an assignable type
 			}
 			if cmpResult(dec.Cmp(sc.Value), sc.Op) {
-				return true
+				return true, true
 			}
 		}
-		return false
+		return false, hadCandidate
 
 	case gjson.String:
 		s := stored.String()
@@ -359,8 +389,9 @@ func (e Expansion) evalCompare(stored gjson.Result) bool {
 					if tc.Type != src.Type {
 						continue
 					}
+					hadCandidate = true
 					if CompareTemporal(tc.Op, storedMs, true, tc.Millis, true) {
-						return true
+						return true, true
 					}
 				}
 			}
@@ -368,34 +399,42 @@ func (e Expansion) evalCompare(stored gjson.Result) bool {
 		for _, oc := range e.others {
 			switch oc.typ {
 			case String:
+				hadCandidate = true
 				if cmpResult(strings.Compare(s, oc.val.(string)), e.op) {
-					return true
+					return true, true
 				}
 			case Character:
 				rs := []rune(s)
-				if len(rs) == 1 && cmpResult(compareRune(rs[0], oc.val.(rune)), e.op) {
-					return true
+				if len(rs) == 1 {
+					hadCandidate = true
+					if cmpResult(compareRune(rs[0], oc.val.(rune)), e.op) {
+						return true, true
+					}
 				}
 			case UUIDType, TimeUUIDType:
 				if id, err := uuid.Parse(s); err == nil {
+					hadCandidate = true
 					if eqNeResult(id == oc.val.(uuid.UUID), e.op) {
-						return true
+						return true, true
 					}
 				}
 			}
 		}
-		return false
+		return false, hadCandidate
 
 	case gjson.True, gjson.False:
 		b := stored.Bool()
 		for _, oc := range e.others {
-			if oc.typ == Boolean && eqNeResult(b == oc.val.(bool), e.op) {
-				return true
+			if oc.typ == Boolean {
+				hadCandidate = true
+				if eqNeResult(b == oc.val.(bool), e.op) {
+					return true, true
+				}
 			}
 		}
-		return false
+		return false, hadCandidate
 	}
-	return false
+	return false, false
 }
 
 // evalBetween applies the precise range test, EXCLUSIVE for BETWEEN and

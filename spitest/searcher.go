@@ -85,6 +85,7 @@ func runSearcherSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "BoundedOrFail/InTx", testSearcherBoundedOrFailInTx)
 	runSubtest(t, h, tracker, "PIT/CommittedOnlyInTx", testSearcherPITCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "FilterPath/Grammar", testSearcherFilterPathGrammar)
+	runSubtest(t, h, tracker, "FilterNot", testSearcherFilterNot)
 	runSubtest(t, h, tracker, "Pattern/LikeGrammar", testPatternLikeGrammar)
 	runSubtest(t, h, tracker, "Pattern/MalformedLike", testPatternMalformedLike)
 }
@@ -410,6 +411,26 @@ func runFilterPathGrammar(t *testing.T, entry string, exec filterPathExec) {
 		t.Errorf("%s accepted a malformed path nested under a non-and/or branch node; path validation must walk any node carrying Children, not a fixed list of branch operators", entry)
 	case !errors.Is(err, spi.ErrInvalidFilterPath):
 		t.Errorf("%s refused a malformed path nested under a non-and/or branch node with %v; the refusal must wrap spi.ErrInvalidFilterPath", entry, err)
+	}
+
+	// A malformed path nested under a REAL FilterNot is still malformed.
+	// Distinct from nestedUnderUnknownBranch above, on purpose: that case
+	// pins that a validator recurses into an operator it has NEVER SEEN;
+	// this one pins that a validator recurses through the actual FilterNot
+	// node this SPI version defines. A validator that recurses on a fixed
+	// case list of named branch operators — say, "FilterAnd, FilterOr,
+	// FilterNot" reintroduced after this SPI added FilterNot — would pass
+	// THIS case while still failing nestedUnderUnknownBranch on the next
+	// operator nobody has added a case for yet. Both cases are needed to
+	// pin both properties; neither subsumes the other.
+	nestedUnderRealNot := spi.Filter{Op: spi.FilterNot, Children: []spi.Filter{
+		malformedPathFilter(spi.SourceData, "foo';x"),
+	}}
+	switch err := exec(t, nestedUnderRealNot); {
+	case err == nil:
+		t.Errorf("%s accepted a malformed path nested under a FilterNot node; path validation must walk any node carrying Children, including FilterNot", entry)
+	case !errors.Is(err, spi.ErrInvalidFilterPath):
+		t.Errorf("%s refused a malformed path nested under a FilterNot node with %v; the refusal must wrap spi.ErrInvalidFilterPath", entry, err)
 	}
 
 	// Accepts: the grammar must not have been satisfied by refusing

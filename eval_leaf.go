@@ -118,6 +118,31 @@ type Expansion struct {
 // row. Production code never reassigns it.
 var compileRegex = regexp.Compile
 
+// maxEchoedOperandBytes bounds how much of a leaf's operand this file's error
+// paths repeat back to the caller. Search request bodies are capped far
+// larger than this (10 MiB), so echoing the operand verbatim would let a
+// single oversized-but-otherwise-ordinary request (e.g. a field with no
+// declared type — the documented 400 INVALID_CONDITION case, not a
+// boundary/backend inconsistency) blow the error up to request size, and
+// prepared_filter.go wraps this same operand a second time on top of it.
+// internal/common's error path then logs that string again as "cause" at
+// WARN, so an unbounded echo turns a client-triggerable, entirely ordinary
+// rejection into tens of megabytes of log per request. Mirrors
+// [ErrInvalidPattern]'s choice (see its doc comment) to drop the operand from
+// a client-facing 400 entirely; this error still names it, just bounded.
+const maxEchoedOperandBytes = 200
+
+// truncateOperand caps s for inclusion in a client-facing error message. The
+// "...(truncated)" marker is explicit so a reader — including one piecing the
+// message back together from a log line — can tell truncation happened
+// rather than mistaking the cut string for the operand in full.
+func truncateOperand(s string) string {
+	if len(s) <= maxEchoedOperandBytes {
+		return s
+	}
+	return s[:maxEchoedOperandBytes] + "...(truncated)"
+}
+
 // ExpandLeaf parses operand (or, for range ops, the two bounds in values)
 // against the field's declared type set and returns the typed Expansion.
 //
@@ -225,7 +250,7 @@ func expandCompare(op FilterOp, operand string, declared []DataType) (Expansion,
 	}
 
 	if !engaged {
-		return Expansion{}, fmt.Errorf("ExpandLeaf: operand %q parses into no declared type", operand)
+		return Expansion{}, fmt.Errorf("ExpandLeaf: operand %q parses into no declared type", truncateOperand(operand))
 	}
 	// A declared type may have accepted the operand yet dropped every
 	// sub-condition it produced (e.g. EQUALS against an imprecise value) —

@@ -304,6 +304,31 @@ func TestExpandLeaf_TypeMismatchError(t *testing.T) {
 	}
 }
 
+// TestExpandLeaf_TypeMismatchError_BoundsOperandLength pins the security-review
+// fix: a search request's operand can be caller-sized (request bodies are
+// capped at 10 MiB), and "operand parses into no declared type" is the
+// documented-normal INVALID_CONDITION case a bare-typed field always hits —
+// not a rare fault worth paying to echo in full. Without truncateOperand the
+// error message grows linearly with the operand, and prepared_filter.go wraps
+// this same string a second time on top, doubling it again.
+func TestExpandLeaf_TypeMismatchError_BoundsOperandLength(t *testing.T) {
+	huge := strings.Repeat("a", 1<<20) // 1 MiB, mirrors the 10 MiB request-body cap's order of magnitude
+	_, err := ExpandLeaf(FilterEq, huge, nil, []DataType{Integer})
+	if err == nil {
+		t.Fatalf("expected error for [INTEGER] eq huge non-numeric operand")
+	}
+	msg := err.Error()
+	if len(msg) > maxEchoedOperandBytes+100 {
+		t.Fatalf("error message not bounded: got %d bytes, want <= ~%d", len(msg), maxEchoedOperandBytes+100)
+	}
+	if !strings.Contains(msg, "...(truncated)") {
+		t.Fatalf("expected truncation marker in error message, got %q", msg)
+	}
+	if strings.Contains(msg, huge) {
+		t.Fatalf("error message must not contain the full operand")
+	}
+}
+
 func TestExpandLeaf_Void(t *testing.T) {
 	// [INTEGER] eq "12.5": operand IS numeric but every int bucket drops it.
 	// Expansion no longer carries a distinct void flag — every bucket is

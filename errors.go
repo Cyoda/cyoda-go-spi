@@ -202,4 +202,11 @@ var ErrInvalidFilterPath = errors.New("invalid filter path")
 // silently building a leaf that never matches: a leaf that never matches is
 // safe only in the absence of negation, because a NOT would invert it into
 // matches-everything.
+//
+// The "no declared type" wrapped message names the operand but caps it at
+// [maxEchoedOperandBytes] (see truncateOperand): this is the ONLY
+// documented-normal case here — a field with no declared type on a search
+// request — so it is also the only one reachable with a caller-sized
+// (megabyte-scale) operand; echoing it verbatim would let an ordinary 400
+// blow up to request size, and it is logged again as "cause" by callers.
 var ErrUnevaluableLeaf = errors.New("unevaluable leaf")

@@ -984,6 +984,20 @@ it catches up.
   tree depth. No output changes; this is a complexity fix only. Covered by
   `TestConditionToFilter_DesugarIsNotReappliedPerLevel`.
 
+- **`ErrUnevaluableLeaf`'s "operand parses into no declared type" message no
+  longer echoes the operand verbatim.** A field with no declared type is the
+  single most common way to reach this error — a search or conditional-delete
+  request with an unannotated field — and search request bodies are capped at
+  10 MiB, so the echoed operand could grow to megabytes: measured, a 1 MiB
+  operand produced a ~2 MiB error string, doubled again by
+  `prepared_filter.go`'s own wrap of the same operand around `ExpandLeaf`'s
+  error. A caller mapping this to a client 400 (cyoda-go logs it at WARN)
+  logged the whole thing a second time as `cause`. Both echoes are now capped
+  at `maxEchoedOperandBytes` (200) with an explicit `...(truncated)` marker,
+  mirroring `ErrInvalidPattern`'s existing choice to bound what a client-facing
+  400 repeats back. Covered by `TestExpandLeaf_TypeMismatchError_BoundsOperandLength`
+  and `TestPrepare_UnevaluableLeaf_BoundsOperandInErrorMessage`.
+
 ## [0.8.3] - 2026-07-26
 
 > Recorded retroactively. The v0.8.3 release did not carry out

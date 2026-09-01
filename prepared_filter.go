@@ -164,9 +164,13 @@ func prepareNode(f Filter) (preparedNode, error) {
 		// TestPreparedFilter_ValidMetaPathAbsentValueStillNonMatches.
 		return preparedNode{}, fmt.Errorf("%w: meta path %q is not in the canonical meta vocabulary", ErrUnevaluableLeaf, f.Path)
 	}
-	exp, err := ExpandLeaf(f.Op, OperandString(f.Value), valuesToStrings(f.Values), f.Declared)
+	operandStr := OperandString(f.Value)
+	exp, err := ExpandLeaf(f.Op, operandStr, valuesToStrings(f.Values), f.Declared)
 	if err != nil {
-		return preparedNode{}, fmt.Errorf("%w: operand %v for op %q: %v", ErrUnevaluableLeaf, f.Value, f.Op, err)
+		// truncateOperand caps the echo — see its doc comment — so a large
+		// operand on the ordinary "no declared type" rejection cannot inflate
+		// this 400 (and the WARN log built from it) to request size.
+		return preparedNode{}, fmt.Errorf("%w: operand %s for op %q: %v", ErrUnevaluableLeaf, truncateOperand(operandStr), f.Op, err)
 	}
 	// The pattern-compile failure ExpandLeaf swallows (compileLeafPattern's
 	// error is deliberately discarded there, leaving strMatch nil, for

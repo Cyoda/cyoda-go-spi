@@ -1,6 +1,7 @@
 package spi_test
 
 import (
+	"strings"
 	"sync"
 	"testing"
 
@@ -40,6 +41,32 @@ func TestPrepare_RejectsUnevaluableLeaf(t *testing.T) {
 			require.ErrorIs(t, err, spi.ErrUnevaluableLeaf)
 		})
 	}
+}
+
+// TestPrepare_UnevaluableLeaf_BoundsOperandInErrorMessage pins the
+// security-review fix for prepared_filter.go's own operand echo (the "%w:
+// operand %s for op %q: %v" wrap): a Filter's Value can be a search request's
+// caller-sized operand (bodies are capped at 10 MiB), and Prepare's error
+// text — logged at WARN by internal/domain/search's ClassifyStoreQueryError —
+// must not grow linearly with it.
+func TestPrepare_UnevaluableLeaf_BoundsOperandInErrorMessage(t *testing.T) {
+	huge := strings.Repeat("a", 1<<20) // 1 MiB
+	_, err := spi.Prepare(spi.Filter{
+		Op: spi.FilterGt, Path: "n", Source: spi.SourceData, Value: huge,
+		Declared: []spi.DataType{spi.Integer},
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, spi.ErrUnevaluableLeaf)
+	msg := err.Error()
+	// Two independent truncations compose into this message (Prepare's own
+	// wrap and ExpandLeaf's inner error, both capped at
+	// maxEchoedOperandBytes), plus fixed wrapper text — a few hundred bytes,
+	// nowhere near the 1 MiB operand. 1000 leaves comfortable headroom for
+	// wrapper wording changes without chasing an exact byte count.
+	if len(msg) > 1000 {
+		t.Fatalf("error message not bounded: got %d bytes", len(msg))
+	}
+	require.NotContains(t, msg, huge, "error message must not contain the full operand")
 }
 
 func TestPrepare_AcceptsMatchAllAndOrdinaryLeaves(t *testing.T) {

@@ -774,13 +774,17 @@ func OperatorNames() []string {
 // implementation surface of the kind relocating [ConditionToFilter] here was
 // meant to remove.
 //
-// It covers ONLY operator names. The three operand obligations documented on
-// [ConditionToFilter] are deliberately not folded in: the object-operand and
-// BETWEEN-arity checks are cheap local checks a caller can apply while
-// walking its own input; the pattern-compilability check was blocked on
-// reaching the kernel's own pattern derivation, which [ValidateLeafPattern]
-// and [ValidateConditionPatterns] now expose. Passing this function is not
-// the same as having validated the condition.
+// It covers ONLY operator names — but that now means BOTH a leaf's
+// OperatorType (EQUALS, NOT_EQUAL, …) AND a GroupCondition's own Operator
+// (AND, OR, NOT): the group's operator is checked at the same node as its
+// children are recursed into, so a bad one nested arbitrarily deep is
+// reported the same way a bad leaf operator is. The three operand
+// obligations documented on [ConditionToFilter] are deliberately not folded
+// in: the object-operand and BETWEEN-arity checks are cheap local checks a
+// caller can apply while walking its own input; the pattern-compilability
+// check was blocked on reaching the kernel's own pattern derivation, which
+// [ValidateLeafPattern] and [ValidateConditionPatterns] now expose. Passing
+// this function is not the same as having validated the condition.
 //
 // Pattern operands are now covered by [ValidateConditionPatterns]. A
 // pattern-cost bound (rejecting a syntactically valid but expensive pattern)

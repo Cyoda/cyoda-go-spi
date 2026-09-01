@@ -422,9 +422,17 @@ func TestLike_SQLParity(t *testing.T) {
 	}
 }
 
-// TestLike_MalformedOperandNeverMatches pins Prepare's documented contract: a
-// leaf whose operand cannot be expanded becomes a leaf that never matches. The
-// 400 happens at the request boundary, via ValidateConditionPatterns — not here.
+// TestLike_MalformedOperandNeverMatches pins ExpandLeaf's own contract,
+// unchanged since Task 2: a pattern operand that will not compile still
+// yields a leaf whose Expansion never matches (nil strMatch) rather than an
+// error, because ExpandLeaf has callers other than prepared_filter.go's
+// Prepare that still want that leaf built. Prepare detects this swallow
+// AFTER the fact (exp.strMatch == nil) and rejects the leaf itself
+// (ErrUnevaluableLeaf) — see Prepare's doc comment — so this test's
+// never-match outcome is not the answer a caller going through Prepare ever
+// observes; it is the building block Prepare's post-hoc check relies on. The
+// 400 a client sees for a malformed pattern happens at the request boundary,
+// via ValidateConditionPatterns — not here.
 func TestLike_MalformedOperandNeverMatches(t *testing.T) {
 	exp, err := ExpandLeaf(FilterLike, `a\`, nil, []DataType{String})
 	if err != nil {

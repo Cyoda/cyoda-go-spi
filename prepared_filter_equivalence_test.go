@@ -326,7 +326,7 @@ func envIntFrom(min int, key string, def int) int {
 // because a leaf silently reported as false is exactly the leaf a future NOT
 // would invert into matches-everything, and because frozen's per-leaf
 // swallowing has its own documented bug (see
-// TestConditionToFilter_NilFields_DegradesInconsistently): an unevaluable
+// TestConditionToFilter_NilFields_ComparisonLeavesAreUnevaluable): an unevaluable
 // leaf under OR can make frozen answer true off a sibling, which Prepare's
 // hard rejection does not attempt to reproduce. So a Prepare error is not
 // compared against frozen's boolean at all — it is checked only for shape
@@ -359,21 +359,29 @@ func TestPrepare_EquivalentToFrozenMatchFilter(t *testing.T) {
 		}
 		compared++
 	}
-	// A gate that never actually compares anything passes vacuously. Guard
-	// against the carve-out swallowing the whole corpus (e.g. a bug that
-	// makes every leaf unevaluable).
-	if compared == 0 {
-		t.Fatal("every generated case was rejected by Prepare; the gate exercised no agree/disagree comparisons")
+	// A gate that never actually compares anything passes vacuously, and
+	// compared == 0 only catches TOTAL collapse. The carve-out already skips
+	// a measured ~32% of the default-seed corpus (comparison/range ops with a
+	// nil declared set are common in genDeclared), so the floor sits
+	// comfortably above that observed rate while still catching a regression
+	// that walks Prepare's rejection rate toward 100%.
+	if floor := cases / 2; compared <= floor {
+		t.Fatalf("compared %d of %d cases (%.1f%%), want more than %d (50%%): the carve-out is swallowing too much of the corpus for this gate to mean anything",
+			compared, cases, 100*float64(compared)/float64(cases), floor)
 	}
 }
 
 // TestPrepare_MatchIsRepeatable pins that a prepared filter gives the same
 // answer on every call — no state is consumed by evaluation. A filter Prepare
 // rejects (see TestPrepare_EquivalentToFrozenMatchFilter's carve-out) has no
-// PreparedFilter to check repeatability on, so it is skipped here too.
+// PreparedFilter to check repeatability on, so it is skipped here too — with
+// the same rate floor as that gate, for the same reason: skipping everything
+// would pass vacuously.
 func TestPrepare_MatchIsRepeatable(t *testing.T) {
 	r := rand.New(rand.NewSource(0xBEEFED))
-	for i := 0; i < 2000; i++ {
+	const n = 2000
+	compared := 0
+	for i := 0; i < n; i++ {
 		f := genFilter(r, 3)
 		data := []byte(genDocs[r.Intn(len(genDocs))])
 		meta := genMeta(r)
@@ -381,12 +389,17 @@ func TestPrepare_MatchIsRepeatable(t *testing.T) {
 		if err != nil {
 			continue
 		}
+		compared++
 		first := p.Match(data, meta)
 		for k := 0; k < 5; k++ {
 			if p.Match(data, meta) != first {
 				t.Fatalf("non-repeatable answer at case %d: filter=%#v", i, f)
 			}
 		}
+	}
+	if floor := n / 2; compared <= floor {
+		t.Fatalf("compared %d of %d cases (%.1f%%), want more than %d (50%%): the carve-out is swallowing too much of the corpus for this gate to mean anything",
+			compared, n, 100*float64(compared)/float64(n), floor)
 	}
 }
 

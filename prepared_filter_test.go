@@ -263,25 +263,27 @@ func TestPreparedFilter_ResolvesByPathSyntax(t *testing.T) {
 }
 
 // TestPreparedFilter_EmptyLeafPathNeverResolves pins that an empty Path on a
-// SourceData LEAF addresses nothing, the same as a malformed path — NOT the
-// whole document. Filter.Path's doc comment says an empty Path "is legal and
-// is not checked" because the AND/OR tree operators carry one instead of a
-// leaf condition; that legality is about the tree shape, not a license for a
-// leaf to mean "match the root". Before the fix this pins, ParseFilterPath("")
-// returned nil hops with no error, and ResolvePath with nil hops resolves to
-// the parsed root document — so a SourceData leaf with an empty Path matched
-// every entity via NOT_NULL, and even matched via EQUALS whenever the operand
-// happened to compare equal to the root's own gjson.Result. This is not
-// reachable through HTTP or gRPC today (every transport requires a leaf's
-// jsonPath/Path to be non-empty before it ever reaches a Filter), but a
-// caller constructing a Filter directly must not get an answer-instead-of-
-// refuse leaf.
+// SourceData LEAF addresses nothing. Filter.Path's doc comment used to say an
+// empty Path "is legal and is not checked" because the AND/OR tree operators
+// carry one instead of a leaf condition — worded so a reader could misread
+// leaf-empty-path as an equally-legal alternate spelling, not just the tree
+// operators' own case. It never was: before the fix this pins,
+// ParseFilterPath("") returned nil hops with no error, and ResolvePath with
+// nil hops resolves to the parsed root document — so a SourceData leaf with
+// an empty Path matched every entity via NOT_NULL, and even matched via
+// EQUALS whenever the operand happened to compare equal to the root's own
+// gjson.Result. This is not reachable through HTTP or gRPC today (every
+// transport requires a leaf's jsonPath/Path to be non-empty before it ever
+// reaches a Filter), but a caller constructing a Filter directly must not
+// get an answer-instead-of-refuse leaf.
 //
 // Since Task 2, a SourceData leaf with an empty Path is unevaluable —
 // Prepare rejects it (ErrUnevaluableLeaf) rather than building a leaf whose
 // Match answer happens to always be false, for the same reason as every
 // other unevaluable-leaf cause: a never-match leaf inverts into
-// matches-everything under a NOT.
+// matches-everything under a NOT. Filter.Path's doc comment now says so
+// directly; see TestPreparedFilter_MetaLeafPathMustBeInVocabulary for the
+// SourceMeta counterpart.
 func TestPreparedFilter_EmptyLeafPathNeverResolves(t *testing.T) {
 	cases := []struct {
 		name string
@@ -302,19 +304,58 @@ func TestPreparedFilter_EmptyLeafPathNeverResolves(t *testing.T) {
 	}
 }
 
-// TestPreparedFilter_EmptyMetaLeafPathIsNotFound pins that a SourceMeta leaf
-// with an empty Path is NOT covered by the SourceData empty-path rejection
-// above — extractFilterMetaValue's switch has no "" case, so it falls to
-// not-found and the leaf simply never matches, same as before Task 2. It is
-// pinned separately, rather than folded into
-// TestPreparedFilter_EmptyLeafPathNeverResolves, so the SourceData fix is not
-// read as having introduced an asymmetry between the two sources: SourceMeta
-// was already "resolves to nothing" and stays that way, it was just never an
-// unevaluable-leaf case to begin with.
-func TestPreparedFilter_EmptyMetaLeafPathIsNotFound(t *testing.T) {
-	f := spi.Filter{Op: spi.FilterNotNull, Path: "", Source: spi.SourceMeta}
-	if got := mustPrepare(t, f).Match([]byte(`{"a":"x"}`), spi.EntityMeta{}); got {
-		t.Errorf("Match = true, want false: an empty meta leaf path must resolve to not-found")
+// TestPreparedFilter_MetaLeafPathMustBeInVocabulary pins the SourceMeta
+// counterpart to TestPreparedFilter_EmptyLeafPathNeverResolves. An earlier
+// version of this test asserted the OPPOSITE — that an empty SourceMeta Path
+// "resolves to not-found" and simply never matches, on the reasoning that
+// extractFilterMetaValue's switch has no "" case so Match alone already
+// answers false. That reasoning is exactly the hazard this task exists to
+// close: a leaf that silently never matches today inverts into "matches
+// every entity" the moment a NOT wraps it, and the boundary that is meant to
+// keep an unrecognized meta field from ever reaching Prepare
+// (lifecycleToFilter passes c.Field through unvalidated) is not a reason to
+// require the wrong answer underneath it if that boundary is ever bypassed —
+// same ruling as the SourceData case.
+//
+// So both an empty Path and a Path outside the closed meta vocabulary
+// (isRecognizedMetaPath / extractFilterMetaValue's keyset) reject with
+// ErrUnevaluableLeaf, exactly like the SourceData causes.
+func TestPreparedFilter_MetaLeafPathMustBeInVocabulary(t *testing.T) {
+	cases := []struct {
+		name string
+		f    spi.Filter
+	}{
+		{"empty meta path, presence test",
+			spi.Filter{Op: spi.FilterNotNull, Path: "", Source: spi.SourceMeta}},
+		{"unrecognized meta path, presence test",
+			spi.Filter{Op: spi.FilterNotNull, Path: "bogus", Source: spi.SourceMeta}},
+		{"unrecognized meta path, equality",
+			spi.Filter{Op: spi.FilterEq, Path: "bogus", Source: spi.SourceMeta,
+				Value: "x", Declared: []spi.DataType{spi.String}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := spi.Prepare(tc.f)
+			require.Error(t, err)
+			require.ErrorIs(t, err, spi.ErrUnevaluableLeaf)
+		})
+	}
+}
+
+// TestPreparedFilter_ValidMetaPathAbsentValueStillNonMatches is the positive
+// control: this is a PATH rule, not a value rule. A meta path that IS in the
+// vocabulary but whose value happens to be absent on this entity (an unset
+// zero time.Time, an empty string) must keep resolving normally and simply
+// non-match — it must not be swept into the same rejection as an
+// out-of-vocabulary path.
+func TestPreparedFilter_ValidMetaPathAbsentValueStillNonMatches(t *testing.T) {
+	notNull := spi.Filter{Op: spi.FilterNotNull, Path: "creationDate", Source: spi.SourceMeta}
+	if got := mustPrepare(t, notNull).Match(nil, spi.EntityMeta{}); got {
+		t.Error("NOT_NULL on an unset creationDate = true, want false (absent value, not a rejected path)")
+	}
+	isNull := spi.Filter{Op: spi.FilterIsNull, Path: "creationDate", Source: spi.SourceMeta}
+	if got := mustPrepare(t, isNull).Match(nil, spi.EntityMeta{}); !got {
+		t.Error("IS_NULL on an unset creationDate = false, want true (absent value, not a rejected path)")
 	}
 }
 

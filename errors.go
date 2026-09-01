@@ -182,8 +182,12 @@ var ErrInvalidFilterPath = errors.New("invalid filter path")
 // ErrUnevaluableLeaf is returned by [Prepare] for a Filter leaf it cannot
 // evaluate: an operand that parses into none of the leaf's declared types
 // (including an empty/nil declared set), a SourceData leaf whose Path is
-// empty or falls outside the documented path grammar, a pattern operand
-// (LIKE / MATCHES_PATTERN) that will not compile, or an unsupported operator.
+// empty or falls outside the documented path grammar, a SourceMeta leaf
+// whose Path is empty or is not one of the names extractFilterMetaValue
+// recognizes (the plugin-facing meta keyset — broader than the client-facing
+// [MetaFieldNames] vocabulary, since it also carries the storage-key aliases
+// e.g. "entity_id", "created_at"), a pattern operand (LIKE / MATCHES_PATTERN)
+// that will not compile, or an unsupported operator.
 //
 // Every cause is decided at prepare time, from the condition alone, before
 // any entity is read — it is a property of the REQUEST, not an artifact of a

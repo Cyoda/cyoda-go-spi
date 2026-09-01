@@ -111,12 +111,22 @@ type Filter struct {
 	// terminate a quoted JSON-path literal is outside it. A backend needing a
 	// wider form must widen this grammar, not bypass its own validator.
 	//
-	// An EMPTY Path is legal and is not checked: tree operators (FilterAnd,
-	// FilterOr) and any leaf that addresses no field carry one.
+	// An EMPTY Path is legal ONLY for a tree operator (FilterAnd, FilterOr):
+	// those carry no leaf condition of their own, Children hold the real
+	// leaves. It is NOT a way for a LEAF to say "addresses no field" — every
+	// leaf addresses exactly one field, on either FieldSource, and an empty
+	// Path on one is rejected: spi.Prepare fails it with ErrUnevaluableLeaf
+	// rather than treating it as a match against the whole document or as an
+	// unconditional non-match. See prepared_filter.go.
 	//
 	// Parse it with ParseFilterPath and validate it with ValidateFilterPath.
 	// A second, independent spelling of the grammar is how a backend admits a
-	// form no resolver serves.
+	// form no resolver serves. This grammar and these two parse helpers are
+	// for Source=SourceData; a Source=SourceMeta Path is not a data path at
+	// all — it names one of a closed set of canonical meta field names
+	// directly (a superset of [MetaFieldNames] that also carries storage-key
+	// aliases such as "entity_id"), and spi.Prepare rejects a Path that is
+	// empty or outside that set the same way (ErrUnevaluableLeaf).
 	//
 	// # Rejection is mandatory
 	//
@@ -129,7 +139,10 @@ type Filter struct {
 	// predicate that genuinely matched nothing are different answers, and a
 	// backend that conflates them makes a client error indistinguishable from
 	// a legitimate empty page on that backend alone. Backends name this
-	// sentinel ErrInvalidFilterPath.
+	// sentinel ErrInvalidFilterPath. The in-process kernel (spi.Prepare)
+	// enforces the same rejection — of an empty or malformed SourceData path,
+	// and of an empty or non-vocabulary SourceMeta path — via
+	// ErrUnevaluableLeaf, ahead of any backend-specific validation.
 	Path string
 
 	Source   FieldSource

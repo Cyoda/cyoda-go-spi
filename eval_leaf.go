@@ -146,9 +146,25 @@ func ExpandLeaf(op FilterOp, operand string, values []string, declared []DataTyp
 		FilterIEq, FilterINe, FilterIContains, FilterINotContains, FilterIStartsWith,
 		FilterINotStartsWith, FilterIEndsWith, FilterINotEndsWith:
 		e := Expansion{kind: kindStringOp, op: op, strOperand: operand}
-		// Swallowed deliberately: Prepare's contract is that a leaf whose
-		// operand cannot be expanded becomes a leaf that never matches.
-		// Callers wanting a rejection ask ValidateLeafPattern FIRST.
+		// Swallowed deliberately: ExpandLeaf's own per-row contract is
+		// unchanged by prepared_filter.go's Prepare — a pattern operand that
+		// will not compile still yields a leaf whose Expansion never matches
+		// (nil strMatch here), for callers outside this package that invoke
+		// ExpandLeaf directly and still want that leaf built rather than an
+		// error.
+		//
+		// Prepare is no longer one of those callers: it now rejects such a
+		// leaf (ErrUnevaluableLeaf). It gets there by checking
+		// exp.strMatch == nil AFTER this call returns, not by asking
+		// ValidateLeafPattern FIRST — asking first would run compileLeafPattern
+		// twice per leaf (once in ValidateLeafPattern, once here) and break
+		// the once-per-query compile guarantee
+		// (TestPrepare_CompilesRegexExactlyOncePerQuery /
+		// TestPrepare_TokenisesLikeExactlyOncePerQuery). That after-the-fact
+		// check is sound because TestValidatorAgreesWithKernel pins that
+		// compileLeafPattern erroring is exactly when strMatch ends up nil —
+		// Prepare's post-hoc check cannot silently miss a case
+		// ValidateLeafPattern would have caught.
 		if m, err := compileLeafPattern(op, operand); err == nil {
 			e.strMatch = m
 		}

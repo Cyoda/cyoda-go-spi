@@ -55,7 +55,8 @@ type preparedNode struct {
 
 // Prepare compiles f for repeated evaluation, or reports why it cannot: a
 // leaf whose operand cannot be expanded, whose SourceData Path is empty or
-// outside the documented path grammar, or whose pattern operand will not
+// outside the documented path grammar, whose SourceMeta Path is empty or
+// outside the closed meta vocabulary, or whose pattern operand will not
 // compile, makes the whole filter unevaluable. That is decided once, from the
 // condition alone, before any entity is read — it is a property of the
 // request, and Prepare rejects the request rather than silently building a
@@ -123,6 +124,22 @@ func prepareNode(f Filter) (preparedNode, error) {
 		}
 		n.hops = hops
 	}
+	if f.Source == SourceMeta && !isRecognizedMetaPath(f.Path) {
+		// A SourceMeta leaf's Path is not a data path at all — it names a
+		// member of the closed meta vocabulary directly (extractFilterMetaValue's
+		// switch), and that switch has no "" case and rejects everything else
+		// by falling to its default arm. Before this check, an empty or
+		// unrecognized meta path built a preparedNode that resolved to
+		// not-found on every row (metaGjsonResult's found=false path) — the
+		// exact same "silently never matches" hazard as the SourceData causes
+		// above, and one lifecycleToFilter can reach directly: it passes a
+		// LifecycleCondition's Field through into Path unvalidated. This is a
+		// PATH rule only: a recognized path whose VALUE happens to be absent
+		// (an unset zero time.Time, an empty string) still resolves normally
+		// and is a legitimate non-match — see
+		// TestPreparedFilter_ValidMetaPathAbsentValueStillNonMatches.
+		return preparedNode{}, fmt.Errorf("%w: meta path %q is not in the canonical meta vocabulary", ErrUnevaluableLeaf, f.Path)
+	}
 	exp, err := ExpandLeaf(f.Op, OperandString(f.Value), valuesToStrings(f.Values), f.Declared)
 	if err != nil {
 		return preparedNode{}, fmt.Errorf("%w: operand %v for op %q: %v", ErrUnevaluableLeaf, f.Value, f.Op, err)
@@ -136,7 +153,11 @@ func prepareNode(f Filter) (preparedNode, error) {
 	// pays this cost, so the once-per-query compile guarantee
 	// (TestPrepare_CompilesRegexExactlyOncePerQuery /
 	// TestPrepare_TokenisesLikeExactlyOncePerQuery) holds for every leaf that
-	// actually prepares successfully.
+	// actually prepares successfully. This is safe rather than merely
+	// convenient: TestValidatorAgreesWithKernel (eval_leaf_test.go) pins that
+	// compileLeafPattern erroring is exactly when strMatch ends up nil, so
+	// checking strMatch == nil here cannot miss a pattern ValidateLeafPattern
+	// would have rejected.
 	if (f.Op == FilterLike || f.Op == FilterMatchesRegex) && exp.strMatch == nil {
 		err := ValidateLeafPattern(f.Op, f.Value)
 		if err == nil {

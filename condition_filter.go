@@ -363,10 +363,17 @@ func unknownOperatorError(op string) error {
 // betweenValues returns the two BETWEEN / BETWEEN_INCLUSIVE bounds as a []any
 // for consumers that read Filter.Values (the kernel's range evaluation, and
 // the SQL backends' query planners). Every range consumer reads Values, not
-// Value — leaving Values unset makes the range op silently never match.
-// Returns nil for non-range ops or a malformed (non 2-element []any) value;
-// validation elsewhere rejects malformed range conditions, and a nil Values
-// correctly no-matches downstream rather than panicking.
+// Value.
+//
+// Returns nil for non-range ops or a malformed (non 2-element []any) value.
+// The BETWEEN-arity check is left to the caller as a cheap local check (see
+// [ValidateConditionOperators]'s doc comment) rather than done here, so a
+// malformed range condition CAN reach this far with Values left nil — but
+// that is no longer a silent non-match downstream: [Prepare] rejects a range
+// leaf whose Values is not exactly length 2 with ErrUnevaluableLeaf (see
+// expandBetween's own arity check), so skipping the up-front check costs a
+// rejected request, never a wrong-but-available answer. See
+// TestConditionToFilter_MalformedBetweenValuesIsUnevaluable.
 func betweenValues(op FilterOp, value any) []any {
 	if op != FilterBetween && op != FilterBetweenInclusive {
 		return nil

@@ -1,6 +1,10 @@
 package spi
 
-import "github.com/tidwall/gjson"
+import (
+	"fmt"
+
+	"github.com/tidwall/gjson"
+)
 
 // prepared_filter.go is the prepare/execute split of the Filter evaluator.
 // Prepare resolves everything that depends only on the query — operand
@@ -36,52 +40,63 @@ type preparedNode struct {
 
 	// hops is the parsed form of path, for SourceData leaves only: parsed
 	// once here in prepareNode so per-row Match does no parsing. A path that
-	// fails to parse leaves hops nil and expanded false — the same "never
-	// matches" a leaf that failed ExpandLeaf already produces, so a malformed
-	// path never resolves to anything rather than falling back to some other
-	// interpretation.
+	// fails to parse makes prepareNode return an error (ErrUnevaluableLeaf)
+	// instead of a node, so hops is always populated whenever a SourceData
+	// leaf's preparedNode exists at all.
 	hops []PathHop
 
-	// exp is meaningful only when expanded is true. A leaf whose ExpandLeaf
-	// failed is a leaf that never matches — the same answer evalLeafFilter
-	// produced by absorbing the error into `matched && err == nil`, but stated
-	// explicitly rather than relying on the zero Expansion happening to fall
-	// through EvalLeaf's switch.
-	exp      Expansion
-	expanded bool
+	// exp is the once-per-query expansion this leaf evaluates against at
+	// Match time. Every preparedNode a successful Prepare/prepareNode call
+	// returns has one — a leaf whose operand cannot be expanded makes
+	// prepareNode return an error instead of a node, so there is no
+	// "unexpanded leaf" state left to represent here.
+	exp Expansion
 }
 
-// Prepare compiles f for repeated evaluation. It returns no error: a leaf whose
-// operand cannot be expanded becomes a leaf that never matches, which is
-// exactly what the per-row evaluator did before. Promoting that to a hard
-// rejection is a cross-backend contract change and is deliberately not done
-// here.
+// Prepare compiles f for repeated evaluation, or reports why it cannot: a
+// leaf whose operand cannot be expanded, whose SourceData Path is empty or
+// outside the documented path grammar, or whose pattern operand will not
+// compile, makes the whole filter unevaluable. That is decided once, from the
+// condition alone, before any entity is read — it is a property of the
+// request, and Prepare rejects the request rather than silently building a
+// leaf that never matches. A never-match leaf would be indistinguishable from
+// a genuine non-match at Match time, and — the reason this is not merely
+// cosmetic — a NOT would invert it into matches-everything.
 //
 // Prepare copies everything it needs out of f. It does not retain a
 // reference to it, so mutating f afterwards does not affect the returned
 // value.
-func Prepare(f Filter) PreparedFilter {
+func Prepare(f Filter) (PreparedFilter, error) {
 	// Root-only match-all. This check must NOT move into prepareNode: a
-	// zero-Op CHILD is a leaf that never matches, and hoisting the check into
-	// the recursion would silently turn it into an identity element.
+	// zero-Op CHILD is an unevaluable leaf (ExpandLeaf's default arm rejects
+	// it, same as any other unsupported operator), and hoisting the check
+	// into the recursion would silently turn it into an identity element
+	// instead of the rejection every other unevaluable leaf gets.
 	if f.Op == "" {
-		return PreparedFilter{}
+		return PreparedFilter{}, nil
 	}
-	n := prepareNode(f)
-	return PreparedFilter{root: &n}
+	n, err := prepareNode(f)
+	if err != nil {
+		return PreparedFilter{}, err
+	}
+	return PreparedFilter{root: &n}, nil
 }
 
-func prepareNode(f Filter) preparedNode {
+func prepareNode(f Filter) (preparedNode, error) {
 	switch f.Op {
 	case FilterAnd, FilterOr:
 		n := preparedNode{op: f.Op}
 		if len(f.Children) > 0 {
 			n.children = make([]preparedNode, len(f.Children))
 			for i, c := range f.Children {
-				n.children[i] = prepareNode(c)
+				child, err := prepareNode(c)
+				if err != nil {
+					return preparedNode{}, err
+				}
+				n.children[i] = child
 			}
 		}
-		return n
+		return n, nil
 	}
 
 	// Leaf — including a zero-Op child, which ExpandLeaf's default arm rejects.
@@ -91,35 +106,51 @@ func prepareNode(f Filter) preparedNode {
 			// An empty Path is legal ONLY for a tree operator (FilterAnd /
 			// FilterOr, handled in the switch above and never reaching this
 			// branch) — it is how Filter.Path spells "addresses no field at
-			// all". A LEAF with an empty Path addresses no field either, so
-			// it must never resolve to anything, exactly like a path that
-			// fails to parse below: leaving hops nil and expanded false is
-			// what makes that so. Without this guard, ParseFilterPath("")
+			// all". A LEAF with an empty Path addresses no field either, and
+			// must be rejected rather than resolved: ParseFilterPath("")
 			// succeeds with a nil hop slice — legal input, by design, for
 			// the tree-operator case — and ResolvePath(data, nil) resolves
 			// that nil hop slice to the parsed ROOT DOCUMENT, so a
-			// SourceData leaf with an empty Path matched every entity via a
-			// presence test and matched via equality whenever the operand
-			// happened to compare equal to the document's own gjson.Result.
-			return n
+			// SourceData leaf with an empty Path would match every entity
+			// via a presence test and match via equality whenever the
+			// operand happened to compare equal to the document's own
+			// gjson.Result.
+			return preparedNode{}, fmt.Errorf("%w: leaf addresses no field (empty path)", ErrUnevaluableLeaf)
 		}
 		hops, err := ParseFilterPath(f.Path)
 		if err != nil {
-			// A path that fails to parse must never resolve to anything: leave
-			// the node unexpanded, which is already a non-match. Do not fall
-			// through to ExpandLeaf — an unexpanded node never reaches
-			// storedAll either way, but leaving hops nil here keeps that
-			// invariant explicit rather than incidental.
-			return n
+			return preparedNode{}, fmt.Errorf("%w: path %q: %v", ErrUnevaluableLeaf, f.Path, err)
 		}
 		n.hops = hops
 	}
 	exp, err := ExpandLeaf(f.Op, OperandString(f.Value), valuesToStrings(f.Values), f.Declared)
-	if err == nil {
-		n.exp = exp
-		n.expanded = true
+	if err != nil {
+		return preparedNode{}, fmt.Errorf("%w: operand %v for op %q: %v", ErrUnevaluableLeaf, f.Value, f.Op, err)
 	}
-	return n
+	// The pattern-compile failure ExpandLeaf swallows (compileLeafPattern's
+	// error is deliberately discarded there, leaving strMatch nil, for
+	// callers that still want a never-match leaf) must be surfaced HERE
+	// instead of by changing ExpandLeaf's contract, which other callers
+	// depend on. ValidateLeafPattern re-derives the same compile ONLY on this
+	// (rare) failure path — exp.strMatch != nil is the common case and never
+	// pays this cost, so the once-per-query compile guarantee
+	// (TestPrepare_CompilesRegexExactlyOncePerQuery /
+	// TestPrepare_TokenisesLikeExactlyOncePerQuery) holds for every leaf that
+	// actually prepares successfully.
+	if (f.Op == FilterLike || f.Op == FilterMatchesRegex) && exp.strMatch == nil {
+		err := ValidateLeafPattern(f.Op, f.Value)
+		if err == nil {
+			// Should not happen: ExpandLeaf and ValidateLeafPattern share the
+			// same derivation (compileLeafPattern), so a nil matcher here
+			// implies ValidateLeafPattern also errors. Guard against a future
+			// divergence between them turning into a silently-accepted
+			// never-match leaf instead of a loud bug.
+			err = fmt.Errorf("pattern operand did not compile, but ValidateLeafPattern reported no error")
+		}
+		return preparedNode{}, fmt.Errorf("%w: %v", ErrUnevaluableLeaf, err)
+	}
+	n.exp = exp
+	return n, nil
 }
 
 // Match reports whether the entity satisfies the prepared filter. It performs
@@ -146,9 +177,6 @@ func (n *preparedNode) match(data []byte, meta EntityMeta) bool {
 				return true
 			}
 		}
-		return false
-	}
-	if !n.expanded {
 		return false
 	}
 	// A leaf holds when SOME addressed value satisfies it. A leaf addressing

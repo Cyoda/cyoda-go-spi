@@ -178,3 +178,17 @@ var ErrInvalidPattern = errors.New("invalid pattern")
 //
 // is the backend-agnostic way to classify a malformed path.
 var ErrInvalidFilterPath = errors.New("invalid filter path")
+
+// ErrUnevaluableLeaf is returned by [Prepare] for a Filter leaf it cannot
+// evaluate: an operand that parses into none of the leaf's declared types
+// (including an empty/nil declared set), a SourceData leaf whose Path is
+// empty or falls outside the documented path grammar, a pattern operand
+// (LIKE / MATCHES_PATTERN) that will not compile, or an unsupported operator.
+//
+// Every cause is decided at prepare time, from the condition alone, before
+// any entity is read — it is a property of the REQUEST, not an artifact of a
+// particular row. Prepare therefore rejects the whole filter rather than
+// silently building a leaf that never matches: a leaf that never matches is
+// safe only in the absence of negation, because a NOT would invert it into
+// matches-everything.
+var ErrUnevaluableLeaf = errors.New("unevaluable leaf")

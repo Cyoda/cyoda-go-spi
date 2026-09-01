@@ -9,23 +9,35 @@ import (
 // TestExtractFilterMetaValue_CanonicalKeys exercises the unexported
 // extractFilterMetaValue directly.
 
+// mustPrepare prepares f and fails the test immediately if Prepare rejects
+// it — every filter built by a package-spi test is expected to be
+// evaluable, so a Prepare error here means the test fixture itself is wrong.
+func mustPrepare(t *testing.T, f Filter) PreparedFilter {
+	t.Helper()
+	p, err := Prepare(f)
+	if err != nil {
+		t.Fatalf("Prepare(%+v): %v", f, err)
+	}
+	return p
+}
+
 func TestPrepare_TemporalMeta(t *testing.T) {
 	meta := EntityMeta{CreationDate: time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)}
 	// stored 2021-01-01T00:00:00Z; operand 2021-01-01T00:00:00.000Z → same instant
 	eq := Filter{Op: FilterEq, Source: SourceMeta, Path: "creationDate",
 		Declared: []DataType{ZonedDateTime}, Value: "2021-01-01T00:00:00.000Z"}
-	if !Prepare(eq).Match(nil, meta) {
+	if !mustPrepare(t, eq).Match(nil, meta) {
 		t.Error("EQUALS same-instant (mixed precision) should match")
 	}
 	gt := Filter{Op: FilterGt, Source: SourceMeta, Path: "creationDate",
 		Declared: []DataType{ZonedDateTime}, Value: "2020-12-31T23:59:59Z"}
-	if !Prepare(gt).Match(nil, meta) {
+	if !mustPrepare(t, gt).Match(nil, meta) {
 		t.Error("GREATER_THAN earlier instant should match")
 	}
 	// offset operand: 2021-01-01T01:00:00+01:00 == 00:00:00Z → equal
 	eqOff := Filter{Op: FilterEq, Source: SourceMeta, Path: "creationDate",
 		Declared: []DataType{ZonedDateTime}, Value: "2021-01-01T01:00:00+01:00"}
-	if !Prepare(eqOff).Match(nil, meta) {
+	if !mustPrepare(t, eqOff).Match(nil, meta) {
 		t.Error("EQUALS with offset operand denoting same instant should match")
 	}
 }
@@ -44,13 +56,13 @@ func TestPrepare_TemporalMeta_ZeroTimeExcluded(t *testing.T) {
 
 	lt := Filter{Op: FilterLt, Source: SourceMeta, Path: "creationDate",
 		Declared: []DataType{ZonedDateTime}, Value: "2000-01-01T00:00:00Z"}
-	if Prepare(lt).Match(nil, meta) {
+	if mustPrepare(t, lt).Match(nil, meta) {
 		t.Error("LESS_THAN against a zero-value stored creationDate should exclude, not match")
 	}
 
 	ne := Filter{Op: FilterNe, Source: SourceMeta, Path: "creationDate",
 		Declared: []DataType{ZonedDateTime}, Value: "2000-01-01T00:00:00Z"}
-	if Prepare(ne).Match(nil, meta) {
+	if mustPrepare(t, ne).Match(nil, meta) {
 		t.Error("NOT_EQUAL against an absent (zero-value) stored creationDate should be a non-match (null uniformity)")
 	}
 }

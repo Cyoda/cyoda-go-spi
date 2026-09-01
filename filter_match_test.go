@@ -2,6 +2,7 @@ package spi_test
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -19,19 +20,31 @@ func mustJSONFilter(t *testing.T, v any) []byte {
 	return b
 }
 
+// mustPrepare prepares f and fails the test immediately if Prepare rejects
+// it — every filter built by these tests is expected to be evaluable, so a
+// Prepare error here means the test fixture itself is wrong.
+func mustPrepare(t *testing.T, f spi.Filter) spi.PreparedFilter {
+	t.Helper()
+	p, err := spi.Prepare(f)
+	if err != nil {
+		t.Fatalf("Prepare(%+v): %v", f, err)
+	}
+	return p
+}
+
 // --- Brief's explicit cases ---
 
 func TestPrepare_ZeroValueMatchesAll(t *testing.T) {
-	if !spi.Prepare(spi.Filter{}).Match([]byte(`{"a":1}`), meta("e1", "S")) {
+	if !mustPrepare(t, spi.Filter{}).Match([]byte(`{"a":1}`), meta("e1", "S")) {
 		t.Fatal("zero-value filter must match all")
 	}
 }
 
 func TestPrepare_EmptyAndIsTrue_EmptyOrIsFalse(t *testing.T) {
-	if !spi.Prepare(spi.Filter{Op: spi.FilterAnd}).Match([]byte(`{}`), meta("e1", "S")) {
+	if !mustPrepare(t, spi.Filter{Op: spi.FilterAnd}).Match([]byte(`{}`), meta("e1", "S")) {
 		t.Fatal("empty AND is identity true")
 	}
-	if spi.Prepare(spi.Filter{Op: spi.FilterOr}).Match([]byte(`{}`), meta("e1", "S")) {
+	if mustPrepare(t, spi.Filter{Op: spi.FilterOr}).Match([]byte(`{}`), meta("e1", "S")) {
 		t.Fatal("empty OR is identity false")
 	}
 }
@@ -39,15 +52,15 @@ func TestPrepare_EmptyAndIsTrue_EmptyOrIsFalse(t *testing.T) {
 func TestPrepare_EqAndContainsAndMeta(t *testing.T) {
 	data := []byte(`{"name":"alpha","n":7}`)
 	eq := spi.Filter{Op: spi.FilterEq, Source: spi.SourceData, Path: "name", Value: "alpha", Declared: []spi.DataType{spi.String}}
-	if !spi.Prepare(eq).Match(data, meta("e1", "S")) {
+	if !mustPrepare(t, eq).Match(data, meta("e1", "S")) {
 		t.Fatal("eq should match")
 	}
 	gt := spi.Filter{Op: spi.FilterGt, Source: spi.SourceData, Path: "n", Value: 3, Declared: []spi.DataType{spi.Integer}}
-	if !spi.Prepare(gt).Match(data, meta("e1", "S")) {
+	if !mustPrepare(t, gt).Match(data, meta("e1", "S")) {
 		t.Fatal("gt numeric should match")
 	}
 	mstate := spi.Filter{Op: spi.FilterEq, Source: spi.SourceMeta, Path: "state", Value: "ACTIVE", Declared: []spi.DataType{spi.String}}
-	if !spi.Prepare(mstate).Match(data, meta("e1", "ACTIVE")) {
+	if !mustPrepare(t, mstate).Match(data, meta("e1", "ACTIVE")) {
 		t.Fatal("meta state eq should match")
 	}
 }
@@ -63,18 +76,18 @@ func TestPrepare_EqString(t *testing.T) {
 		Value:    "v1",
 		Declared: []spi.DataType{spi.String},
 	}
-	if !spi.Prepare(f).Match(data, spi.EntityMeta{}) {
+	if !mustPrepare(t, f).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("expected Prepare(f).Match to be true for matching data")
 	}
 	f.Value = "v2"
-	if spi.Prepare(f).Match(data, spi.EntityMeta{}) {
+	if mustPrepare(t, f).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("expected Prepare(f).Match to be false for non-matching data")
 	}
 }
 
 func TestPrepare_EmptyFilterMatchesAll(t *testing.T) {
 	data := mustJSONFilter(t, map[string]any{"x": 1})
-	if !spi.Prepare(spi.Filter{}).Match(data, spi.EntityMeta{}) {
+	if !mustPrepare(t, spi.Filter{}).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("zero-value Filter should match all")
 	}
 }
@@ -87,10 +100,10 @@ func TestPrepare_StateEq(t *testing.T) {
 		Value:    "available",
 		Declared: []spi.DataType{spi.String},
 	}
-	if !spi.Prepare(f).Match(nil, spi.EntityMeta{State: "available"}) {
+	if !mustPrepare(t, f).Match(nil, spi.EntityMeta{State: "available"}) {
 		t.Fatalf("expected state match")
 	}
-	if spi.Prepare(f).Match(nil, spi.EntityMeta{State: "shipped"}) {
+	if mustPrepare(t, f).Match(nil, spi.EntityMeta{State: "shipped"}) {
 		t.Fatalf("expected state non-match")
 	}
 }
@@ -104,11 +117,11 @@ func TestPrepare_Ne(t *testing.T) {
 		Value:    "v2",
 		Declared: []spi.DataType{spi.String},
 	}
-	if !spi.Prepare(f).Match(data, spi.EntityMeta{}) {
+	if !mustPrepare(t, f).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("expected Ne to be true for different value")
 	}
 	f.Value = "v1"
-	if spi.Prepare(f).Match(data, spi.EntityMeta{}) {
+	if mustPrepare(t, f).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("expected Ne to be false for same value")
 	}
 }
@@ -131,7 +144,7 @@ func TestPrepare_NumericOrdering(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := spi.Filter{Op: tc.op, Path: "qty", Source: spi.SourceData, Value: tc.val, Declared: []spi.DataType{spi.Integer}}
-			if got := spi.Prepare(f).Match(data, spi.EntityMeta{}); got != tc.want {
+			if got := mustPrepare(t, f).Match(data, spi.EntityMeta{}); got != tc.want {
 				t.Fatalf("op=%s val=%v: got %v want %v", tc.op, tc.val, got, tc.want)
 			}
 		})
@@ -142,21 +155,21 @@ func TestPrepare_IsNullAndNotNull(t *testing.T) {
 	data := mustJSONFilter(t, map[string]any{"a": "x"})
 
 	missing := spi.Filter{Op: spi.FilterIsNull, Path: "b", Source: spi.SourceData}
-	if !spi.Prepare(missing).Match(data, spi.EntityMeta{}) {
+	if !mustPrepare(t, missing).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("expected IsNull true for missing field")
 	}
 
 	present := spi.Filter{Op: spi.FilterIsNull, Path: "a", Source: spi.SourceData}
-	if spi.Prepare(present).Match(data, spi.EntityMeta{}) {
+	if mustPrepare(t, present).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("expected IsNull false for present field")
 	}
 
 	notNull := spi.Filter{Op: spi.FilterNotNull, Path: "a", Source: spi.SourceData}
-	if !spi.Prepare(notNull).Match(data, spi.EntityMeta{}) {
+	if !mustPrepare(t, notNull).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("expected NotNull true for present field")
 	}
 	missingNotNull := spi.Filter{Op: spi.FilterNotNull, Path: "b", Source: spi.SourceData}
-	if spi.Prepare(missingNotNull).Match(data, spi.EntityMeta{}) {
+	if mustPrepare(t, missingNotNull).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("expected NotNull false for missing field")
 	}
 }
@@ -171,21 +184,21 @@ func TestPrepare_MetaIsNullAndNotNull(t *testing.T) {
 	withoutDate := spi.EntityMeta{} // zero-value CreationDate — absent meta value
 
 	missing := spi.Filter{Op: spi.FilterIsNull, Path: "creationDate", Source: spi.SourceMeta}
-	if !spi.Prepare(missing).Match(nil, withoutDate) {
+	if !mustPrepare(t, missing).Match(nil, withoutDate) {
 		t.Fatalf("expected IsNull true for absent meta field")
 	}
 
 	present := spi.Filter{Op: spi.FilterIsNull, Path: "creationDate", Source: spi.SourceMeta}
-	if spi.Prepare(present).Match(nil, withDate) {
+	if mustPrepare(t, present).Match(nil, withDate) {
 		t.Fatalf("expected IsNull false for present meta field")
 	}
 
 	notNull := spi.Filter{Op: spi.FilterNotNull, Path: "creationDate", Source: spi.SourceMeta}
-	if !spi.Prepare(notNull).Match(nil, withDate) {
+	if !mustPrepare(t, notNull).Match(nil, withDate) {
 		t.Fatalf("expected NotNull true for present meta field")
 	}
 	missingNotNull := spi.Filter{Op: spi.FilterNotNull, Path: "creationDate", Source: spi.SourceMeta}
-	if spi.Prepare(missingNotNull).Match(nil, withoutDate) {
+	if mustPrepare(t, missingNotNull).Match(nil, withoutDate) {
 		t.Fatalf("expected NotNull false for absent meta field")
 	}
 }
@@ -199,12 +212,12 @@ func TestPrepare_AndGroup(t *testing.T) {
 			{Op: spi.FilterGt, Path: "qty", Source: spi.SourceData, Value: 1, Declared: []spi.DataType{spi.Integer}},
 		},
 	}
-	if !spi.Prepare(f).Match(data, spi.EntityMeta{}) {
+	if !mustPrepare(t, f).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("expected AND to be true when all children match")
 	}
 
 	f.Children[1].Value = 100
-	if spi.Prepare(f).Match(data, spi.EntityMeta{}) {
+	if mustPrepare(t, f).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("expected AND to be false when one child fails")
 	}
 }
@@ -218,12 +231,12 @@ func TestPrepare_OrGroup(t *testing.T) {
 			{Op: spi.FilterEq, Path: "variantId", Source: spi.SourceData, Value: "v1", Declared: []spi.DataType{spi.String}},
 		},
 	}
-	if !spi.Prepare(f).Match(data, spi.EntityMeta{}) {
+	if !mustPrepare(t, f).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("expected OR to be true when one child matches")
 	}
 
 	f.Children[1].Value = "vY"
-	if spi.Prepare(f).Match(data, spi.EntityMeta{}) {
+	if mustPrepare(t, f).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("expected OR to be false when no children match")
 	}
 }
@@ -258,7 +271,7 @@ func TestPrepare_StringOps(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := spi.Filter{Op: tc.op, Path: "name", Source: spi.SourceData, Value: tc.val, Declared: []spi.DataType{spi.String}}
-			if got := spi.Prepare(f).Match(data, spi.EntityMeta{}); got != tc.want {
+			if got := mustPrepare(t, f).Match(data, spi.EntityMeta{}); got != tc.want {
 				t.Fatalf("op=%s val=%q: got %v want %v", tc.op, tc.val, got, tc.want)
 			}
 		})
@@ -281,7 +294,7 @@ func TestPrepare_NestedAndOr(t *testing.T) {
 			},
 		},
 	}
-	if !spi.Prepare(f).Match(data, spi.EntityMeta{}) {
+	if !mustPrepare(t, f).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("expected nested AND/OR to match")
 	}
 }
@@ -309,7 +322,7 @@ func TestPrepare_MetaOtherFields(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := spi.Filter{Op: spi.FilterEq, Path: tc.path, Source: spi.SourceMeta, Value: tc.val, Declared: []spi.DataType{spi.String}}
-			if got := spi.Prepare(f).Match(nil, metaVal); got != tc.want {
+			if got := mustPrepare(t, f).Match(nil, metaVal); got != tc.want {
 				t.Fatalf("path=%s: got %v want %v", tc.path, got, tc.want)
 			}
 		})
@@ -319,7 +332,7 @@ func TestPrepare_MetaOtherFields(t *testing.T) {
 func TestPrepare_EmptyAndGroupIsTrue(t *testing.T) {
 	// An empty AND is the identity element — tautology.
 	f := spi.Filter{Op: spi.FilterAnd}
-	if !spi.Prepare(f).Match(nil, spi.EntityMeta{}) {
+	if !mustPrepare(t, f).Match(nil, spi.EntityMeta{}) {
 		t.Fatalf("expected empty AND to be true (tautology)")
 	}
 }
@@ -329,7 +342,7 @@ func TestPrepare_EmptyOrGroupIsFalse(t *testing.T) {
 	// Op is explicitly FilterOr, so the zero-value-Filter early-out (Op == "")
 	// is not triggered and the group evaluator runs over zero children.
 	f := spi.Filter{Op: spi.FilterOr, Children: []spi.Filter{}}
-	if spi.Prepare(f).Match(nil, spi.EntityMeta{}) {
+	if mustPrepare(t, f).Match(nil, spi.EntityMeta{}) {
 		t.Fatalf("expected empty OR to be false")
 	}
 }
@@ -340,11 +353,11 @@ func TestPrepare_EmptyOrGroupIsFalse(t *testing.T) {
 func TestPrepare_Between(t *testing.T) {
 	data := mustJSONFilter(t, map[string]any{"qty": 42})
 	f := spi.Filter{Op: spi.FilterBetween, Path: "qty", Source: spi.SourceData, Values: []any{10, 200}, Declared: []spi.DataType{spi.Integer}}
-	if !spi.Prepare(f).Match(data, spi.EntityMeta{}) {
+	if !mustPrepare(t, f).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("expected 42 to be between 10 and 200")
 	}
 	f.Values = []any{100, 200}
-	if spi.Prepare(f).Match(data, spi.EntityMeta{}) {
+	if mustPrepare(t, f).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("expected 42 to not be between 100 and 200")
 	}
 }
@@ -354,15 +367,15 @@ func TestPrepare_BetweenInclusive(t *testing.T) {
 	// qty (10) sits exactly on the lower bound: exclusive BETWEEN must reject
 	// it, BETWEEN_INCLUSIVE must accept it.
 	exclusive := spi.Filter{Op: spi.FilterBetween, Path: "qty", Source: spi.SourceData, Values: []any{10, 200}, Declared: []spi.DataType{spi.Integer}}
-	if spi.Prepare(exclusive).Match(data, spi.EntityMeta{}) {
+	if mustPrepare(t, exclusive).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("expected 10 to NOT be strictly between 10 and 200")
 	}
 	inclusive := spi.Filter{Op: spi.FilterBetweenInclusive, Path: "qty", Source: spi.SourceData, Values: []any{10, 200}, Declared: []spi.DataType{spi.Integer}}
-	if !spi.Prepare(inclusive).Match(data, spi.EntityMeta{}) {
+	if !mustPrepare(t, inclusive).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("expected 10 to be inclusively between 10 and 200")
 	}
 	inclusive.Values = []any{11, 200}
-	if spi.Prepare(inclusive).Match(data, spi.EntityMeta{}) {
+	if mustPrepare(t, inclusive).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("expected 10 to not be between 11 and 200")
 	}
 }
@@ -389,7 +402,7 @@ func TestPrepare_CaseInsensitiveOps(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := spi.Filter{Op: tc.op, Path: "color", Source: spi.SourceData, Value: tc.val, Declared: []spi.DataType{spi.String}}
-			if got := spi.Prepare(f).Match(data, spi.EntityMeta{}); got != tc.want {
+			if got := mustPrepare(t, f).Match(data, spi.EntityMeta{}); got != tc.want {
 				t.Fatalf("op=%s val=%q: got %v want %v", tc.op, tc.val, got, tc.want)
 			}
 		})
@@ -399,11 +412,11 @@ func TestPrepare_CaseInsensitiveOps(t *testing.T) {
 func TestPrepare_MatchesRegex(t *testing.T) {
 	data := mustJSONFilter(t, map[string]any{"name": "Cyoda-Go"})
 	hit := spi.Filter{Op: spi.FilterMatchesRegex, Path: "name", Source: spi.SourceData, Value: "^Cyoda-.*$", Declared: []spi.DataType{spi.String}}
-	if !spi.Prepare(hit).Match(data, spi.EntityMeta{}) {
+	if !mustPrepare(t, hit).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("expected regex to match")
 	}
 	miss := spi.Filter{Op: spi.FilterMatchesRegex, Path: "name", Source: spi.SourceData, Value: "^Zzz.*$", Declared: []spi.DataType{spi.String}}
-	if spi.Prepare(miss).Match(data, spi.EntityMeta{}) {
+	if mustPrepare(t, miss).Match(data, spi.EntityMeta{}) {
 		t.Fatalf("expected regex to not match")
 	}
 }
@@ -430,7 +443,7 @@ func TestPrepare_NegativeOnNull_NonMatch(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := spi.Filter{Op: tc.op, Path: "missing", Source: spi.SourceData, Value: "anything", Declared: []spi.DataType{spi.String}}
-			if spi.Prepare(f).Match(data, spi.EntityMeta{}) {
+			if mustPrepare(t, f).Match(data, spi.EntityMeta{}) {
 				t.Fatalf("op=%s on absent field must be a non-match (null uniformity)", tc.op)
 			}
 		})
@@ -439,7 +452,7 @@ func TestPrepare_NegativeOnNull_NonMatch(t *testing.T) {
 	// Explicit JSON null (present-but-null) is treated identically to absent.
 	nullData := []byte(`{"v":null}`)
 	f := spi.Filter{Op: spi.FilterNe, Path: "v", Source: spi.SourceData, Value: "x", Declared: []spi.DataType{spi.String}}
-	if spi.Prepare(f).Match(nullData, spi.EntityMeta{}) {
+	if mustPrepare(t, f).Match(nullData, spi.EntityMeta{}) {
 		t.Fatalf("NE against a JSON-null stored leaf must be a non-match")
 	}
 }
@@ -452,12 +465,12 @@ func TestPrepare_TemporalMetaViaDeclared(t *testing.T) {
 	metaVal := spi.EntityMeta{CreationDate: time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)}
 	eq := spi.Filter{Op: spi.FilterEq, Source: spi.SourceMeta, Path: "creationDate",
 		Value: "2021-01-01T00:00:00.000Z", Declared: []spi.DataType{spi.ZonedDateTime}}
-	if !spi.Prepare(eq).Match(nil, metaVal) {
+	if !mustPrepare(t, eq).Match(nil, metaVal) {
 		t.Fatal("temporal meta EQUALS (mixed precision, same instant) should match")
 	}
 	gt := spi.Filter{Op: spi.FilterGt, Source: spi.SourceMeta, Path: "creationDate",
 		Value: "2020-12-31T23:59:59Z", Declared: []spi.DataType{spi.ZonedDateTime}}
-	if !spi.Prepare(gt).Match(nil, metaVal) {
+	if !mustPrepare(t, gt).Match(nil, metaVal) {
 		t.Fatal("temporal meta GREATER_THAN earlier instant should match")
 	}
 }
@@ -469,18 +482,28 @@ func TestPrepare_NumericJSONNumberOperand(t *testing.T) {
 	data := mustJSONFilter(t, map[string]any{"qty": 42})
 	f := spi.Filter{Op: spi.FilterGt, Path: "qty", Source: spi.SourceData,
 		Value: json.Number("10"), Declared: []spi.DataType{spi.Integer}}
-	if !spi.Prepare(f).Match(data, spi.EntityMeta{}) {
+	if !mustPrepare(t, f).Match(data, spi.EntityMeta{}) {
 		t.Fatal("json.Number operand 10 should compare precisely (42 > 10)")
 	}
 	f.Value = json.Number("100")
-	if spi.Prepare(f).Match(data, spi.EntityMeta{}) {
+	if mustPrepare(t, f).Match(data, spi.EntityMeta{}) {
 		t.Fatal("json.Number operand 100 should not match (42 > 100 is false)")
 	}
 }
 
-func TestPrepare_UnsupportedOpIsNonMatch(t *testing.T) {
+// TestPrepare_UnsupportedOpIsUnevaluable pins the fail-closed replacement for
+// the old "unsupported op is a non-match" behaviour: an unsupported operator
+// is exactly the class of leaf ExpandLeaf cannot expand, so Prepare now
+// rejects the whole filter (ErrUnevaluableLeaf) instead of silently building
+// a leaf that would have compared false on every row — see Prepare's doc
+// comment for why that distinction matters once NOT exists.
+func TestPrepare_UnsupportedOpIsUnevaluable(t *testing.T) {
 	f := spi.Filter{Op: spi.FilterOp("bogus"), Path: "x", Source: spi.SourceData}
-	if spi.Prepare(f).Match([]byte(`{"x":1}`), spi.EntityMeta{}) {
-		t.Fatalf("expected unsupported op to be a non-match, not a panic or true")
+	_, err := spi.Prepare(f)
+	if err == nil {
+		t.Fatal("expected Prepare to reject an unsupported op, got no error")
+	}
+	if !errors.Is(err, spi.ErrUnevaluableLeaf) {
+		t.Fatalf("Prepare error = %v, want it to wrap ErrUnevaluableLeaf", err)
 	}
 }

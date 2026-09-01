@@ -1089,31 +1089,31 @@ func TestConditionToFilter_Array_DeclaredNilWhenUnresolvable(t *testing.T) {
 	}
 }
 
-// TestConditionToFilter_NilFields_DegradesInconsistently pins the hazard
-// ConditionToFilter's doc comment warns about, and the reason this translator
-// lives in the SPI at all.
+// TestConditionToFilter_NilFields_ComparisonLeavesAreUnevaluable pins the
+// hazard ConditionToFilter's doc comment warns about, and the reason this
+// translator lives in the SPI at all — updated for Task 2's fail-closed
+// Prepare.
 //
-// The naive expectation — "no declared types means nothing matches" — is
-// WRONG, and believing it is what makes the bug dangerous. The kernel only
-// consults declared types where it needs a type slot to compare in, so with
-// fields == nil a condition degrades in two different directions at once:
-// comparison/ordering leaves annihilate to false, while string, substring and
-// presence leaves evaluate normally. A mixed condition therefore returns
-// wrong results whose direction depends on its boolean structure (AND drops
-// rows that should match; OR admits rows a failed comparison should have
-// excluded) — strictly worse than uniformly returning nothing, which at least
-// looks like an anomaly.
+// The naive expectation — "no declared types means nothing matches" — used
+// to be WRONG in a dangerous way: the kernel only consults declared types
+// where it needs a type slot to compare in, so with fields == nil a
+// condition degraded in two different directions at once — comparison/
+// ordering leaves silently annihilated to a never-match, while string,
+// substring and presence leaves evaluated normally — and a mixed condition
+// returned wrong results whose direction depended on its boolean structure
+// (AND dropped rows that should match; OR admitted rows a failed comparison
+// should have excluded).
 //
-// This table is the executable statement of that contract. If a future kernel
-// change makes undeclared leaves uniformly fail-closed, these expectations
-// move — deliberately, not by accident.
-func TestConditionToFilter_NilFields_DegradesInconsistently(t *testing.T) {
-	// Each op is checked by COMPARING the nil-fields answer against the
-	// correctly-declared answer over three documents. That comparison is what
-	// makes the test discriminating: asserting a hardcoded boolean would pass
-	// coincidentally whenever false happens to be the correct answer anyway
-	// (IS_NULL over a present field is exactly that trap), and would keep
-	// passing through a refactor that changed the mechanism entirely.
+// Prepare now closes the dangerous half of that: a comparison/ordering leaf
+// with no declared type to compare in is unevaluable (ErrUnevaluableLeaf),
+// not a silent never-match, so Prepare rejects the whole request instead of
+// answering wrong. Presence and string/pattern leaves still do not need a
+// declared type at all, so they are unaffected — that half was never the bug.
+//
+// This table is the executable statement of that contract. If a future
+// kernel change makes undeclared comparison leaves evaluable some other way,
+// these expectations move — deliberately, not by accident.
+func TestConditionToFilter_NilFields_ComparisonLeavesAreUnevaluable(t *testing.T) {
 	docs := map[string][]byte{
 		"present": []byte(`{"name":"Alice"}`),
 		"null":    []byte(`{"name":null}`),
@@ -1124,9 +1124,10 @@ func TestConditionToFilter_NilFields_DegradesInconsistently(t *testing.T) {
 		op string
 		// value is the operand; for the range ops it is the two bounds.
 		value any
-		// annihilates records whether an empty declared set changes the
-		// answer. True for leaves that need a type slot to compare in.
-		annihilates bool
+		// unevaluableWithoutTypes records whether Prepare rejects the
+		// nil-declared leaf outright. True for leaves that need a type slot
+		// to compare in.
+		unevaluableWithoutTypes bool
 	}{
 		{"EQUALS", "Alice", true},
 		{"NOT_EQUAL", "Bob", true},
@@ -1171,27 +1172,36 @@ func TestConditionToFilter_NilFields_DegradesInconsistently(t *testing.T) {
 				t.Fatalf("Declared = %v, want nil with a nil fields map", bare.Declared)
 			}
 
-			diverged := false
-			for name, doc := range docs {
-				gotBare := spi.Prepare(bare).Match(doc, spi.EntityMeta{})
-				gotTyped := spi.Prepare(typed).Match(doc, spi.EntityMeta{})
-				if gotBare != gotTyped {
-					diverged = true
-					if !tc.annihilates {
-						t.Errorf("doc %s: nil-declared=%v but typed=%v — this op must not depend on declared types",
-							name, gotBare, gotTyped)
-					}
+			typedPrepared := mustPrepare(t, typed)
+			barePrepared, bareErr := spi.Prepare(bare)
+
+			if tc.unevaluableWithoutTypes {
+				if bareErr == nil {
+					t.Fatalf("Prepare(bare) succeeded for %s with no declared types, want ErrUnevaluableLeaf", tc.op)
 				}
+				if !errors.Is(bareErr, spi.ErrUnevaluableLeaf) {
+					t.Fatalf("Prepare(bare) error = %v, want it to wrap ErrUnevaluableLeaf", bareErr)
+				}
+				return
 			}
-			if tc.annihilates && !diverged {
-				t.Errorf("expected an empty declared set to change the answer for %s, but it did not on any document", tc.op)
+			if bareErr != nil {
+				t.Fatalf("Prepare(bare): %v", bareErr)
+			}
+			for name, doc := range docs {
+				gotBare := barePrepared.Match(doc, spi.EntityMeta{})
+				gotTyped := typedPrepared.Match(doc, spi.EntityMeta{})
+				if gotBare != gotTyped {
+					t.Errorf("doc %s: nil-declared=%v but typed=%v — this op must not depend on declared types",
+						name, gotBare, gotTyped)
+				}
 			}
 		})
 	}
 
 	// The consequence, made concrete: an AND of a surviving substring leaf and
-	// an annihilated equality leaf drops a document that satisfies BOTH.
-	t.Run("MixedAndDropsAMatchingDocument", func(t *testing.T) {
+	// an unevaluable equality leaf is REJECTED outright, rather than silently
+	// dropping a document that satisfies both leaves.
+	t.Run("MixedAndRejectsRatherThanDropAMatchingDocument", func(t *testing.T) {
 		cond := &predicate.GroupCondition{
 			Operator: "AND",
 			Conditions: []predicate.Condition{
@@ -1209,11 +1219,15 @@ func TestConditionToFilter_NilFields_DegradesInconsistently(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ConditionToFilter: %v", err)
 		}
-		if !spi.Prepare(typed).Match(doc, spi.EntityMeta{}) {
+		if !mustPrepare(t, typed).Match(doc, spi.EntityMeta{}) {
 			t.Fatal("setup invariant: the document must match when declared types are supplied")
 		}
-		if spi.Prepare(bare).Match(doc, spi.EntityMeta{}) {
-			t.Error("Prepare(f).Match = true; expected the annihilated EQUALS conjunct to drop a document that genuinely satisfies both leaves")
+		_, err = spi.Prepare(bare)
+		if err == nil {
+			t.Fatal("Prepare(bare) succeeded; want rejection — an AND containing an unevaluable EQUALS leaf must not silently drop a matching document")
+		}
+		if !errors.Is(err, spi.ErrUnevaluableLeaf) {
+			t.Fatalf("Prepare(bare) error = %v, want it to wrap ErrUnevaluableLeaf", err)
 		}
 	})
 }
@@ -1238,11 +1252,11 @@ func TestConditionToFilter_WithFields_DataLeafMatches(t *testing.T) {
 	if !reflect.DeepEqual(f.Declared, want) {
 		t.Fatalf("Declared = %v, want %v", f.Declared, want)
 	}
-	if !spi.Prepare(f).Match(data, spi.EntityMeta{}) {
+	if !mustPrepare(t, f).Match(data, spi.EntityMeta{}) {
 		t.Error("Prepare(f).Match = false, want true: a declared string leaf must match an equal stored value")
 	}
 	// And it still discriminates — it is not matching everything.
-	if spi.Prepare(f).Match([]byte(`{"name":"Bob"}`), spi.EntityMeta{}) {
+	if mustPrepare(t, f).Match([]byte(`{"name":"Bob"}`), spi.EntityMeta{}) {
 		t.Error("Prepare(f).Match = true for a non-equal value, want false")
 	}
 }
@@ -1257,10 +1271,10 @@ func TestConditionToFilter_NilFields_MetaLeafStillMatches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConditionToFilter: %v", err)
 	}
-	if !spi.Prepare(f).Match([]byte(`{}`), spi.EntityMeta{State: "ACTIVE"}) {
+	if !mustPrepare(t, f).Match([]byte(`{}`), spi.EntityMeta{State: "ACTIVE"}) {
 		t.Error("Prepare(f).Match = false, want true: a meta leaf must match with a nil fields map")
 	}
-	if spi.Prepare(f).Match([]byte(`{}`), spi.EntityMeta{State: "LOCKED"}) {
+	if mustPrepare(t, f).Match([]byte(`{}`), spi.EntityMeta{State: "LOCKED"}) {
 		t.Error("Prepare(f).Match = true for a non-equal state, want false")
 	}
 }
@@ -1350,7 +1364,7 @@ func TestConditionToFilter_EmptyGroupIdentityEncodings(t *testing.T) {
 		if len(f.Children) != 0 {
 			t.Errorf("len(Children) = %d, want 0", len(f.Children))
 		}
-		if !spi.Prepare(f).Match([]byte(`{}`), spi.EntityMeta{}) {
+		if !mustPrepare(t, f).Match([]byte(`{}`), spi.EntityMeta{}) {
 			t.Error("an empty AND must be the identity (match everything), not match nothing")
 		}
 	})

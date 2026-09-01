@@ -4,14 +4,65 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	spi "github.com/cyoda-platform/cyoda-go-spi"
 )
 
+// TestPrepare_RejectsUnevaluableLeaf pins spec §4.3/§9: a leaf Prepare cannot
+// evaluate is rejected with an error wrapping ErrUnevaluableLeaf, not silently
+// turned into a leaf that never matches. That silent version is safe only
+// while the language has no negation — a NOT would invert a never-match leaf
+// into matches-everything, so every cause must be decided at prepare time,
+// before any entity is read.
+func TestPrepare_RejectsUnevaluableLeaf(t *testing.T) {
+	cases := []struct {
+		name string
+		f    spi.Filter
+	}{
+		{"operand fits no declared type", spi.Filter{
+			Op: spi.FilterGt, Path: "n", Source: spi.SourceData, Value: "abc",
+			Declared: []spi.DataType{spi.Integer}}},
+		{"path outside the grammar", spi.Filter{
+			Op: spi.FilterEq, Path: "a[", Source: spi.SourceData, Value: "x",
+			Declared: []spi.DataType{spi.String}}},
+		{"empty data path", spi.Filter{
+			Op: spi.FilterEq, Path: "", Source: spi.SourceData, Value: "x",
+			Declared: []spi.DataType{spi.String}}},
+		{"pattern will not compile", spi.Filter{
+			Op: spi.FilterLike, Path: "s", Source: spi.SourceData, Value: `a\`,
+			Declared: []spi.DataType{spi.String}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := spi.Prepare(c.f)
+			require.Error(t, err)
+			require.ErrorIs(t, err, spi.ErrUnevaluableLeaf)
+		})
+	}
+}
+
+func TestPrepare_AcceptsMatchAllAndOrdinaryLeaves(t *testing.T) {
+	for _, f := range []spi.Filter{
+		{},
+		{Op: spi.FilterEq, Path: "s", Source: spi.SourceData, Value: "x", Declared: []spi.DataType{spi.String}},
+		{Op: spi.FilterAnd, Children: []spi.Filter{
+			{Op: spi.FilterEq, Path: "s", Source: spi.SourceData, Value: "x", Declared: []spi.DataType{spi.String}}}},
+	} {
+		_, err := spi.Prepare(f)
+		require.NoError(t, err)
+	}
+}
+
 // TestPrepare_ZeroValueAsymmetry pins spec §3's table: a zero-Op filter is
-// match-all at the ROOT only. A zero-Op CHILD is a leaf that never matches —
-// evalFilter routed it to the leaf evaluator, ExpandLeaf hit its default arm,
-// and the leaf was false for every row. Hoisting the Op == "" check into the
-// recursion silently flips the AND/OR child rows, so they are pinned here.
+// match-all at the ROOT only. A zero-Op CHILD is an unevaluable leaf —
+// ExpandLeaf hits its default arm ("unsupported leaf operator"), and Prepare
+// now rejects the whole request (ErrUnevaluableLeaf) rather than silently
+// building a leaf that is false for every row. Hoisting the root's Op == ""
+// check into the recursion would instead turn a zero-Op child into an
+// identity element, which is the mistake this test guards against — a
+// zero-Op child must never be treated as match-all, whether that shows up as
+// a wrong Match answer or as Prepare wrongly succeeding.
 //
 // sqlite depends on the root behaviour in plugins/sqlite/grouped_stats.go,
 // which special-cases an empty Op before reaching the evaluator.
@@ -25,40 +76,57 @@ func TestPrepare_ZeroValueAsymmetry(t *testing.T) {
 	}
 	data := []byte(`{"name":"Alice"}`)
 
-	tests := []struct {
-		name string
-		f    spi.Filter
-		want bool
-	}{
-		{"root zero filter matches all", spi.Filter{}, true},
-		{"root empty AND is the AND identity", spi.Filter{Op: spi.FilterAnd}, true},
-		{"root empty OR is the OR identity", spi.Filter{Op: spi.FilterOr}, false},
-		{
-			"zero-Op child annihilates an AND",
-			spi.Filter{Op: spi.FilterAnd, Children: []spi.Filter{leaf, {}}},
-			false,
-		},
-		{
-			"zero-Op child does not rescue an OR",
-			spi.Filter{
-				Op: spi.FilterOr,
-				Children: []spi.Filter{
-					{Op: spi.FilterEq, Source: spi.SourceData, Path: "name",
-						Value: "Bob", Declared: []spi.DataType{spi.String}},
-					{},
+	t.Run("root cases", func(t *testing.T) {
+		tests := []struct {
+			name string
+			f    spi.Filter
+			want bool
+		}{
+			{"root zero filter matches all", spi.Filter{}, true},
+			{"root empty AND is the AND identity", spi.Filter{Op: spi.FilterAnd}, true},
+			{"root empty OR is the OR identity", spi.Filter{Op: spi.FilterOr}, false},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				if got := mustPrepare(t, tc.f).Match(data, spi.EntityMeta{}); got != tc.want {
+					t.Errorf("Prepare(%+v).Match() = %v, want %v", tc.f, got, tc.want)
+				}
+			})
+		}
+	})
+
+	// A zero-Op child is unevaluable regardless of where it sits in the tree
+	// or what its siblings would otherwise decide: Prepare rejects the whole
+	// filter rather than computing an AND/OR answer around it.
+	t.Run("zero-Op child rejects the whole filter", func(t *testing.T) {
+		tests := []struct {
+			name string
+			f    spi.Filter
+		}{
+			{
+				"zero-Op child under an AND",
+				spi.Filter{Op: spi.FilterAnd, Children: []spi.Filter{leaf, {}}},
+			},
+			{
+				"zero-Op child under an OR with a matching sibling",
+				spi.Filter{
+					Op: spi.FilterOr,
+					Children: []spi.Filter{
+						{Op: spi.FilterEq, Source: spi.SourceData, Path: "name",
+							Value: "Alice", Declared: []spi.DataType{spi.String}},
+						{},
+					},
 				},
 			},
-			false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := spi.Prepare(tc.f).Match(data, spi.EntityMeta{}); got != tc.want {
-				t.Errorf("Prepare(%+v).Match() = %v, want %v", tc.f, got, tc.want)
-			}
-		})
-	}
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := spi.Prepare(tc.f)
+				require.Error(t, err)
+				require.ErrorIs(t, err, spi.ErrUnevaluableLeaf)
+			})
+		}
+	})
 }
 
 // TestPreparedFilter_ZeroValueMatchesAll pins that the zero PreparedFilter —
@@ -81,7 +149,7 @@ func TestPreparedFilter_ZeroValueMatchesAll(t *testing.T) {
 // The commercial Cassandra direct-search fan-out hands one prepared filter to
 // N errgroup workers, so this is a real usage shape, not a synthetic one.
 func TestPreparedFilter_ConcurrentMatch(t *testing.T) {
-	p := spi.Prepare(spi.Filter{
+	p := mustPrepare(t, spi.Filter{
 		Op: spi.FilterOr,
 		Children: []spi.Filter{
 			{Op: spi.FilterMatchesRegex, Source: spi.SourceData, Path: "name",
@@ -187,79 +255,74 @@ func TestPreparedFilter_ResolvesByPathSyntax(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := spi.Prepare(tc.f).Match([]byte(tc.doc), spi.EntityMeta{}); got != tc.want {
+			if got := mustPrepare(t, tc.f).Match([]byte(tc.doc), spi.EntityMeta{}); got != tc.want {
 				t.Errorf("Match(%s) on %+v = %v, want %v", tc.doc, tc.f, got, tc.want)
 			}
 		})
 	}
 }
 
-// TestPreparedFilter_MalformedPathNeverResolves pins path-grammar.md's
-// requirement, stated in prepared_filter.go's prepareNode, that a path
-// failing to parse leaves the node unexpanded rather than falling through to
-// ExpandLeaf: a malformed path must never resolve to anything.
+// TestPreparedFilter_EmptyLeafPathNeverResolves pins that an empty Path on a
+// SourceData LEAF addresses nothing, the same as a malformed path — NOT the
+// whole document. Filter.Path's doc comment says an empty Path "is legal and
+// is not checked" because the AND/OR tree operators carry one instead of a
+// leaf condition; that legality is about the tree shape, not a license for a
+// leaf to mean "match the root". Before the fix this pins, ParseFilterPath("")
+// returned nil hops with no error, and ResolvePath with nil hops resolves to
+// the parsed root document — so a SourceData leaf with an empty Path matched
+// every entity via NOT_NULL, and even matched via EQUALS whenever the operand
+// happened to compare equal to the root's own gjson.Result. This is not
+// reachable through HTTP or gRPC today (every transport requires a leaf's
+// jsonPath/Path to be non-empty before it ever reaches a Filter), but a
+// caller constructing a Filter directly must not get an answer-instead-of-
+// refuse leaf.
 //
-// A presence test is the case that actually discriminates. NOT_NULL over a
-// real, present value ("x") is true if the path resolved at all — so a
-// malformed path answering false here can only mean the parse failure
-// suppressed evaluation before ExpandLeaf/EvalLeaf ever ran. The second row
-// does not add that same discrimination: a comparison operator also answers
-// false for a path that parsed fine but happened not to match the operand,
-// and — verified directly — it stays green even under the mutation that
-// ignores the parse error entirely, because an ignored error leaves hops nil
-// and ResolvePath then returns the whole root document, which never equals a
-// scalar operand either way. What the row DOES pin is a different parser
-// failure point: "a[0]b"'s trailing-garbage check runs AFTER the "a[0]" hop
-// has already been appended, whereas row one's unclosed-bracket check fires
-// before any hop is appended — so together the two rows cover parse failure
-// on both sides of that boundary, even though only the first is what makes
-// this test discriminating.
-// TestPreparedFilter_EmptyLeafPathNeverResolves pins that an empty Path on
-// a SourceData (or SourceMeta) LEAF addresses nothing, the same as a
-// malformed path — NOT the whole document. Filter.Path's doc comment says an
-// empty Path "is legal and is not checked" because the AND/OR tree operators
-// carry one instead of a leaf condition; that legality is about the tree
-// shape, not a license for a leaf to mean "match the root". Before this fix,
-// ParseFilterPath("") returned nil hops with no error, and ResolvePath with
-// nil hops resolves to the parsed root document — so a SourceData leaf with
-// an empty Path matched every entity via NOT_NULL, and even matched via
-// EQUALS whenever the operand happened to compare equal to the root's own
-// gjson.Result. This is not reachable through HTTP or gRPC today (every
-// transport requires a leaf's jsonPath/Path to be non-empty before it ever
-// reaches a Filter), but a caller constructing a Filter directly must not
-// get an answer-instead-of-refuse leaf.
+// Since Task 2, a SourceData leaf with an empty Path is unevaluable —
+// Prepare rejects it (ErrUnevaluableLeaf) rather than building a leaf whose
+// Match answer happens to always be false, for the same reason as every
+// other unevaluable-leaf cause: a never-match leaf inverts into
+// matches-everything under a NOT.
 func TestPreparedFilter_EmptyLeafPathNeverResolves(t *testing.T) {
 	cases := []struct {
 		name string
-		doc  string
 		f    spi.Filter
 	}{
-		{"empty data path, presence test", `{"a":"x"}`,
+		{"empty data path, presence test",
 			spi.Filter{Op: spi.FilterNotNull, Path: "", Source: spi.SourceData}},
-		{"empty data path, string equality", `{"a":"x"}`,
+		{"empty data path, string equality",
 			spi.Filter{Op: spi.FilterEq, Path: "", Source: spi.SourceData,
 				Value: "x", Declared: []spi.DataType{spi.String}}},
-		// SourceMeta already resolved an empty Path to "nothing" before this
-		// fix — extractFilterMetaValue's switch has no "" case, so it falls
-		// to not-found — but pinned here so the SourceData fix above is not
-		// read as having introduced an asymmetry between the two sources.
-		{"empty meta path, presence test", `{"a":"x"}`,
-			spi.Filter{Op: spi.FilterNotNull, Path: "", Source: spi.SourceMeta}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := spi.Prepare(tc.f).Match([]byte(tc.doc), spi.EntityMeta{}); got {
-				t.Errorf("Match(%s) on %+v = true, want false: an empty leaf path must never resolve to the root document", tc.doc, tc.f)
-			}
+			_, err := spi.Prepare(tc.f)
+			require.Error(t, err)
+			require.ErrorIs(t, err, spi.ErrUnevaluableLeaf)
 		})
+	}
+}
+
+// TestPreparedFilter_EmptyMetaLeafPathIsNotFound pins that a SourceMeta leaf
+// with an empty Path is NOT covered by the SourceData empty-path rejection
+// above — extractFilterMetaValue's switch has no "" case, so it falls to
+// not-found and the leaf simply never matches, same as before Task 2. It is
+// pinned separately, rather than folded into
+// TestPreparedFilter_EmptyLeafPathNeverResolves, so the SourceData fix is not
+// read as having introduced an asymmetry between the two sources: SourceMeta
+// was already "resolves to nothing" and stays that way, it was just never an
+// unevaluable-leaf case to begin with.
+func TestPreparedFilter_EmptyMetaLeafPathIsNotFound(t *testing.T) {
+	f := spi.Filter{Op: spi.FilterNotNull, Path: "", Source: spi.SourceMeta}
+	if got := mustPrepare(t, f).Match([]byte(`{"a":"x"}`), spi.EntityMeta{}); got {
+		t.Errorf("Match = true, want false: an empty meta leaf path must resolve to not-found")
 	}
 }
 
 // TestPreparedFilter_EmptyTreeOperatorStillLegal is the positive control:
 // an AND/OR node legitimately carries an empty Path (it addresses no field
-// at all — Children carry the real leaves), and TestPreparedFilter_EmptyLeafPathNeverResolves's
-// fix must not have made an empty-Path tree node itself refuse to prepare or
-// match.
+// at all — Children carry the real leaves), and
+// TestPreparedFilter_EmptyLeafPathNeverResolves's fix must not have made an
+// empty-Path tree node itself refuse to prepare or match.
 func TestPreparedFilter_EmptyTreeOperatorStillLegal(t *testing.T) {
 	f := spi.Filter{
 		Op: spi.FilterAnd,
@@ -267,28 +330,37 @@ func TestPreparedFilter_EmptyTreeOperatorStillLegal(t *testing.T) {
 			{Op: spi.FilterEq, Path: "a", Source: spi.SourceData, Value: "x", Declared: []spi.DataType{spi.String}},
 		},
 	}
-	if got := spi.Prepare(f).Match([]byte(`{"a":"x"}`), spi.EntityMeta{}); !got {
+	if got := mustPrepare(t, f).Match([]byte(`{"a":"x"}`), spi.EntityMeta{}); !got {
 		t.Errorf("Match on AND node with empty Path = false, want true: an empty Path on a tree operator stays legal")
 	}
 }
 
+// TestPreparedFilter_MalformedPathNeverResolves pins path-grammar.md's
+// requirement that a path outside the documented grammar never resolves to
+// anything. Since Task 2 that requirement is enforced by rejecting the leaf
+// at Prepare time (ErrUnevaluableLeaf) rather than by building a leaf whose
+// Match answer happens to always be false.
+//
+// The two rows pin parse failure on both sides of a boundary inside
+// ParseFilterPath: row one's unclosed-bracket check fires before any hop is
+// appended, while "a[0]b"'s trailing-garbage check runs AFTER the "a[0]" hop
+// has already been appended.
 func TestPreparedFilter_MalformedPathNeverResolves(t *testing.T) {
 	cases := []struct {
 		name string
-		doc  string
 		f    spi.Filter
 	}{
-		{"unclosed bracket, presence test", `{"a":["x"]}`,
+		{"unclosed bracket, presence test",
 			spi.Filter{Op: spi.FilterNotNull, Path: "a[", Source: spi.SourceData}},
-		{"trailing char after subscript, matching comparison", `{"a":["x"]}`,
+		{"trailing char after subscript, matching comparison",
 			spi.Filter{Op: spi.FilterEq, Path: "a[0]b", Source: spi.SourceData,
 				Value: "x", Declared: []spi.DataType{spi.String}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := spi.Prepare(tc.f).Match([]byte(tc.doc), spi.EntityMeta{}); got {
-				t.Errorf("Match(%s) on %+v = true, want false: a path that fails to parse must never resolve", tc.doc, tc.f)
-			}
+			_, err := spi.Prepare(tc.f)
+			require.Error(t, err)
+			require.ErrorIs(t, err, spi.ErrUnevaluableLeaf)
 		})
 	}
 }

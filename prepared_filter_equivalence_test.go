@@ -38,6 +38,7 @@ package spi
 // the gate together and hide behind a green run.
 
 import (
+	"errors"
 	"math/rand"
 	"os"
 	"strconv"
@@ -232,7 +233,7 @@ var genDocs = []string{
 
 func genLeaf(r *rand.Rand) Filter {
 	if r.Intn(20) == 0 {
-		return Filter{} // zero-Op child: a leaf that never matches
+		return Filter{} // zero-Op child: unevaluable to Prepare, always-false to frozen
 	}
 	f := Filter{Op: genOps[r.Intn(len(genOps))]}
 	if r.Intn(4) == 0 {
@@ -245,7 +246,10 @@ func genLeaf(r *rand.Rand) Filter {
 	f.Declared = genDeclared[r.Intn(len(genDeclared))]
 	if f.Op == FilterBetween || f.Op == FilterBetweenInclusive {
 		// Deliberately also emit the wrong arity sometimes: ExpandLeaf's arity
-		// error is a per-row non-match in both implementations and must stay so.
+		// error is a per-row non-match for frozen and an unevaluable leaf
+		// (Prepare rejects the whole filter) for the live side — the
+		// deliberate carve-out TestPrepare_EquivalentToFrozenMatchFilter
+		// documents.
 		switch r.Intn(4) {
 		case 0:
 			f.Values = []any{genOperands[r.Intn(len(genOperands))]}
@@ -311,36 +315,72 @@ func envIntFrom(min int, key string, def int) int {
 	return def
 }
 
-// TestPrepare_EquivalentToFrozenMatchFilter is the merge gate. Exact agreement,
-// no carve-outs: the prepare/execute split changes no answers.
+// TestPrepare_EquivalentToFrozenMatchFilter is the merge gate. Exact
+// agreement whenever both sides can answer.
+//
+// One deliberate carve-out, dated to Task 2 (ErrUnevaluableLeaf): frozen
+// never errors — an unevaluable leaf (a zero-Op child, an operand parsing
+// into no declared type, a BETWEEN arity mismatch, …) is absorbed into
+// `matched && err == nil` and reported as an ordinary false, wherever that
+// leaf sits in the tree. Prepare now refuses the whole filter instead,
+// because a leaf silently reported as false is exactly the leaf a future NOT
+// would invert into matches-everything, and because frozen's per-leaf
+// swallowing has its own documented bug (see
+// TestConditionToFilter_NilFields_DegradesInconsistently): an unevaluable
+// leaf under OR can make frozen answer true off a sibling, which Prepare's
+// hard rejection does not attempt to reproduce. So a Prepare error is not
+// compared against frozen's boolean at all — it is checked only for shape
+// (wraps ErrUnevaluableLeaf). Whenever Prepare succeeds, every leaf in the
+// tree expanded cleanly and the two sides still must agree exactly.
 func TestPrepare_EquivalentToFrozenMatchFilter(t *testing.T) {
 	cases := equivCases()
 	r := rand.New(rand.NewSource(equivSeed()))
 
+	compared := 0
 	for i := 0; i < cases; i++ {
 		f := genFilter(r, 3)
 		data := []byte(genDocs[r.Intn(len(genDocs))])
 		meta := genMeta(r)
 
+		p, err := Prepare(f)
+		if err != nil {
+			if !errors.Is(err, ErrUnevaluableLeaf) {
+				t.Fatalf("Prepare error at case %d is not ErrUnevaluableLeaf: %v\n  filter=%#v", i, err, f)
+			}
+			continue
+		}
+
 		want := frozenMatchFilter(f, data, meta)
-		got := Prepare(f).Match(data, meta)
+		got := p.Match(data, meta)
 
 		if got != want {
 			t.Fatalf("DIVERGENCE at case %d\n  prepared=%v frozen=%v\n  filter=%#v\n  data=%s\n  meta=%+v",
 				i, got, want, f, data, meta)
 		}
+		compared++
+	}
+	// A gate that never actually compares anything passes vacuously. Guard
+	// against the carve-out swallowing the whole corpus (e.g. a bug that
+	// makes every leaf unevaluable).
+	if compared == 0 {
+		t.Fatal("every generated case was rejected by Prepare; the gate exercised no agree/disagree comparisons")
 	}
 }
 
 // TestPrepare_MatchIsRepeatable pins that a prepared filter gives the same
-// answer on every call — no state is consumed by evaluation.
+// answer on every call — no state is consumed by evaluation. A filter Prepare
+// rejects (see TestPrepare_EquivalentToFrozenMatchFilter's carve-out) has no
+// PreparedFilter to check repeatability on, so it is skipped here too.
 func TestPrepare_MatchIsRepeatable(t *testing.T) {
 	r := rand.New(rand.NewSource(0xBEEFED))
 	for i := 0; i < 2000; i++ {
 		f := genFilter(r, 3)
 		data := []byte(genDocs[r.Intn(len(genDocs))])
 		meta := genMeta(r)
-		p := Prepare(f)
+		p, err := Prepare(f)
+		if err != nil {
+			continue
+		}
 		first := p.Match(data, meta)
 		for k := 0; k < 5; k++ {
 			if p.Match(data, meta) != first {

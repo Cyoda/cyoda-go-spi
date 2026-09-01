@@ -265,6 +265,18 @@ func genLeaf(r *rand.Rand) Filter {
 	return f
 }
 
+// genFilter deliberately never emits FilterNot. frozenMatchFilter above is a
+// verbatim copy of the pre-split evaluator taken before FilterNot existed —
+// it has no NOT case and cannot be taught one without becoming a second,
+// hand-maintained NOT implementation whose only purpose would be to compare
+// against itself, which is exactly the failure mode this file's header
+// warns the frozen side against. Corpus coverage for FilterNot instead lives
+// where a real second implementation already exists to compare against:
+// internal/match/prepared_equivalence_test.go, in cyoda-go, which checks
+// spi.Prepare/Match against the engine's independent in-memory evaluator.
+// This is a deliberate absence, not an oversight — see
+// docs/cloud-parity/negation.md's "Test surface" section in cyoda-go for the
+// same record.
 func genFilter(r *rand.Rand, depth int) Filter {
 	if depth <= 0 || r.Intn(3) == 0 {
 		return genLeaf(r)

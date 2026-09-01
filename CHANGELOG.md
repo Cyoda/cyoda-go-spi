@@ -470,6 +470,109 @@ same milestone already updates in lock-step) and, separately, on
 subscripts before it next bumps its pin, or add a `Harness.Skip` entry while
 it catches up.
 
+- **An unsatisfiable comparison now follows operator polarity, per
+  stored-value type family.** `EvalLeaf`'s `kindCompare` and `kindStringOp`
+  arms used to hardcode `false` whenever a field's own type family had no
+  surviving sub-condition for the operand — correct for a positive operator,
+  wrong for a negative one. `$.n NOT_EQUAL 12.5` on a field declared
+  `INTEGER` used to answer `false` for every entity; it now answers `true`
+  for every entity holding a non-null value there, because no integer equals
+  `12.5` (PostgreSQL agrees: `select 5::int <> 12.5` is `t`). Decided per
+  stored-value type family rather than on whole-expansion voidness: a field
+  declared `[INTEGER, String]` is not exempt, because the string branch
+  accepting the operand does not rescue the numeric branch's own answer.
+  `evalCompare` now returns `(matched, hadCandidate)`; both arms answer
+  `isNegativeOp(op)` on no candidate instead of hardcoding `false`.
+  `Expansion.void` — dead in production, read only by its own test — is
+  removed; an all-buckets-empty expansion is now just the ordinary
+  no-candidate case both arms already handle. A stored value the kernel
+  cannot *parse* (not merely a type-family mismatch — e.g. a JSON number
+  whose scale overflows `Decimal`) is unaffected: that is a read failure,
+  not a no-candidate answer, and stays non-match for every operator,
+  positive or negative, per `correctness-over-availability.md`. Null and
+  absent values are unaffected either way — that gate runs before either arm
+  and applies uniformly to every binary operator.
+
+- **`Prepare` and `prepareNode` return `(_, error)` for a leaf that cannot be
+  evaluated, instead of silently degrading it to a leaf that never
+  matches.** A never-matching leaf was safe while the condition language had
+  no negation; a `NOT` above it inverts that into matches-everything, so
+  every cause of it is now decided at prepare time, from the condition
+  alone, before any entity is read. Four causes reject with an error
+  wrapping the new `ErrUnevaluableLeaf`: an operand parsing into none of the
+  leaf's declared types (including a nil/empty declared set); a
+  `SourceData` **or** `SourceMeta` leaf whose `Path` is empty or outside its
+  grammar (a `SourceMeta` path must additionally be a member of the closed
+  meta vocabulary `extractFilterMetaValue` recognises); an unsupported
+  operator, including a zero-`Op` leaf (which previously annihilated or was
+  silently ignored depending on position in the tree); and a
+  `LIKE`/`MATCHES_PATTERN` operand that will not compile, detected from the
+  existing `ExpandLeaf` result rather than a second, duplicate compile.
+  `preparedNode`'s `expanded` field is now dead (every node a successful
+  prepare returns has a valid expansion) and is removed. **Migration: every
+  caller of `Prepare` must handle the second return value** — `cyoda-go`'s
+  three in-tree plugins update seven non-test call sites
+  (`memory/searcher.go`, `memory/grouped_stats.go` ×2, `sqlite/searcher.go`,
+  `sqlite/query_planner.go`, `sqlite/grouped_stats.go`,
+  `postgres/query_planner.go`) in the same milestone. A caller that used to
+  treat "no match" and "cannot evaluate" as the same outcome must now
+  distinguish them: the former is a valid `PreparedFilter`, the latter is an
+  error before one exists.
+
+- **`FilterNot` — a branch node with exactly one child and an empty
+  `Path`.** Negates its child's own two-valued match answer. Because a leaf
+  holds when SOME addressed value satisfies it, negating that answer makes
+  `NOT` a **universal** quantifier over a wildcard-addressed path ("no
+  element matches"), a different question from the child operator's
+  negative twin applied element-wise ("some element differs") — for
+  `{"tags":["red","blue"]}`, `NOT($.tags[*] EQUALS "red")` is `false` while
+  `$.tags[*] NOT_EQUAL "red"` is `true`. Vacuous truth over an empty array,
+  an explicit `null`, or an absent field falls out of the same mechanism,
+  with no special-casing. `Prepare` rejects a malformed `FilterNot` —
+  `Children` of length 0 or ≥ 2, or a single zero-`Op` child — rather than
+  guessing an interpretation (never "invert the AND of the children", never
+  an unguarded `Children[0]`).
+
+  **`groupToFilter` no longer folds an unrecognised operator into
+  `FilterAnd`.** The wire `Operator` is matched exactly, case-sensitively,
+  against the closed set `{AND, OR, NOT}` — `MapOperator`'s own leaf-operator
+  convention — so `"NOT"`, `"xor"`, `""`, and a case variant such as `"and"`
+  all now fail with `ErrUnknownOperator` instead of three of them silently
+  becoming a conjunction. `ValidateConditionOperators` is extended to
+  validate a `GroupCondition`'s own `operator` too, closing a front-door gap
+  this tightening exposed. This was reachable only by a self-executing
+  backend calling `ConditionToFilter` directly — the engine's own HTTP
+  boundary already rejected an unrecognised group operator — but a backend
+  built against an earlier pin silently misread it as `AND` rather than
+  refusing the request.
+
+  **Conformance: `spitest` makes `FilterNot` a requirement, not advice.**
+  `Searcher/FilterNot` and `Iterable/FilterNot` run a real `spi.FilterNot`
+  through every filter-taking entry point the suite covers, pinning the
+  universal-quantifier reading (including the vacuous empty-array and
+  absent-field cases) and the arity guard (`Children` of length 0 or ≥ 2
+  fails with `ErrUnevaluableLeaf` rather than matching). The existing
+  nested-malformed-path case gains a second variant nested under a real
+  `FilterNot`, alongside the synthetic-op-name variant that stood in for it
+  before `FilterNot` existed — neither subsumes the other: one pins a
+  validator recursing into an operator it has never seen, the other pins it
+  recursing through the real node. **A backend that recurses filter-path
+  validation only into `FilterAnd`/`FilterOr` fails these on its next
+  dependency update.**
+
+- **`spitest`'s `Searcher/Pattern/MalformedLike` case now requires an error
+  from `Search`, not an empty page.** The old case was justified as
+  "rejecting a malformed pattern with a `400` is the request boundary's job,
+  above the `Searcher`" — but the boundary already refusing a case is a
+  reason it should be **unreachable** underneath, not a reason to require
+  the wrong answer there once the boundary check is bypassed (a criterion
+  stored before the check existed, or a self-executing backend with no
+  boundary of its own). `cyoda-go`'s own `Search` callers already propagate
+  the rejection as of this same milestone's `Prepare` error-return change
+  above. **A backend whose `Search` still answers an empty page for a
+  malformed `LIKE` operand fails conformance on its next dependency
+  update.**
+
 ### Added
 
 - **`MergeOrdered` helper.** A pure pull-stream merge of an already-ordered

@@ -392,6 +392,25 @@ func runFilterPathGrammar(t *testing.T, entry string, exec filterPathExec) {
 		t.Errorf("%s refused a malformed path nested under an and-branch with %v; the refusal must wrap spi.ErrInvalidFilterPath", entry, err)
 	}
 
+	// A malformed path nested under a branch node that is neither And nor
+	// Or is still malformed. FilterNot does not exist on this SPI version
+	// yet, so an unrecognised Op carrying Children stands in for it: to a
+	// validator that only recurses on a case list of named branch operators,
+	// this node is indistinguishable from any other operator it has never
+	// seen, which is exactly the shape a NOT node will have until every
+	// backend is rebuilt against the SPI version that defines FilterNot. A
+	// validator that recurses on "does this node have children" rather than
+	// on the operator's name must still catch it.
+	nestedUnderUnknownBranch := spi.Filter{Op: spi.FilterOp("not"), Children: []spi.Filter{
+		malformedPathFilter(spi.SourceData, "foo';x"),
+	}}
+	switch err := exec(t, nestedUnderUnknownBranch); {
+	case err == nil:
+		t.Errorf("%s accepted a malformed path nested under a non-and/or branch node; path validation must walk any node carrying Children, not a fixed list of branch operators", entry)
+	case !errors.Is(err, spi.ErrInvalidFilterPath):
+		t.Errorf("%s refused a malformed path nested under a non-and/or branch node with %v; the refusal must wrap spi.ErrInvalidFilterPath", entry, err)
+	}
+
 	// Accepts: the grammar must not have been satisfied by refusing
 	// everything.
 	for _, path := range filterPathAcceptsData {

@@ -7,6 +7,17 @@ const (
 	FilterAnd FilterOp = "and"
 	FilterOr  FilterOp = "or"
 
+	// FilterNot negates its single child (see Filter.Children). It is NOT
+	// De Morgan sugar for "invert the operator and distribute": over a
+	// wildcard path it is a universal quantifier ("no element satisfies the
+	// child"), a different question from applying the child's negative
+	// counterpart element-wise ("some element differs" — see
+	// docs/cloud-parity/path-grammar.md section 5 and prepared_filter.go's
+	// match doc). NOT of a leaf that is false for every reason — including a
+	// vacuous one: an empty array, an explicit null, or an absent field —
+	// is true.
+	FilterNot FilterOp = "not"
+
 	FilterEq  FilterOp = "eq"
 	FilterNe  FilterOp = "ne"
 	FilterGt  FilterOp = "gt"
@@ -78,7 +89,13 @@ const (
 
 // Filter is a generic predicate tree for search pushdown.
 // Leaf nodes carry Op, Path, Source, and Value/Values.
-// Branch nodes (FilterAnd, FilterOr) carry Children.
+// Branch nodes (FilterAnd, FilterOr) carry Children of any length (zero is
+// the identity: empty AND matches everything, empty OR matches nothing).
+// FilterNot is also a branch node but is arity-exactly-one: Children of
+// length 0, length >= 2, or whose single element has a zero Op, all fail
+// [Prepare] rather than being guessed at — there is no well-defined way to
+// invert an empty or many-child set, and Filter is a public struct any
+// backend can build, so Prepare cannot trust one to already be well-formed.
 type Filter struct {
 	Op FilterOp
 
@@ -111,12 +128,22 @@ type Filter struct {
 	// terminate a quoted JSON-path literal is outside it. A backend needing a
 	// wider form must widen this grammar, not bypass its own validator.
 	//
-	// An EMPTY Path is legal and is not checked: tree operators (FilterAnd,
-	// FilterOr) and any leaf that addresses no field carry one.
+	// An EMPTY Path is legal ONLY for a tree operator (FilterAnd, FilterOr):
+	// those carry no leaf condition of their own, Children hold the real
+	// leaves. It is NOT a way for a LEAF to say "addresses no field" — every
+	// leaf addresses exactly one field, on either FieldSource, and an empty
+	// Path on one is rejected: spi.Prepare fails it with ErrUnevaluableLeaf
+	// rather than treating it as a match against the whole document or as an
+	// unconditional non-match. See prepared_filter.go.
 	//
 	// Parse it with ParseFilterPath and validate it with ValidateFilterPath.
 	// A second, independent spelling of the grammar is how a backend admits a
-	// form no resolver serves.
+	// form no resolver serves. This grammar and these two parse helpers are
+	// for Source=SourceData; a Source=SourceMeta Path is not a data path at
+	// all — it names one of a closed set of canonical meta field names
+	// directly (a superset of [MetaFieldNames] that also carries storage-key
+	// aliases such as "entity_id"), and spi.Prepare rejects a Path that is
+	// empty or outside that set the same way (ErrUnevaluableLeaf).
 	//
 	// # Rejection is mandatory
 	//
@@ -129,7 +156,10 @@ type Filter struct {
 	// predicate that genuinely matched nothing are different answers, and a
 	// backend that conflates them makes a client error indistinguishable from
 	// a legitimate empty page on that backend alone. Backends name this
-	// sentinel ErrInvalidFilterPath.
+	// sentinel ErrInvalidFilterPath. The in-process kernel (spi.Prepare)
+	// enforces the same rejection — of an empty or malformed SourceData path,
+	// and of an empty or non-vocabulary SourceMeta path — via
+	// ErrUnevaluableLeaf, ahead of any backend-specific validation.
 	Path string
 
 	Source   FieldSource

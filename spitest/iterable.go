@@ -47,6 +47,7 @@ func runIterableSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Overlay/SnapshotAtOpen", testIterableOverlaySnapshotAtOpen)
 	runSubtest(t, h, tracker, "TrackingRead/Gating", testIterableTrackingReadGating)
 	runSubtest(t, h, tracker, "FilterPath/Grammar", testIterableFilterPathGrammar)
+	runSubtest(t, h, tracker, "FilterNot", testIterableFilterNot)
 }
 
 // testIterableFilterPathGrammar holds Iterate to the Filter.Path grammar,

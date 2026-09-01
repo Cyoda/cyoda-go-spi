@@ -120,6 +120,22 @@ func extractFilterMetaValue(path string, meta EntityMeta) (any, bool) {
 	}
 }
 
+// isRecognizedMetaPath reports whether path is a member of the closed meta
+// vocabulary extractFilterMetaValue recognizes — checked by asking
+// extractFilterMetaValue itself whether it would find path at all, against a
+// zero-value EntityMeta. Its "found" return is decided purely by path
+// membership in the switch above, never by the receiver's field values (every
+// explicit case returns true regardless of whether that field happens to be
+// the type's zero value), so calling it with a placeholder EntityMeta is safe
+// and keeps this a single source of truth rather than a second, driftable
+// keyset. Used by prepareNode to reject a SourceMeta leaf whose Path is empty
+// or unrecognized (ErrUnevaluableLeaf) before Match ever resolves it to
+// silent not-found.
+func isRecognizedMetaPath(path string) bool {
+	_, found := extractFilterMetaValue(path, EntityMeta{})
+	return found
+}
+
 // timeToMicro converts a time.Time to microseconds since Unix epoch.
 // Mirrors plugins/sqlite/post_filter.go timeToMicro.
 //

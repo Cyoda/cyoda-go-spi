@@ -23,9 +23,9 @@ import (
 //
 //   - ExpandLeaf parses the operand once against the field's declared type set
 //     and produces an Expansion — the typed sub-conditions (numeric / temporal /
-//     other branches) plus a void flag or an error. This is the once-per-query
-//     work, and prepared_filter.go is what makes that true: Prepare calls it
-//     once per leaf and Match never calls it at all.
+//     other branches) — or an error. This is the once-per-query work, and
+//     prepared_filter.go is what makes that true: Prepare calls it once per
+//     leaf and Match never calls it at all.
 //   - EvalLeaf classifies a single stored gjson.Result and decides match/no-match
 //     against a pre-built Expansion. This is the per-row work.
 //
@@ -41,9 +41,10 @@ import (
 //   - BETWEEN uses precise same-type bounds (no double-widening quirk) and is
 //     EXCLUSIVE (an inclusive variant is a trivial later addition — see
 //     evalBetween).
-//   - String ops act only on a textual stored value; a string op against a
-//     non-textual (numeric/boolean) stored slot is a non-match and never
-//     stringifies the stored value.
+//   - String ops act only on a textual stored value; a string op never
+//     stringifies the stored value, so a string op against a non-textual
+//     (numeric/boolean) stored slot has no candidate to test — it follows
+//     operator polarity (see isNegativeOp), not an unconditional non-match.
 //   - BETWEEN_INCLUSIVE is BETWEEN's inclusive twin (lo <= v <= hi vs lo < v <
 //     hi); it shares BETWEEN's expansion/bucketing exactly and differs only in
 //     the final bound comparison (see rangeMatch in evalBetween).
@@ -76,13 +77,20 @@ type tempRange struct {
 }
 
 // Expansion is the once-per-query parse+bucket result of a single leaf. It is
-// opaque to callers — build it with ExpandLeaf and pass it to EvalLeaf. A void
-// expansion (>=1 declared type accepted the operand but every sub-condition was
-// dropped) evaluates to non-match for any stored value.
+// opaque to callers — build it with ExpandLeaf and pass it to EvalLeaf.
+//
+// A kindCompare expansion can have every numeric/temporal/other bucket empty
+// (>=1 declared type accepted the operand, but every sub-condition it produced
+// was then dropped — e.g. EQUALS against an imprecise value). That is not a
+// distinct "void" case: at eval time the stored value's own type family
+// simply has no candidate sub-condition, exactly like a declared type that
+// never accepted the operand in the first place. EvalLeaf answers such an
+// unsatisfiable comparison by operator polarity (isNegativeOp) — false for a
+// positive operator, true for a negative one — not with an unconditional
+// non-match; see evalCompare's hadCandidate contract.
 type Expansion struct {
 	kind expKind
 	op   FilterOp
-	void bool
 
 	// kindCompare branches (OR across families; only the family matching the
 	// stored value's own JSON kind participates).
@@ -109,6 +117,31 @@ type Expansion struct {
 // count compilations and prove they happen once per query rather than once per
 // row. Production code never reassigns it.
 var compileRegex = regexp.Compile
+
+// maxEchoedOperandBytes bounds how much of a leaf's operand this file's error
+// paths repeat back to the caller. Search request bodies are capped far
+// larger than this (10 MiB), so echoing the operand verbatim would let a
+// single oversized-but-otherwise-ordinary request (e.g. a field with no
+// declared type — the documented 400 INVALID_CONDITION case, not a
+// boundary/backend inconsistency) blow the error up to request size, and
+// prepared_filter.go wraps this same operand a second time on top of it.
+// internal/common's error path then logs that string again as "cause" at
+// WARN, so an unbounded echo turns a client-triggerable, entirely ordinary
+// rejection into tens of megabytes of log per request. Mirrors
+// [ErrInvalidPattern]'s choice (see its doc comment) to drop the operand from
+// a client-facing 400 entirely; this error still names it, just bounded.
+const maxEchoedOperandBytes = 200
+
+// truncateOperand caps s for inclusion in a client-facing error message. The
+// "...(truncated)" marker is explicit so a reader — including one piecing the
+// message back together from a log line — can tell truncation happened
+// rather than mistaking the cut string for the operand in full.
+func truncateOperand(s string) string {
+	if len(s) <= maxEchoedOperandBytes {
+		return s
+	}
+	return s[:maxEchoedOperandBytes] + "...(truncated)"
+}
 
 // ExpandLeaf parses operand (or, for range ops, the two bounds in values)
 // against the field's declared type set and returns the typed Expansion.
@@ -138,9 +171,25 @@ func ExpandLeaf(op FilterOp, operand string, values []string, declared []DataTyp
 		FilterIEq, FilterINe, FilterIContains, FilterINotContains, FilterIStartsWith,
 		FilterINotStartsWith, FilterIEndsWith, FilterINotEndsWith:
 		e := Expansion{kind: kindStringOp, op: op, strOperand: operand}
-		// Swallowed deliberately: Prepare's contract is that a leaf whose
-		// operand cannot be expanded becomes a leaf that never matches.
-		// Callers wanting a rejection ask ValidateLeafPattern FIRST.
+		// Swallowed deliberately: ExpandLeaf's own per-row contract is
+		// unchanged by prepared_filter.go's Prepare — a pattern operand that
+		// will not compile still yields a leaf whose Expansion never matches
+		// (nil strMatch here), for callers outside this package that invoke
+		// ExpandLeaf directly and still want that leaf built rather than an
+		// error.
+		//
+		// Prepare is no longer one of those callers: it now rejects such a
+		// leaf (ErrUnevaluableLeaf). It gets there by checking
+		// exp.strMatch == nil AFTER this call returns, not by asking
+		// ValidateLeafPattern FIRST — asking first would run compileLeafPattern
+		// twice per leaf (once in ValidateLeafPattern, once here) and break
+		// the once-per-query compile guarantee
+		// (TestPrepare_CompilesRegexExactlyOncePerQuery /
+		// TestPrepare_TokenisesLikeExactlyOncePerQuery). That after-the-fact
+		// check is sound because TestValidatorAgreesWithKernel pins that
+		// compileLeafPattern erroring is exactly when strMatch ends up nil —
+		// Prepare's post-hoc check cannot silently miss a case
+		// ValidateLeafPattern would have caught.
 		if m, err := compileLeafPattern(op, operand); err == nil {
 			e.strMatch = m
 		}
@@ -201,12 +250,14 @@ func expandCompare(op FilterOp, operand string, declared []DataType) (Expansion,
 	}
 
 	if !engaged {
-		return Expansion{}, fmt.Errorf("ExpandLeaf: operand %q parses into no declared type", operand)
+		return Expansion{}, fmt.Errorf("ExpandLeaf: operand %q parses into no declared type", truncateOperand(operand))
 	}
-	if len(e.numeric) == 0 && len(e.temporal) == 0 && len(e.others) == 0 {
-		// A type accepted the operand but every bucket dropped it → void.
-		return Expansion{kind: kindCompare, op: op, void: true}, nil
-	}
+	// A declared type may have accepted the operand yet dropped every
+	// sub-condition it produced (e.g. EQUALS against an imprecise value) —
+	// e.numeric/e.temporal/e.others are then all empty, same as a type that
+	// never accepted the operand. That is not a distinct case to construct
+	// here: evalCompare/EvalLeaf already treat an empty family as "no
+	// candidate" and answer by operator polarity (see Expansion's doc).
 	return e, nil
 }
 
@@ -300,20 +351,42 @@ func EvalLeaf(exp Expansion, stored gjson.Result) bool {
 		return false
 	}
 
-	if exp.void {
-		return false
-	}
-
 	switch exp.kind {
 	case kindStringOp:
 		if stored.Type != gjson.String {
-			return false // string op on a non-textual slot → non-match
+			// A string op has no candidate against a non-textual stored slot:
+			// it never stringifies the stored value, so there is nothing to
+			// test. Follow operator polarity rather than answering false
+			// unconditionally.
+			return isNegativeOp(exp.op)
 		}
 		return evalStringOp(exp, stored.String())
 	case kindCompare:
-		return exp.evalCompare(stored)
+		matched, hadCandidate := exp.evalCompare(stored)
+		if matched {
+			return true
+		}
+		if !hadCandidate {
+			return isNegativeOp(exp.op)
+		}
+		return false
 	case kindBetween:
 		return exp.evalBetween(stored)
+	}
+	return false
+}
+
+// isNegativeOp reports whether op asserts the ABSENCE of a relation. When no
+// sub-condition survives for the stored value's own type family, the comparison
+// is unsatisfiable for that value: a positive operator is false and a negative
+// one is true. Null and absent are handled earlier and never reach here.
+func isNegativeOp(op FilterOp) bool {
+	switch op {
+	case FilterNe, FilterINe,
+		FilterNotContains, FilterINotContains,
+		FilterNotStartsWith, FilterINotStartsWith,
+		FilterNotEndsWith, FilterINotEndsWith:
+		return true
 	}
 	return false
 }
@@ -321,26 +394,47 @@ func EvalLeaf(exp Expansion, stored gjson.Result) bool {
 // evalCompare runs the OR-over-branches comparison. Only the branch family that
 // matches the stored value's own JSON kind participates, which is exactly the
 // Cloud "a branch whose type-slot is absent is harmlessly false" behaviour.
-func (e Expansion) evalCompare(stored gjson.Result) bool {
+//
+// The second return, hadCandidate, reports whether the comparison for the
+// stored value's own type family is DECIDED — either a sub-condition was
+// actually tried (matched or not), or the value could not be read at all and
+// the family fails closed. EvalLeaf treats hadCandidate=false as the one case
+// still open to interpretation: no sub-condition even existed to try for that
+// family, so the answer follows operator polarity (isNegativeOp) rather than
+// defaulting to false. hadCandidate=true always means the answer above
+// (matched) is final and polarity plays no further part — that is what makes
+// "value unreadable" and "sub-condition tried and failed" the same outcome:
+// both report hadCandidate=true, matched=false, and EvalLeaf then answers
+// false for every operator, negatives included. Per
+// correctness-over-availability.md: a value the engine cannot read is a
+// fail-closed non-match, never a substituted answer that a negative operator
+// could flip to a match.
+func (e Expansion) evalCompare(stored gjson.Result) (matched bool, hadCandidate bool) {
 	switch stored.Type {
 	case gjson.Number:
 		dec, err := ParseDecimal(stored.Raw)
 		if err != nil {
-			return false
+			// The value could not be read (e.g. an exponent Decimal cannot
+			// represent) — NOT "no sub-condition existed to try". Fail closed
+			// for every operator: hadCandidate=true pins the answer to
+			// matched=false regardless of polarity, so a negative operator
+			// never rides an unreadable value into the result set.
+			return false, true
 		}
 		storedT := classifyStoredNumeric(dec)
 		for _, sc := range e.numeric {
 			if !IsAssignableTo(storedT, sc.Type) {
 				continue
 			}
+			hadCandidate = true
 			if sc.NotNull {
-				return true // bare existence test: a present numeric of an assignable type
+				return true, true // bare existence test: a present numeric of an assignable type
 			}
 			if cmpResult(dec.Cmp(sc.Value), sc.Op) {
-				return true
+				return true, true
 			}
 		}
-		return false
+		return false, hadCandidate
 
 	case gjson.String:
 		s := stored.String()
@@ -359,8 +453,9 @@ func (e Expansion) evalCompare(stored gjson.Result) bool {
 					if tc.Type != src.Type {
 						continue
 					}
+					hadCandidate = true
 					if CompareTemporal(tc.Op, storedMs, true, tc.Millis, true) {
-						return true
+						return true, true
 					}
 				}
 			}
@@ -368,34 +463,42 @@ func (e Expansion) evalCompare(stored gjson.Result) bool {
 		for _, oc := range e.others {
 			switch oc.typ {
 			case String:
+				hadCandidate = true
 				if cmpResult(strings.Compare(s, oc.val.(string)), e.op) {
-					return true
+					return true, true
 				}
 			case Character:
 				rs := []rune(s)
-				if len(rs) == 1 && cmpResult(compareRune(rs[0], oc.val.(rune)), e.op) {
-					return true
+				if len(rs) == 1 {
+					hadCandidate = true
+					if cmpResult(compareRune(rs[0], oc.val.(rune)), e.op) {
+						return true, true
+					}
 				}
 			case UUIDType, TimeUUIDType:
 				if id, err := uuid.Parse(s); err == nil {
+					hadCandidate = true
 					if eqNeResult(id == oc.val.(uuid.UUID), e.op) {
-						return true
+						return true, true
 					}
 				}
 			}
 		}
-		return false
+		return false, hadCandidate
 
 	case gjson.True, gjson.False:
 		b := stored.Bool()
 		for _, oc := range e.others {
-			if oc.typ == Boolean && eqNeResult(b == oc.val.(bool), e.op) {
-				return true
+			if oc.typ == Boolean {
+				hadCandidate = true
+				if eqNeResult(b == oc.val.(bool), e.op) {
+					return true, true
+				}
 			}
 		}
-		return false
+		return false, hadCandidate
 	}
-	return false
+	return false, false
 }
 
 // evalBetween applies the precise range test, EXCLUSIVE for BETWEEN and

@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
 
@@ -26,7 +27,7 @@ func TestPrepare_CompilesRegexExactlyOncePerQuery(t *testing.T) {
 			defer func() { compileRegex = orig }()
 
 			operand := "A.*"
-			p := Prepare(Filter{
+			p := mustPrepare(t, Filter{
 				Op:       op,
 				Source:   SourceData,
 				Path:     "name",
@@ -72,7 +73,7 @@ func TestPrepare_TokenisesLikeExactlyOncePerQuery(t *testing.T) {
 	defer func() { parseLikePattern = orig }()
 
 	operand := "A%"
-	p := Prepare(Filter{
+	p := mustPrepare(t, Filter{
 		Op:       FilterLike,
 		Source:   SourceData,
 		Path:     "name",
@@ -112,21 +113,153 @@ func TestEvalLeaf_AnchoredPatternMatchesWholeValue(t *testing.T) {
 	}
 }
 
-// TestPrepare_UnexpandableLeafMarkedUnexpanded pins the explicit
-// !n.expanded guard in preparedNode.match. It is not redundant with the
-// zero-Expansion happening to fall through EvalLeaf's switch to false: that
-// fallthrough is an accident of kindUnary being the zero expKind (iota's
-// first value). A zero Expansion therefore enters EvalLeaf's unary branch
-// with an empty op, matches neither FilterIsNull nor FilterNotNull, and
-// falls through to false — not because it was recognised as unexpandable.
-// If expKind's zero value ever changes, or EvalLeaf's unary branch changes,
-// the accident stops holding and only the explicit flag keeps an
-// unexpandable leaf a never-match. Do not delete this guard on the grounds
-// that the whole suite passes without it — it does today only by that
-// accident.
-func TestPrepare_UnexpandableLeafMarkedUnexpanded(t *testing.T) {
-	p := Prepare(Filter{Op: FilterEq, Source: SourceData, Path: "n", Value: "abc", Declared: []DataType{Integer}})
-	if p.root.expanded {
-		t.Error("a leaf whose ExpandLeaf errored must be marked unexpanded, not left to a zero-Expansion fallthrough")
+// TestPrepare_Not pins the basic NOT semantics: NOT inverts whether the
+// child leaf matched, including on an absent field, where the leaf is false
+// and NOT is therefore true (vacuous truth, not a special case).
+func TestPrepare_Not(t *testing.T) {
+	inner := Filter{Op: FilterEq, Path: "s", Source: SourceData,
+		Value: "x", Declared: []DataType{String}}
+	p, err := Prepare(Filter{Op: FilterNot, Children: []Filter{inner}})
+	require.NoError(t, err)
+	require.False(t, p.Match([]byte(`{"s":"x"}`), EntityMeta{}))
+	require.True(t, p.Match([]byte(`{"s":"y"}`), EntityMeta{}))
+	require.True(t, p.Match([]byte(`{}`), EntityMeta{}), "absent field: leaf is false, NOT is true")
+}
+
+// TestPrepare_NotOverWildcardIsUniversal pins the headline behaviour: NOT
+// over a wildcard path is a universal quantifier ("no element matches"), not
+// the same question as the corresponding negative operator applied
+// element-wise ("some element differs"). NOT($.tags[*] EQUALS "red") means no
+// tag is "red"; $.tags[*] NOT_EQUAL "red" means some tag differs from "red" —
+// for ["red","blue"] the first is false and the second is true.
+func TestPrepare_NotOverWildcardIsUniversal(t *testing.T) {
+	inner := Filter{Op: FilterEq, Path: "tags[*]", Source: SourceData,
+		Value: "red", Declared: []DataType{String}}
+	p, err := Prepare(Filter{Op: FilterNot, Children: []Filter{inner}})
+	require.NoError(t, err)
+	require.False(t, p.Match([]byte(`{"tags":["red","blue"]}`), EntityMeta{}))
+	require.True(t, p.Match([]byte(`{"tags":["blue"]}`), EntityMeta{}))
+	require.True(t, p.Match([]byte(`{"tags":[]}`), EntityMeta{}), "vacuously true")
+	require.True(t, p.Match([]byte(`{}`), EntityMeta{}), "vacuously true")
+
+	// The headline contrast, as an assertion rather than only in prose:
+	// NOT($.tags[*] EQUALS "red") ("no tag is red") is a different question
+	// from $.tags[*] NOT_EQUAL "red" ("some tag differs from red"). On
+	// ["red","blue"] the first is false (a "red" element is present) and the
+	// second is true (the "blue" element differs) — the two must disagree
+	// here, not merely both be computable.
+	notEqual := Filter{Op: FilterNe, Path: "tags[*]", Source: SourceData,
+		Value: "red", Declared: []DataType{String}}
+	pNotEqual := mustPrepare(t, notEqual)
+	data := []byte(`{"tags":["red","blue"]}`)
+	require.False(t, p.Match(data, EntityMeta{}), "NOT(EQUALS) over the wildcard: no element is red")
+	require.True(t, pNotEqual.Match(data, EntityMeta{}), "NOT_EQUAL over the wildcard: some element (blue) differs")
+}
+
+// TestPrepare_MalformedNotFailsClosed pins that a FilterNot node with an
+// arity other than exactly one child, or whose single child is unevaluable
+// (including a zero-Op child), fails Prepare rather than being guessed at —
+// never "invert the AND of the children".
+//
+// The two-child case deliberately uses TWO WELL-FORMED leaves, not two
+// zero-Op children: a pair of zero-Op children is already rejected one level
+// down by ExpandLeaf's unsupported-operator arm (the same path the
+// single-zero-Op-child case below takes), so it never actually exercises the
+// arity guard in prepareNode's FilterNot case. Weakening that guard from
+// "!= 1" to "< 1" still passes the whole suite if this case carries
+// unevaluable children — it silently prepares a 2-child NOT and negates only
+// Children[0], discarding the rest. Two well-formed leaves is the only shape
+// that isolates the arity check itself.
+func TestPrepare_MalformedNotFailsClosed(t *testing.T) {
+	leafA := Filter{Op: FilterEq, Path: "a", Source: SourceData,
+		Value: "x", Declared: []DataType{String}}
+	leafB := Filter{Op: FilterEq, Path: "b", Source: SourceData,
+		Value: "y", Declared: []DataType{String}}
+	for _, f := range []Filter{
+		{Op: FilterNot},
+		{Op: FilterNot, Children: []Filter{}},
+		{Op: FilterNot, Children: []Filter{leafA, leafB}}, // well-formed, but arity 2
+		{Op: FilterNot, Children: []Filter{{}}},           // zero-Op child
+	} {
+		_, err := Prepare(f)
+		require.Error(t, err, "a malformed NOT must fail Prepare, never invert")
 	}
+}
+
+// TestPrepare_NotDoubleNegationRestoresOriginal pins NOT(NOT(x)) == x:
+// negating twice returns exactly the child's own match answer on every kind
+// of input — an ordinary match, an ordinary non-match, and a vacuous
+// non-match — since FilterNot's match is a plain boolean flip with no
+// normalisation that could make double negation diverge from the original.
+func TestPrepare_NotDoubleNegationRestoresOriginal(t *testing.T) {
+	leaf := Filter{Op: FilterEq, Path: "s", Source: SourceData,
+		Value: "x", Declared: []DataType{String}}
+	single := mustPrepare(t, leaf)
+	doubled := mustPrepare(t, Filter{Op: FilterNot, Children: []Filter{
+		{Op: FilterNot, Children: []Filter{leaf}},
+	}})
+	for _, data := range [][]byte{
+		[]byte(`{"s":"x"}`),
+		[]byte(`{"s":"y"}`),
+		[]byte(`{}`),
+	} {
+		require.Equal(t, single.Match(data, EntityMeta{}), doubled.Match(data, EntityMeta{}),
+			"NOT(NOT(x)) must answer exactly as x does, for %s", data)
+	}
+}
+
+// TestPrepare_NotOverEmptyGroupIsTheGroupsComplement pins NOT(AND[]) = false
+// and NOT(OR[]) = true. An empty AND already matches everything and an empty
+// OR already matches nothing (both pre-existing identities, unrelated to
+// NOT), so negating each is a plain complement — FilterNot needs no
+// special-casing for an empty-children group underneath it.
+func TestPrepare_NotOverEmptyGroupIsTheGroupsComplement(t *testing.T) {
+	notAnd := mustPrepare(t, Filter{Op: FilterNot, Children: []Filter{{Op: FilterAnd}}})
+	notOr := mustPrepare(t, Filter{Op: FilterNot, Children: []Filter{{Op: FilterOr}}})
+	data := []byte(`{"anything":"whatsoever"}`)
+	require.False(t, notAnd.Match(data, EntityMeta{}), "NOT(AND[]) must be false: empty AND matches everything")
+	require.True(t, notOr.Match(data, EntityMeta{}), "NOT(OR[]) must be true: empty OR matches nothing")
+}
+
+// TestPrepare_NotVacuousOverExplicitNull extends the vacuity table to an
+// EXPLICIT null, distinct from an absent field: a JSON null is a present
+// value (gjson Type Null, Exists() true — see TestResolvePath's "bare over
+// null" / "wildcard over null" cases), not an absent one, but it still makes
+// the child leaf false on both a scalar and a wildcard path, so NOT is still
+// true.
+func TestPrepare_NotVacuousOverExplicitNull(t *testing.T) {
+	scalar := Filter{Op: FilterEq, Path: "s", Source: SourceData,
+		Value: "x", Declared: []DataType{String}}
+	require.True(t, mustPrepare(t, Filter{Op: FilterNot, Children: []Filter{scalar}}).
+		Match([]byte(`{"s":null}`), EntityMeta{}), "NOT over an explicit scalar null must be true")
+
+	wildcard := Filter{Op: FilterEq, Path: "tags[*]", Source: SourceData,
+		Value: "red", Declared: []DataType{String}}
+	require.True(t, mustPrepare(t, Filter{Op: FilterNot, Children: []Filter{wildcard}}).
+		Match([]byte(`{"tags":null}`), EntityMeta{}),
+		"NOT over a wildcard addressing an explicit null list must be true: a null array presents no elements")
+}
+
+// TestPrepare_NotIsNullDiffersFromNotNullOnWildcard pins that NOT($.tags[*]
+// IS_NULL) ("no element is null") is a different question from $.tags[*]
+// NOT_NULL ("some element is present and non-null") — the same
+// universal-vs-existential asymmetry as the EQUALS/NOT_EQUAL contrast. The
+// vacuity rule (docs/cloud-parity/path-grammar.md section 5: IS_NULL and
+// NOT_NULL both answer false over an empty/null/absent wildcard, because
+// neither addresses any element) makes the two diverge even more starkly on
+// an empty array: NOT(IS_NULL) is vacuously TRUE there while NOT_NULL is
+// FALSE on the very same input.
+func TestPrepare_NotIsNullDiffersFromNotNullOnWildcard(t *testing.T) {
+	isNull := Filter{Op: FilterIsNull, Path: "tags[*]", Source: SourceData}
+	notNull := Filter{Op: FilterNotNull, Path: "tags[*]", Source: SourceData}
+	notIsNull := mustPrepare(t, Filter{Op: FilterNot, Children: []Filter{isNull}})
+	preparedNotNull := mustPrepare(t, notNull)
+
+	empty := []byte(`{"tags":[]}`)
+	require.True(t, notIsNull.Match(empty, EntityMeta{}), "NOT(IS_NULL) over an empty array: vacuously true")
+	require.False(t, preparedNotNull.Match(empty, EntityMeta{}), "NOT_NULL over an empty array: vacuously false (section 5)")
+
+	mixed := []byte(`{"tags":[null,"x"]}`)
+	require.False(t, notIsNull.Match(mixed, EntityMeta{}), `NOT(IS_NULL): one element IS null, so NOT is false`)
+	require.True(t, preparedNotNull.Match(mixed, EntityMeta{}), `NOT_NULL: one element ("x") is present and non-null`)
 }

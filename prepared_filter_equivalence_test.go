@@ -24,8 +24,21 @@ package spi
 // across the corpus, the hoist changed no answers. It does NOT guard the
 // kernel itself — a change to ExpandLeaf or EvalLeaf moves both sides
 // identically and this gate stays green regardless.
+//
+// Exception: frozenEvalLeafFast (single-declared-type String/UnboundDecimal,
+// the six comparable ops) bypasses ExpandLeaf/EvalLeaf entirely, so it does
+// NOT move automatically with a kernel change — it is a second, hand-rolled
+// reimplementation of the same "stored value's family has no candidate"
+// case, and it must be kept answering the SAME thing the kernel now does
+// (polarity for a genuine no-candidate, unconditional non-match for a value
+// the engine could not read) or this file stops proving the fast path and
+// the kernel ever agreed. It calls frozenIsNegativeOp, a second,
+// independently-maintained copy of isNegativeOp's switch — not the live
+// isNegativeOp — so a bug in isNegativeOp itself cannot move both sides of
+// the gate together and hide behind a green run.
 
 import (
+	"errors"
 	"math/rand"
 	"os"
 	"strconv"
@@ -90,6 +103,26 @@ func frozenEvalLeafString(op FilterOp, operand string, values []string, declared
 	return EvalLeaf(exp, stored), nil
 }
 
+// frozenIsNegativeOp is a verbatim, INDEPENDENTLY maintained copy of
+// isNegativeOp's switch (eval_leaf.go). frozenEvalLeafFast calls this, never
+// the live isNegativeOp: if it called the live function, a bug introduced
+// into isNegativeOp itself would move both sides of the equivalence gate
+// identically and TestPrepare_EquivalentToFrozenMatchFilter would stay green
+// while catching nothing — exactly the divergence-blindness this whole file
+// exists to avoid (see the file header). Keep this list in sync BY HAND with
+// isNegativeOp; letting them drift apart defeats the point just as much as
+// sharing the function would.
+func frozenIsNegativeOp(op FilterOp) bool {
+	switch op {
+	case FilterNe, FilterINe,
+		FilterNotContains, FilterINotContains,
+		FilterNotStartsWith, FilterINotStartsWith,
+		FilterNotEndsWith, FilterINotEndsWith:
+		return true
+	}
+	return false
+}
+
 func frozenEvalLeafFast(op FilterOp, operand string, declared []DataType, stored gjson.Result) (matched, handled bool) {
 	if len(declared) != 1 {
 		return false, false
@@ -107,7 +140,11 @@ func frozenEvalLeafFast(op FilterOp, operand string, declared []DataType, stored
 			return false, true
 		}
 		if stored.Type != gjson.String {
-			return false, true
+			// No candidate for the stored value's own family (a genuine
+			// type-family mismatch, not a read failure) — same
+			// unsatisfiable-comparison rule EvalLeaf/evalCompare applies:
+			// answer by operator polarity, not unconditionally false.
+			return frozenIsNegativeOp(op), true
 		}
 		return cmpResult(strings.Compare(stored.String(), operand), op), true
 
@@ -120,10 +157,17 @@ func frozenEvalLeafFast(op FilterOp, operand string, declared []DataType, stored
 			return false, true
 		}
 		if stored.Type != gjson.Number {
-			return false, true
+			// Genuine type-family mismatch — follows polarity.
+			return frozenIsNegativeOp(op), true
 		}
 		storedDec, err := ParseDecimal(stored.Raw)
 		if err != nil {
+			// The value could not be read (gjson already says it IS a
+			// Number) — NOT a no-candidate case. Fail closed for every
+			// operator, same as evalCompare's Number-arm ParseDecimal
+			// failure: a value the engine cannot read is a non-match, never
+			// a substituted answer a negative operator could flip to a
+			// match (correctness-over-availability.md).
 			return false, true
 		}
 		return cmpResult(storedDec.Cmp(opDec), op), true
@@ -189,7 +233,7 @@ var genDocs = []string{
 
 func genLeaf(r *rand.Rand) Filter {
 	if r.Intn(20) == 0 {
-		return Filter{} // zero-Op child: a leaf that never matches
+		return Filter{} // zero-Op child: unevaluable to Prepare, always-false to frozen
 	}
 	f := Filter{Op: genOps[r.Intn(len(genOps))]}
 	if r.Intn(4) == 0 {
@@ -202,7 +246,10 @@ func genLeaf(r *rand.Rand) Filter {
 	f.Declared = genDeclared[r.Intn(len(genDeclared))]
 	if f.Op == FilterBetween || f.Op == FilterBetweenInclusive {
 		// Deliberately also emit the wrong arity sometimes: ExpandLeaf's arity
-		// error is a per-row non-match in both implementations and must stay so.
+		// error is a per-row non-match for frozen and an unevaluable leaf
+		// (Prepare rejects the whole filter) for the live side — the
+		// deliberate carve-out TestPrepare_EquivalentToFrozenMatchFilter
+		// documents.
 		switch r.Intn(4) {
 		case 0:
 			f.Values = []any{genOperands[r.Intn(len(genOperands))]}
@@ -218,6 +265,18 @@ func genLeaf(r *rand.Rand) Filter {
 	return f
 }
 
+// genFilter deliberately never emits FilterNot. frozenMatchFilter above is a
+// verbatim copy of the pre-split evaluator taken before FilterNot existed —
+// it has no NOT case and cannot be taught one without becoming a second,
+// hand-maintained NOT implementation whose only purpose would be to compare
+// against itself, which is exactly the failure mode this file's header
+// warns the frozen side against. Corpus coverage for FilterNot instead lives
+// where a real second implementation already exists to compare against:
+// internal/match/prepared_equivalence_test.go, in cyoda-go, which checks
+// spi.Prepare/Match against the engine's independent in-memory evaluator.
+// This is a deliberate absence, not an oversight — see
+// docs/cloud-parity/negation.md's "Test surface" section in cyoda-go for the
+// same record.
 func genFilter(r *rand.Rand, depth int) Filter {
 	if depth <= 0 || r.Intn(3) == 0 {
 		return genLeaf(r)
@@ -268,42 +327,91 @@ func envIntFrom(min int, key string, def int) int {
 	return def
 }
 
-// TestPrepare_EquivalentToFrozenMatchFilter is the merge gate. Exact agreement,
-// no carve-outs: the prepare/execute split changes no answers.
+// TestPrepare_EquivalentToFrozenMatchFilter is the merge gate. Exact
+// agreement whenever both sides can answer.
+//
+// One deliberate carve-out, dated to Task 2 (ErrUnevaluableLeaf): frozen
+// never errors — an unevaluable leaf (a zero-Op child, an operand parsing
+// into no declared type, a BETWEEN arity mismatch, …) is absorbed into
+// `matched && err == nil` and reported as an ordinary false, wherever that
+// leaf sits in the tree. Prepare now refuses the whole filter instead,
+// because a leaf silently reported as false is exactly the leaf a future NOT
+// would invert into matches-everything, and because frozen's per-leaf
+// swallowing has its own documented bug (see
+// TestConditionToFilter_NilFields_ComparisonLeavesAreUnevaluable): an unevaluable
+// leaf under OR can make frozen answer true off a sibling, which Prepare's
+// hard rejection does not attempt to reproduce. So a Prepare error is not
+// compared against frozen's boolean at all — it is checked only for shape
+// (wraps ErrUnevaluableLeaf). Whenever Prepare succeeds, every leaf in the
+// tree expanded cleanly and the two sides still must agree exactly.
 func TestPrepare_EquivalentToFrozenMatchFilter(t *testing.T) {
 	cases := equivCases()
 	r := rand.New(rand.NewSource(equivSeed()))
 
+	compared := 0
 	for i := 0; i < cases; i++ {
 		f := genFilter(r, 3)
 		data := []byte(genDocs[r.Intn(len(genDocs))])
 		meta := genMeta(r)
 
+		p, err := Prepare(f)
+		if err != nil {
+			if !errors.Is(err, ErrUnevaluableLeaf) {
+				t.Fatalf("Prepare error at case %d is not ErrUnevaluableLeaf: %v\n  filter=%#v", i, err, f)
+			}
+			continue
+		}
+
 		want := frozenMatchFilter(f, data, meta)
-		got := Prepare(f).Match(data, meta)
+		got := p.Match(data, meta)
 
 		if got != want {
 			t.Fatalf("DIVERGENCE at case %d\n  prepared=%v frozen=%v\n  filter=%#v\n  data=%s\n  meta=%+v",
 				i, got, want, f, data, meta)
 		}
+		compared++
+	}
+	// A gate that never actually compares anything passes vacuously, and
+	// compared == 0 only catches TOTAL collapse. The carve-out already skips
+	// a measured ~32% of the default-seed corpus (comparison/range ops with a
+	// nil declared set are common in genDeclared), so the floor sits
+	// comfortably above that observed rate while still catching a regression
+	// that walks Prepare's rejection rate toward 100%.
+	if floor := cases / 2; compared <= floor {
+		t.Fatalf("compared %d of %d cases (%.1f%%), want more than %d (50%%): the carve-out is swallowing too much of the corpus for this gate to mean anything",
+			compared, cases, 100*float64(compared)/float64(cases), floor)
 	}
 }
 
 // TestPrepare_MatchIsRepeatable pins that a prepared filter gives the same
-// answer on every call — no state is consumed by evaluation.
+// answer on every call — no state is consumed by evaluation. A filter Prepare
+// rejects (see TestPrepare_EquivalentToFrozenMatchFilter's carve-out) has no
+// PreparedFilter to check repeatability on, so it is skipped here too — with
+// the same rate floor as that gate, for the same reason: skipping everything
+// would pass vacuously.
 func TestPrepare_MatchIsRepeatable(t *testing.T) {
 	r := rand.New(rand.NewSource(0xBEEFED))
-	for i := 0; i < 2000; i++ {
+	const n = 2000
+	compared := 0
+	for i := 0; i < n; i++ {
 		f := genFilter(r, 3)
 		data := []byte(genDocs[r.Intn(len(genDocs))])
 		meta := genMeta(r)
-		p := Prepare(f)
+		p, err := Prepare(f)
+		if err != nil {
+			continue
+		}
+		compared++
 		first := p.Match(data, meta)
 		for k := 0; k < 5; k++ {
 			if p.Match(data, meta) != first {
 				t.Fatalf("non-repeatable answer at case %d: filter=%#v", i, f)
 			}
 		}
+	}
+	if floor := n / 2; compared <= floor {
+		t.Fatalf("compared %d of %d cases (%.1f%%), want more than %d (50%%): the carve-out is swallowing too much of the corpus for this gate to mean anything",
+			compared, n, 100*float64(compared)/float64(n), floor)
 	}
 }
 

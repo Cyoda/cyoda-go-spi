@@ -62,28 +62,21 @@ func testPatternLikeGrammar(t *testing.T, h Harness) {
 	}
 }
 
-// testPatternMalformedLike pins what a backend does with the ONE malformed
-// LIKE operand: a trailing unpaired escape.
+// testPatternMalformedLike pins that a backend REFUSES the one malformed LIKE
+// operand — a trailing unpaired escape — rather than answering an empty page.
 //
-// The contract is Prepare's: "a leaf whose operand cannot be expanded becomes a
-// leaf that never matches". So Search returns NO error and NO rows. Rejecting
-// it with a 400 is the request boundary's job, above the Searcher, and failing
-// the search here instead is a divergence — that is exactly the split this case
-// exists to catch.
+// An empty page for a junk operand is a wrong answer wearing the costume of a
+// valid one. That the request boundary also refuses it is a reason this case
+// should be unreachable, not a reason to require the wrong answer underneath.
 func testPatternMalformedLike(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	searcher := seedPatternEntities(t, h, ctx)
-
 	for _, operand := range []string{`a\`, `\`} {
-		res, err := searcher.Search(ctx, spi.Filter{
-			Op:       spi.FilterLike,
-			Source:   spi.SourceData,
-			Path:     "name",
-			Value:    operand,
-			Declared: []spi.DataType{spi.String},
+		_, err := searcher.Search(ctx, spi.Filter{
+			Op: spi.FilterLike, Source: spi.SourceData, Path: "name",
+			Value: operand, Declared: []spi.DataType{spi.String},
 		}, spi.SearchOptions{ModelName: patternModel, ModelVersion: "1", Limit: 1000})
-		require.NoError(t, err, "malformed LIKE operand %q must not fail the search", operand)
-		require.Empty(t, res, "malformed LIKE operand %q must match nothing", operand)
+		require.Error(t, err, "malformed LIKE operand %q must fail the search, not answer an empty page", operand)
 	}
 }
 

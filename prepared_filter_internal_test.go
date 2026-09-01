@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
 
@@ -109,5 +110,51 @@ func TestEvalLeaf_AnchoredPatternMatchesWholeValue(t *testing.T) {
 	}
 	if EvalLeaf(exp, gjson.Parse(`"Alicia"`)) {
 		t.Error("EvalLeaf = true for a non-matching value, want false")
+	}
+}
+
+// TestPrepare_Not pins the basic NOT semantics: NOT inverts whether the
+// child leaf matched, including on an absent field, where the leaf is false
+// and NOT is therefore true (vacuous truth, not a special case).
+func TestPrepare_Not(t *testing.T) {
+	inner := Filter{Op: FilterEq, Path: "s", Source: SourceData,
+		Value: "x", Declared: []DataType{String}}
+	p, err := Prepare(Filter{Op: FilterNot, Children: []Filter{inner}})
+	require.NoError(t, err)
+	require.False(t, p.Match([]byte(`{"s":"x"}`), EntityMeta{}))
+	require.True(t, p.Match([]byte(`{"s":"y"}`), EntityMeta{}))
+	require.True(t, p.Match([]byte(`{}`), EntityMeta{}), "absent field: leaf is false, NOT is true")
+}
+
+// TestPrepare_NotOverWildcardIsUniversal pins the headline behaviour: NOT
+// over a wildcard path is a universal quantifier ("no element matches"), not
+// the same question as the corresponding negative operator applied
+// element-wise ("some element differs"). NOT($.tags[*] EQUALS "red") means no
+// tag is "red"; $.tags[*] NOT_EQUAL "red" means some tag differs from "red" —
+// for ["red","blue"] the first is false and the second is true.
+func TestPrepare_NotOverWildcardIsUniversal(t *testing.T) {
+	inner := Filter{Op: FilterEq, Path: "tags[*]", Source: SourceData,
+		Value: "red", Declared: []DataType{String}}
+	p, err := Prepare(Filter{Op: FilterNot, Children: []Filter{inner}})
+	require.NoError(t, err)
+	require.False(t, p.Match([]byte(`{"tags":["red","blue"]}`), EntityMeta{}))
+	require.True(t, p.Match([]byte(`{"tags":["blue"]}`), EntityMeta{}))
+	require.True(t, p.Match([]byte(`{"tags":[]}`), EntityMeta{}), "vacuously true")
+	require.True(t, p.Match([]byte(`{}`), EntityMeta{}), "vacuously true")
+}
+
+// TestPrepare_MalformedNotFailsClosed pins that a FilterNot node with an
+// arity other than exactly one child, or whose single child is unevaluable
+// (including a zero-Op child), fails Prepare rather than being guessed at —
+// never "invert the AND of the children".
+func TestPrepare_MalformedNotFailsClosed(t *testing.T) {
+	for _, f := range []Filter{
+		{Op: FilterNot},
+		{Op: FilterNot, Children: []Filter{}},
+		{Op: FilterNot, Children: []Filter{{}, {}}},
+		{Op: FilterNot, Children: []Filter{{}}}, // zero-Op child
+	} {
+		_, err := Prepare(f)
+		require.Error(t, err, "a malformed NOT must fail Prepare, never invert")
 	}
 }

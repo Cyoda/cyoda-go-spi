@@ -441,11 +441,69 @@ func lifecycleToFilter(c *predicate.LifecycleCondition) (Filter, error) {
 	}, nil
 }
 
-// groupToFilter translates a GroupCondition to a Filter with AND/OR children.
+// groupOperatorNames is the closed set of [predicate.GroupCondition].Operator
+// values [groupOperatorToFilterOp] recognises. Matched EXACTLY
+// (case-sensitive) — see groupOperatorToFilterOp's doc for why.
+var groupOperatorNames = []string{"AND", "OR", "NOT"}
+
+// groupOperatorToFilterOp maps a GroupCondition's wire Operator to the
+// FilterOp that carries its children, or reports it is outside the closed
+// set.
+//
+// The match is exact-case, consistent with [MapOperator]'s leaf-operator
+// convention ("EQUALS", never "equals" or "Equals"): a wire value is a
+// canonical spelling, not a case-insensitive alias. Before this function
+// existed, groupToFilter tested only whether Operator case-insensitively
+// equalled "OR" and defaulted everything else — "NOT", "xor", "and", "", any
+// typo — to FilterAnd. That silently answered a caller's malformed or
+// misspelled request as if it had asked a well-formed AND, the same hazard
+// [unknownOperatorError]'s doc describes for leaf operators, and the reason
+// FilterNot cannot be introduced by widening that fallback: an operator this
+// function does not recognise must fail loudly, never fall back to AND.
+func groupOperatorToFilterOp(operator string) (FilterOp, bool) {
+	switch operator {
+	case "AND":
+		return FilterAnd, true
+	case "OR":
+		return FilterOr, true
+	case "NOT":
+		return FilterNot, true
+	default:
+		return "", false
+	}
+}
+
+// unknownGroupOperatorError reports a GroupCondition.Operator outside the
+// closed set, listing the valid names so a caller can self-correct. Mirrors
+// [unknownOperatorError]'s shape for the group (rather than leaf) operator
+// vocabulary — the two sets are disjoint in purpose and are kept as separate
+// closed lists rather than one shared list a caller could accidentally widen
+// for both.
+func unknownGroupOperatorError(operator string) error {
+	if operator == "" {
+		return fmt.Errorf("%w: missing group operator; valid: %s",
+			ErrUnknownOperator, strings.Join(groupOperatorNames, ", "))
+	}
+	return fmt.Errorf("%w: group operator %q; valid: %s",
+		ErrUnknownOperator, operator, strings.Join(groupOperatorNames, ", "))
+}
+
+// groupToFilter translates a GroupCondition to a Filter with AND/OR/NOT
+// children. c.Operator is validated against the closed set
+// [groupOperatorNames]; anything outside it — a misspelling, a case variant,
+// an empty string — fails with [ErrUnknownOperator] rather than silently
+// becoming FilterAnd. See [groupOperatorToFilterOp]'s doc for why the
+// previous case-insensitive-OR-or-AND fallback was wrong.
+//
+// A NOT group's arity is NOT checked here: [Prepare] rejects a FilterNot
+// whose Children is not exactly one, the same way it already rejects any
+// other malformed Filter a caller builds by hand — groupToFilter has no
+// special authority over Filter's own well-formedness rule, and duplicating
+// the check here would just be a second, potentially drifting, copy of it.
 func groupToFilter(c *predicate.GroupCondition, fields map[string]FieldDescriptor) (Filter, error) {
-	op := FilterAnd
-	if strings.EqualFold(c.Operator, "OR") {
-		op = FilterOr
+	op, ok := groupOperatorToFilterOp(c.Operator)
+	if !ok {
+		return Filter{}, unknownGroupOperatorError(c.Operator)
 	}
 	children := make([]Filter, 0, len(c.Conditions))
 	for _, child := range c.Conditions {
@@ -744,6 +802,14 @@ func validateOperatorsAtDepth(cond predicate.Condition, depth int) error {
 	case *predicate.LifecycleCondition:
 		return checkOperator(c.OperatorType)
 	case *predicate.GroupCondition:
+		// The group's OWN operator, not just its children's, is now a real
+		// thing to get wrong: before groupToFilter tightened its matching,
+		// every string that was not case-insensitively "OR" silently became
+		// a valid AND, so there was no invalid group operator for this
+		// front-door validator to miss. See groupOperatorToFilterOp's doc.
+		if _, ok := groupOperatorToFilterOp(c.Operator); !ok {
+			return unknownGroupOperatorError(c.Operator)
+		}
 		for _, child := range c.Conditions {
 			if err := validateOperatorsAtDepth(child, depth+1); err != nil {
 				return err

@@ -7,6 +7,17 @@ const (
 	FilterAnd FilterOp = "and"
 	FilterOr  FilterOp = "or"
 
+	// FilterNot negates its single child (see Filter.Children). It is NOT
+	// De Morgan sugar for "invert the operator and distribute": over a
+	// wildcard path it is a universal quantifier ("no element satisfies the
+	// child"), a different question from applying the child's negative
+	// counterpart element-wise ("some element differs" — see
+	// docs/cloud-parity/path-grammar.md section 5 and prepared_filter.go's
+	// match doc). NOT of a leaf that is false for every reason — including a
+	// vacuous one: an empty array, an explicit null, or an absent field —
+	// is true.
+	FilterNot FilterOp = "not"
+
 	FilterEq  FilterOp = "eq"
 	FilterNe  FilterOp = "ne"
 	FilterGt  FilterOp = "gt"
@@ -78,7 +89,13 @@ const (
 
 // Filter is a generic predicate tree for search pushdown.
 // Leaf nodes carry Op, Path, Source, and Value/Values.
-// Branch nodes (FilterAnd, FilterOr) carry Children.
+// Branch nodes (FilterAnd, FilterOr) carry Children of any length (zero is
+// the identity: empty AND matches everything, empty OR matches nothing).
+// FilterNot is also a branch node but is arity-exactly-one: Children of
+// length 0, length >= 2, or whose single element has a zero Op, all fail
+// [Prepare] rather than being guessed at — there is no well-defined way to
+// invert an empty or many-child set, and Filter is a public struct any
+// backend can build, so Prepare cannot trust one to already be well-formed.
 type Filter struct {
 	Op FilterOp
 

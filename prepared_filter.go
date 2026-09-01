@@ -57,7 +57,8 @@ type preparedNode struct {
 // leaf whose operand cannot be expanded, whose SourceData Path is empty or
 // outside the documented path grammar, whose SourceMeta Path is empty or
 // outside the closed meta vocabulary, or whose pattern operand will not
-// compile, makes the whole filter unevaluable. That is decided once, from the
+// compile, makes the whole filter unevaluable — and so does a FilterNot node
+// whose Children is not exactly one well-formed filter. That is decided once, from the
 // condition alone, before any entity is read — it is a property of the
 // request, and Prepare rejects the request rather than silently building a
 // leaf that never matches. A never-match leaf would be indistinguishable from
@@ -98,6 +99,29 @@ func prepareNode(f Filter) (preparedNode, error) {
 			}
 		}
 		return n, nil
+
+	case FilterNot:
+		// Arity is exactly one. Filter is a public struct any backend can
+		// build, so this must reject a malformed node rather than guess:
+		// there is no well-defined "invert" of zero or of many children, and
+		// falling back to "invert the AND of the children" is exactly the
+		// ambiguity the wire-level arity rule (groupToFilter) exists to
+		// refuse — see Filter.Children's doc. Do this check BEFORE indexing
+		// f.Children[0]: an unguarded index on a length-0 slice panics.
+		if len(f.Children) != 1 {
+			return preparedNode{}, fmt.Errorf("%w: NOT requires exactly one child, got %d",
+				ErrUnevaluableLeaf, len(f.Children))
+		}
+		// The single child's own Op — including the zero value — is
+		// validated by recursing into prepareNode: a zero-Op child falls to
+		// this function's leaf branch below and is rejected there by
+		// ExpandLeaf's default arm, the same path any other unsupported
+		// operator takes. No separate check is needed here.
+		child, err := prepareNode(f.Children[0])
+		if err != nil {
+			return preparedNode{}, err
+		}
+		return preparedNode{op: FilterNot, children: []preparedNode{child}}, nil
 	}
 
 	// Leaf — including a zero-Op child, which ExpandLeaf's default arm rejects.
@@ -199,6 +223,23 @@ func (n *preparedNode) match(data []byte, meta EntityMeta) bool {
 			}
 		}
 		return false
+	case FilterNot:
+		// Negating the child's own match answer is what makes this a
+		// universal quantifier over a wildcard path, not merely a textual
+		// inversion. The child leaf already holds "SOME addressed value
+		// satisfies it" (see below), so negating that answer gives "NO
+		// addressed value satisfies it" — which is a different question from
+		// applying the child operator's negative counterpart element-wise
+		// (that asks "SOME addressed value differs"). For
+		// {"tags":["red","blue"]}, NOT($.tags[*] EQUALS "red") is false
+		// (some element IS "red"), while $.tags[*] NOT_EQUAL "red" is true
+		// (some element, "blue", differs) — see FilterNot's doc in filter.go.
+		//
+		// This also gives vacuous truth for free: an empty array, an
+		// explicit null, or an absent field all make the child leaf resolve
+		// no values, so the child is false (see the leaf comment below) and
+		// NOT is therefore true, with no special-casing here.
+		return !n.children[0].match(data, meta)
 	}
 	// A leaf holds when SOME addressed value satisfies it. A leaf addressing
 	// no values (an empty slice) is a non-match for every operator, presence

@@ -393,15 +393,16 @@ func runFilterPathGrammar(t *testing.T, entry string, exec filterPathExec) {
 	}
 
 	// A malformed path nested under a branch node that is neither And nor
-	// Or is still malformed. FilterNot does not exist on this SPI version
-	// yet, so an unrecognised Op carrying Children stands in for it: to a
-	// validator that only recurses on a case list of named branch operators,
-	// this node is indistinguishable from any other operator it has never
-	// seen, which is exactly the shape a NOT node will have until every
-	// backend is rebuilt against the SPI version that defines FilterNot. A
-	// validator that recurses on "does this node have children" rather than
-	// on the operator's name must still catch it.
-	nestedUnderUnknownBranch := spi.Filter{Op: spi.FilterOp("not"), Children: []spi.Filter{
+	// Or is still malformed. This SPI version defines FilterNot, but a
+	// backend built against an older SPI pin has not been rebuilt against it
+	// yet, so its own switch still has no case for that operator name — an
+	// entirely fictional op name stands in for that gap, deliberately never
+	// matching FilterNot or any other named operator: to a validator that
+	// only recurses on a case list of named branch operators, this node is
+	// indistinguishable from any operator it has never seen. A validator
+	// that recurses on "does this node have children" rather than on the
+	// operator's name must still catch it.
+	nestedUnderUnknownBranch := spi.Filter{Op: spi.FilterOp("__spitest_unknown_branch_op__"), Children: []spi.Filter{
 		malformedPathFilter(spi.SourceData, "foo';x"),
 	}}
 	switch err := exec(t, nestedUnderUnknownBranch); {

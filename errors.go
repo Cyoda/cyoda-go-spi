@@ -189,6 +189,13 @@ var ErrInvalidFilterPath = errors.New("invalid filter path")
 // e.g. "entity_id", "created_at"), a pattern operand (LIKE / MATCHES_PATTERN)
 // that will not compile, or an unsupported operator.
 //
+// It also covers a malformed [FilterNot] node: one whose Children is not
+// exactly length 1. That is not a leaf defect, but the same umbrella applies
+// for the same reason — it is a property of the request, decided once at
+// prepare time — and FilterNot's single child is itself prepared through this
+// same recursion, so a zero-Op or otherwise-unevaluable child surfaces this
+// sentinel too, one level down.
+//
 // Every cause is decided at prepare time, from the condition alone, before
 // any entity is read — it is a property of the REQUEST, not an artifact of a
 // particular row. Prepare therefore rejects the whole filter rather than

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	spi "github.com/cyoda-platform/cyoda-go-spi"
 	"github.com/cyoda-platform/cyoda-go-spi/predicate"
 )
@@ -1831,4 +1833,54 @@ func TestConditionToFilter_ArrayClauseProducesBracketPaths(t *testing.T) {
 	if len(f.Declared) != 1 || f.Declared[0] != spi.String {
 		t.Errorf("Declared = %v, want [String]", f.Declared)
 	}
+}
+
+// TestGroupToFilter_RejectsUnknownOperator pins that groupToFilter (reached
+// via ConditionToFilter) no longer folds any operator that is not
+// case-insensitively "OR" into FilterAnd. "NOTT", "xor" and "" must all be
+// rejected, and so must "and": the wire operator is matched exactly against
+// the closed set {"AND","OR","NOT"}, consistent with MapOperator's own
+// exact-case leaf-operator convention — a case variant is an unrecognised
+// operator, not a tolerated alias.
+func TestGroupToFilter_RejectsUnknownOperator(t *testing.T) {
+	for _, op := range []string{"NOTT", "xor", "", "and"} {
+		_, err := spi.ConditionToFilter(&predicate.GroupCondition{
+			Operator: op, Conditions: []predicate.Condition{}}, nil)
+		require.ErrorIs(t, err, spi.ErrUnknownOperator, "operator %q must not map to AND", op)
+	}
+}
+
+// TestGroupToFilter_Not pins the wire mapping GroupCondition{Operator:"NOT"}
+// -> Filter{Op: FilterNot, Children: [...]}.
+func TestGroupToFilter_Not(t *testing.T) {
+	f, err := spi.ConditionToFilter(&predicate.GroupCondition{
+		Operator: "NOT",
+		Conditions: []predicate.Condition{
+			&predicate.SimpleCondition{JsonPath: "$.s", OperatorType: "EQUALS", Value: "x"},
+		},
+	}, map[string]spi.FieldDescriptor{"$.s": {Types: []spi.DataType{spi.String}}})
+	require.NoError(t, err)
+	require.Equal(t, spi.FilterNot, f.Op)
+	require.Len(t, f.Children, 1)
+	require.Equal(t, spi.FilterEq, f.Children[0].Op)
+}
+
+// TestValidateConditionOperators_RejectsAnUnknownGroupOperator closes a gap
+// that TestGroupToFilter_RejectsUnknownOperator's fix exposes: the front-door
+// validator walked into a GroupCondition's children but never checked the
+// group's OWN operator, because before this change every string that was not
+// case-insensitively "OR" was a silently-valid alias for AND. Now that a
+// group operator can be genuinely invalid, a caller relying on
+// ValidateConditionOperators as the sole boundary check (per its own doc)
+// must not let a bad group operator through to ConditionToFilter undetected.
+func TestValidateConditionOperators_RejectsAnUnknownGroupOperator(t *testing.T) {
+	cond := &predicate.GroupCondition{
+		Operator: "XOR",
+		Conditions: []predicate.Condition{
+			&predicate.SimpleCondition{JsonPath: "$.a", OperatorType: "EQUALS", Value: 1},
+		},
+	}
+	err := spi.ValidateConditionOperators(cond)
+	require.ErrorIs(t, err, spi.ErrUnknownOperator)
+	require.Contains(t, err.Error(), "XOR")
 }

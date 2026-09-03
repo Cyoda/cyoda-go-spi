@@ -14,6 +14,50 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **`EntityStore` has no whole-model read; `Search` and `Iterate` are
+  required.** `GetAll` and `GetAllAsAt` are removed, and the optional
+  `Searcher` and `Iterable` interfaces are folded into `EntityStore` as
+  `Search` and `Iterate`. Every engine path that reads more than one entity
+  already required one of them and refused a store without it; an optional
+  interface every consumer requires only kept those refusal branches alive.
+  There is no deprecation window: a deprecated `Iterable`/`Searcher` alias
+  would keep `store.(spi.Iterable)` compiling and hide exactly the dead
+  branches the change removes.
+
+  Two doc-only contract clarifications ship with it. `CompareAndSave`'s
+  godoc now states the literal expected-ID rule: the comparison is against
+  the caller's own transactional view, with no synonyms — a missing or
+  deleted entity has the empty transaction ID, so `expectedTxID == ""`
+  means "expect no entity". `TransactionManager.Join`'s godoc now states
+  that concurrent goroutines join the same transaction only through
+  application-side serialisation: the plugin's own locking admits multiple
+  concurrent readers but does not protect two concurrent writers to the
+  same transaction's buffers, so the application must run one write at a
+  time per transaction.
+
+  **Migration:** delete `GetAll`/`GetAllAsAt` from your store (read a model
+  with `GetPage` or `Iterate` with a zero-value filter); move your
+  `Search`/`Iterate` methods onto the store type if they were on a separate
+  one; drop `var _ spi.Searcher`/`spi.Iterable` assertions. `SearchOptions`,
+  `IterateOptions` and `Iterator` are unchanged.
+
+  spitest: `GetAll/EmptyModel`, `GetAll/Population`, `GetAllAsAt`,
+  `GetAllAsAt/CommittedOnlyInTx` and `TenantIsolation/GetAll` are gone
+  (`GetPage/*` already pins those contracts); new cases
+  `TenantIsolation/GetPage`, `Transaction/DeleteThenCompareAndSave` (a
+  compare-and-save after a same-transaction delete MUST conflict),
+  `Transaction/DeleteThenSave` (a save after a same-transaction delete
+  un-stages the delete: no DELETED version is written),
+  `Transaction/SaveThenCompareAndSave`, `TxStateErrors/OpAfterCommit`
+  (every operation on a committed transaction's context, reads included,
+  fails with `ErrTxAlreadyCommitted`), `CompareAndSave/ExpectedIDIsLiteral`
+  (the expected transaction ID is compared literally; a missing or deleted
+  entity has the empty ID, so `""` means "expect no entity"),
+  `Entity/Count/InTxBufferShapes`, and the gated
+  `GroupedAggregator/InTxRecordsNothing` suite (in-transaction grouped
+  aggregation records nothing into the read-set). A `Skip` map keyed on a
+  removed name fails the run.
+
 - **A schema node holds the set of kinds it was observed as.** `ModelNode.Kind()`,
   `.Types()`, `.Element()` and `.Children()` are replaced by `.Scalar()`,
   `.Object()`, `.Array()` — each returning that branch or nil — plus `.Kinds()`,

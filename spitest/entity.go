@@ -1082,7 +1082,7 @@ func testEntityGetPageInTxWithStagedDeletes(t *testing.T, h Harness) {
 
 // testEntityGetPageInTxRecordsReadSet pins GetPage's documented unconditional
 // (non-opt-in) read-set recording when asAt == nil inside a transaction —
-// unlike Searcher/Iterate's opt-in TrackingRead — and, discriminatingly,
+// unlike Search's and Iterate's opt-in TrackingRead — and, discriminatingly,
 // that the recording is scoped to the PAGE, not the whole model. This is
 // the deliberate narrowing of first-committer-wins from model-wide to
 // page-wide the GetPage doc comment calls out.

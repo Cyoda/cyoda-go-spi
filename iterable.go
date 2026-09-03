@@ -4,40 +4,8 @@ import (
 	"time"
 )
 
-// Iterator and IterateOptions support EntityStore.Iterate.
-//
-// Semantics:
-//   - Plugins push pushable parts of the filter into storage (SQL WHERE,
-//     CQL index lookup); residual is applied inside Next() before yielding.
-//   - A zero-value Filter means "yield all entities for the model"
-//     (subject to opts).
-//   - IterateOptions.OrderBy: empty means order is unspecified. A backend
-//     whose async search is engine-executed MUST honour a non-empty
-//     OrderBy. A backend whose async search is self-executing MAY reject a
-//     non-empty OrderBy with a plain error — there is no refusal sentinel,
-//     callers see whatever error the plugin returns. A non-empty OrderBy
-//     with an ambient transaction is unsupported; Iterate MUST return an
-//     error rather than silently ignoring the order.
-//   - Overlay semantics: with an ambient transaction, the merged
-//     (committed ∪ transaction write-set) view is snapshotted at Iterate()
-//     call time. Mutating the transaction while its iterator is open is
-//     forbidden — the visibility of entities such a mutation would add,
-//     remove, or change is unspecified for that already-open iterator.
-//   - Implementations MUST NOT hold a global write-blocking lock for the
-//     lifetime of the iterator (e.g. by holding only short-lived row locks,
-//     or by paging through a cursor).
-//   - The iterator MUST observe ctx cancellation: the underlying driver
-//     surfaces an error; the iterator reports it via Err() and Next()
-//     returns false.
-//   - No retry on transient driver errors — the plugin surfaces the first
-//     error and ends iteration.
-//   - Err() returns that error stickily; subsequent Next() calls return
-//     false.
-//   - Close() is idempotent.
-//
-// (ModelRef is hoisted as a first-class argument because iteration is
-// always scoped to exactly one model; IterateOptions carries only knobs
-// that vary across calls against the same model.)
+// Iterator and IterateOptions support EntityStore.Iterate; the iteration
+// contract those two types serve is stated in EntityStore.Iterate's godoc.
 
 // Iterator yields entities one at a time. Standard Go iterator shape
 // modeled after database/sql.Rows.
@@ -65,9 +33,9 @@ type IterateOptions struct {
 	// OrderBy specifies the sort keys applied to yielded entities. Empty
 	// means order is unspecified — this differs from EntityStore.Search,
 	// where an empty OrderBy still yields the engine's canonical entity-ID
-	// order. See this file's leading Semantics comment for which backends
-	// must honour a non-empty OrderBy, and why a non-empty OrderBy with an
-	// ambient transaction is an error.
+	// order. See EntityStore.Iterate for which backends must honour a
+	// non-empty OrderBy, and why a non-empty OrderBy with an ambient
+	// transaction is an error.
 	OrderBy []OrderSpec
 
 	// TrackingRead, when true and a transaction is active, records the

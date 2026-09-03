@@ -9,8 +9,8 @@ import (
 
 // TestIterableContract pins SPI field layout at SPI-consumer compile time.
 // Runtime semantics are exercised by plugin parity tests in cyoda-go's
-// e2e/parity registry; the Iterable/Iterator interface compile checks are
-// already enforced by the package compiling.
+// e2e/parity registry; the Iterator interface compile checks are already
+// enforced by the package compiling.
 func TestIterableContract(t *testing.T) {
 	// IterateOptions field-layout check (catches renames at SPI-consumer
 	// compile time even when the consumer doesn't yet exercise the field).

@@ -102,15 +102,16 @@ var ErrTxTenantMismatch = errors.New("transaction tenant mismatch")
 // when the result group count would exceed the configured ceiling.
 var ErrGroupCardinalityExceeded = errors.New("group cardinality exceeded ceiling")
 
-// ErrSearchResultLimitExceeded is returned by a Searcher whose direct search
-// matched more entities than the configured result-limit cap (bounded-or-fail
-// contract). The engine maps it to a client-facing 400.
+// ErrSearchResultLimitExceeded is returned by an EntityStore whose direct
+// search (EntityStore.Search) matched more entities than the configured
+// result-limit cap (bounded-or-fail contract). The engine maps it to a
+// client-facing 400.
 var ErrSearchResultLimitExceeded = errors.New("search result limit exceeded")
 
 // ErrAggregationNotPushdownable signals that a GroupedAggregator
 // implementation cannot safely push down a specific request shape; the
 // caller (typically the service layer) should fall through to the
-// streaming-tally path via Iterable.
+// streaming-tally path via EntityStore.Iterate.
 var ErrAggregationNotPushdownable = errors.New("aggregation request shape not pushdownable")
 
 // ErrUniqueViolation: a write would duplicate a declared composite unique key.

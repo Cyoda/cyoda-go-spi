@@ -7,7 +7,7 @@ import "fmt"
 // which deleted(id) is true, ordered by LessByOrder(specs).
 //
 // limit >= 1 is REQUIRED — a bounded-or-fail cap on the merged result, not a
-// page size, matching Searcher.Search's contract: if the number of survivors
+// page size, matching EntityStore.Search's contract: if the number of survivors
 // exceeds limit, MergeBounded returns ErrSearchResultLimitExceeded rather
 // than a truncated prefix. The bound gates on TOTAL survivors, so the adds
 // slice alone can trip it. Memory is bounded to ~limit+1+len(adds): the
@@ -17,8 +17,8 @@ import "fmt"
 // limit <= 0 is a contract violation: MergeBounded returns an error rather
 // than treating it as "unbounded" or substituting a default. There is no
 // unbounded mode — a caller that wants every surviving entity uses the
-// Iterable streaming surface (see MergeOrdered) instead of asking for a
-// materialized slice with no bound.
+// EntityStore.Iterate streaming surface (see MergeOrdered) instead of asking
+// for a materialized slice with no bound.
 func MergeBounded(next func() (*Entity, bool, error), adds []*Entity, deleted func(id string) bool, specs []OrderSpec, limit int) ([]*Entity, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("MergeBounded: limit must be >= 1")

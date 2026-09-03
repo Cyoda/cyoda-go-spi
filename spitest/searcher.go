@@ -202,11 +202,11 @@ func searcherBoundedOrFail(t *testing.T, h Harness, inTx bool) {
 // ---------------------------------------------------------------------------
 // Filter.Path grammar
 //
-// Shared by every filter-taking entry point on the SPI (Searcher.Search here,
-// Iterable.Iterate in iterable.go — the same reuse-across-suites arrangement
-// iterableModelRef already uses for the seed helpers). The vocabulary lives
-// here, next to Search, because Search is where a Filter first reaches a
-// backend.
+// Shared by every filter-taking entry point on the SPI (EntityStore.Search
+// here, EntityStore.Iterate in iterable.go — the same reuse-across-suites
+// arrangement iterableModelRef already uses for the seed helpers). The
+// vocabulary lives here, next to Search, because Search is where a Filter
+// first reaches a backend.
 //
 // The tables below are the executable form of Filter.Path's documented
 // grammar:

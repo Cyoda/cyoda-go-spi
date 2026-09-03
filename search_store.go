@@ -17,8 +17,8 @@ type SearchJob struct {
 	// Condition is the client's predicate in the DOMAIN wire syntax
 	// ([predicate.Condition] as JSON), deliberately NOT translated to a
 	// [Filter]. It is the one plugin-facing field that carries domain syntax;
-	// every other predicate surface here (Searcher.Search, Iterate,
-	// GroupedAggregate) takes a Filter.
+	// every other predicate surface here (EntityStore.Search,
+	// EntityStore.Iterate, GroupedAggregate) takes a Filter.
 	//
 	// For a store the engine executes, this field is OPAQUE: persist it and
 	// return it unchanged. The engine reads it back and translates it itself.

@@ -25,7 +25,7 @@ type SearchOptions struct {
 	// read, implemented optimistically). Default false: a plain snapshot
 	// predicate read that records nothing. No-op when no transaction is
 	// active. In-transaction search never prevents phantoms regardless of
-	// this flag (see docs/CONSISTENCY.md).
+	// this flag (see cyoda-go's docs/CONSISTENCY.md).
 	TrackingRead bool
 }
 

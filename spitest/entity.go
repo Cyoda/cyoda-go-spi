@@ -26,6 +26,7 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Exists", testEntityExists)
 	runSubtest(t, h, tracker, "Count", testEntityCount)
 	runSubtest(t, h, tracker, "CountByState", testEntityCountByState)
+	runSubtest(t, h, tracker, "Count/InTxBufferShapes", testEntityCountInTxBufferShapes)
 	runSubtest(t, h, tracker, "JSONFidelity/DeepNesting", testEntityJSONFidelity)
 
 	// Temporal group (Task 5)
@@ -346,6 +347,61 @@ func testEntityCountByState(t *testing.T, h Harness) {
 	require.NoError(t, err)
 	require.Equal(t, map[string]int64{"new": 3, "approved": 2, "rejected": 2, "in_review": 1}, got,
 		"after state transition, entity must count under post-transition state")
+}
+
+// In-transaction Count and CountByState reflect the transaction's own view
+// for every buffer shape: create, update with state change, delete of a
+// committed entity, create-then-delete, delete-then-save, and DeleteAll.
+func testEntityCountInTxBufferShapes(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	mref := spi.ModelRef{EntityName: "m-cnt-tx", ModelVersion: "1"}
+	ids := make([]string, 4)
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		for i := range ids {
+			ids[i] = newID()
+			e := newEntity(t, mref.EntityName, ids[i], map[string]any{"i": i})
+			e.Meta.State = []string{"open", "closed"}[i%2]
+			_, err := es.Save(txCtx, e)
+			require.NoError(t, err)
+		}
+	})
+
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	_, txCtx := beginGuarded(t, tm, ctx)
+	es, _ := h.Factory.EntityStore(txCtx)
+	save := func(id, state string) {
+		e := newEntity(t, mref.EntityName, id, map[string]any{})
+		e.Meta.State = state
+		_, err := es.Save(txCtx, e)
+		require.NoError(t, err)
+	}
+	check := func(step string, total int64, byState map[string]int64) {
+		n, err := es.Count(txCtx, mref)
+		require.NoError(t, err, step)
+		require.Equal(t, total, n, step)
+		got, err := es.CountByState(txCtx, mref, nil)
+		require.NoError(t, err, step)
+		require.Equal(t, byState, got, step)
+	}
+	check("baseline", 4, map[string]int64{"open": 2, "closed": 2})
+	n0 := newID()
+	save(n0, "open")
+	check("create", 5, map[string]int64{"open": 3, "closed": 2})
+	save(ids[1], "open")
+	check("update with state change", 5, map[string]int64{"open": 4, "closed": 1})
+	require.NoError(t, es.Delete(txCtx, ids[2]))
+	check("delete committed", 4, map[string]int64{"open": 3, "closed": 1})
+	n1 := newID()
+	save(n1, "closed")
+	require.NoError(t, es.Delete(txCtx, n1))
+	check("create then delete", 4, map[string]int64{"open": 3, "closed": 1})
+	require.NoError(t, es.Delete(txCtx, ids[3]))
+	save(ids[3], "open")
+	check("delete then save", 4, map[string]int64{"open": 4})
+	require.NoError(t, es.DeleteAll(txCtx, mref))
+	check("after DeleteAll", 0, map[string]int64{})
 }
 
 func testEntitySaveAllOrdering(t *testing.T, h Harness) {

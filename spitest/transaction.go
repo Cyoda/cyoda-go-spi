@@ -363,11 +363,14 @@ func testTxStateOpAfterCommit(t *testing.T, h Harness) {
 
 	// A correct, current expectedTxID is used for CompareAndSave so the
 	// assertion pins the tx-state check, not an incidental ErrConflict from
-	// a wrong expectedTxID.
+	// a wrong expectedTxID — nor the contract-violation error an empty
+	// expectedTxID now earns.
 	esOutside, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
 	committed, err := esOutside.Get(ctx, id)
 	require.NoError(t, err)
+	require.NotEmpty(t, committed.Meta.TransactionID,
+		"a transactional write must stamp EntityMeta.TransactionID; CompareAndSave has nothing valid to expect otherwise")
 
 	_, err = es.Save(txCtx, newEntity(t, mref.EntityName, newID(), map[string]any{"k": "v"}))
 	requireTxAlreadyCommittedOrPurged(t, err, "Save")
@@ -702,6 +705,8 @@ func testTxDeleteThenCompareAndSave(t *testing.T, h Harness) {
 	es, _ := h.Factory.EntityStore(ctx)
 	committed, err := es.Get(ctx, id)
 	require.NoError(t, err)
+	require.NotEmpty(t, committed.Meta.TransactionID,
+		"a transactional write must stamp EntityMeta.TransactionID; an empty expectedTxID is a contract violation, not a comparable value")
 
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
@@ -772,6 +777,8 @@ func testTxSaveThenCompareAndSave(t *testing.T, h Harness) {
 	es, _ := h.Factory.EntityStore(ctx)
 	committed, err := es.Get(ctx, id)
 	require.NoError(t, err)
+	require.NotEmpty(t, committed.Meta.TransactionID,
+		"a transactional write must stamp EntityMeta.TransactionID; an empty expectedTxID is a contract violation, not a comparable value")
 
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)

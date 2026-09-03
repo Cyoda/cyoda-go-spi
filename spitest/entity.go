@@ -54,6 +54,7 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "CompareAndSave/Success", testEntityCompareAndSaveSuccess)
 	runSubtest(t, h, tracker, "CompareAndSave/Conflict", testEntityCompareAndSaveConflict)
 	runSubtest(t, h, tracker, "CompareAndSave/ExpectedIDIsLiteral", testEntityCompareAndSaveExpectedIDIsLiteral)
+	runSubtest(t, h, tracker, "CompareAndSave/EmptyExpectedIDRejected", testEntityCompareAndSaveEmptyExpectedIDRejected)
 	runSubtest(t, h, tracker, "Concurrent/ConflictingUpdate", testEntityConcurrentConflict)
 	runSubtest(t, h, tracker, "Concurrent/DifferentEntities", testEntityConcurrentDifferent)
 	runSubtest(t, h, tracker, "TenantIsolation/Get", testEntityTenantIsolationGet)
@@ -1347,6 +1348,8 @@ func testEntityCompareAndSaveSuccess(t *testing.T, h Harness) {
 	got, err := es.Get(ctx, id)
 	require.NoError(t, err)
 	firstTxID := got.Meta.TransactionID
+	require.NotEmpty(t, firstTxID,
+		"a transactional write must stamp EntityMeta.TransactionID; an empty expectedTxID is a contract violation, not a comparable value")
 
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -1379,24 +1382,29 @@ func testEntityCompareAndSaveConflict(t *testing.T, h Harness) {
 	require.ErrorIs(t, err, spi.ErrConflict, "CompareAndSave with stale expectedTxID must return ErrConflict")
 }
 
-// testEntityCompareAndSaveExpectedIDIsLiteral pins expectedTxID's literal
-// comparison rule: a missing or deleted entity has the empty transaction
-// ID, so only expectedTxID == "" matches it. Run both outside a transaction
-// and inside one, since the comparison is against the caller's own
-// transactional view either way.
+// testEntityCompareAndSaveExpectedIDIsLiteral pins the comparison rule for
+// a NON-EMPTY expectedTxID: it is compared literally against the entity's
+// current EntityMeta.TransactionID, with no existence test folded in. So a
+// non-empty ID conflicts against a missing entity — CompareAndSave never
+// creates — and a stale non-empty ID conflicts against an entity that
+// exists. Run both outside a transaction and inside one, since the
+// comparison is against the caller's own transactional view either way.
 //
-// A version written outside any transaction may itself carry the empty
-// transaction ID on backends that stamp none for non-transactional writes
-// (see EntityVersionMeta.TransactionID's doc comment) — so the trio's
-// "existing entity" (used to check that "" no longer matches once an
-// entity exists) is seeded through a committed transaction, guaranteeing
-// a real, non-empty transaction ID for "" to conflict against.
+// The empty expectedTxID is not part of this case: it is a contract
+// violation, pinned by CompareAndSave/EmptyExpectedIDRejected below.
+//
+// The "existing entity" is still seeded through a committed transaction, so
+// it carries a real, non-empty transaction ID. On a backend that stamps
+// none for non-transactional writes (see EntityVersionMeta.TransactionID's
+// doc comment) a non-transactionally seeded entity would carry the empty
+// ID, and this leg would degenerate into the same non-empty-versus-empty
+// comparison the missing-entity leg already makes.
 func testEntityCompareAndSaveExpectedIDIsLiteral(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 
 	// seedExistingTransactional creates an entity via its own committed
 	// transaction — separate from, and completed before, any transaction
-	// assertLiteralTrio itself runs under — so it carries a real
+	// assertLiteralComparison itself runs under — so it carries a real
 	// transaction ID regardless of whether a backend stamps one on
 	// non-transactional writes.
 	seedExistingTransactional := func() string {
@@ -1409,7 +1417,7 @@ func testEntityCompareAndSaveExpectedIDIsLiteral(t *testing.T, h Harness) {
 		return id
 	}
 
-	assertLiteralTrio := func(opCtx spiCtx, es spi.EntityStore, existingID, label string) {
+	assertLiteralComparison := func(opCtx spiCtx, es spi.EntityStore, existingID, label string) {
 		// A non-empty expectedTxID against a missing entity conflicts —
 		// it does not create, even though there is nothing to compare
 		// against but "no entity".
@@ -1421,29 +1429,21 @@ func testEntityCompareAndSaveExpectedIDIsLiteral(t *testing.T, h Harness) {
 		require.ErrorIs(t, err, spi.ErrNotFound,
 			"%s: a conflicting CompareAndSave must not have created the entity", label)
 
-		// The empty expectedTxID means "expect no entity": it creates
-		// against a missing entity.
-		createID := newID()
-		_, err = es.CompareAndSave(opCtx, newEntity(t, "m-cas-lit", createID, map[string]any{"v": 2}), "")
-		require.NoError(t, err, "%s: empty expectedTxID against a missing entity must create", label)
-		got, err := es.Get(opCtx, createID)
-		require.NoError(t, err)
-		require.JSONEq(t, `{"v":2}`, string(got.Data))
-
-		// The empty expectedTxID against an entity that already exists
-		// conflicts: "expect no entity" no longer matches the current
-		// state. existingID was seeded through a committed transaction, so
-		// it carries a real, non-empty transaction ID for "" to conflict
-		// against on every backend.
-		_, err = es.CompareAndSave(opCtx, newEntity(t, "m-cas-lit", existingID, map[string]any{"v": 4}), "")
+		// A stale non-empty expectedTxID against an entity that exists
+		// conflicts: the stored transaction ID is real and different.
+		_, err = es.CompareAndSave(opCtx, newEntity(t, "m-cas-lit", existingID, map[string]any{"v": 4}), "nonexistent-tx-id")
 		require.ErrorIs(t, err, spi.ErrConflict,
-			"%s: empty expectedTxID against an existing entity must conflict", label)
+			"%s: stale non-empty expectedTxID against an existing entity must conflict", label)
+		got, err := es.Get(opCtx, existingID)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"v":3}`, string(got.Data),
+			"%s: a conflicting CompareAndSave must not have written", label)
 	}
 
 	outsideExistingID := seedExistingTransactional()
 	es, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
-	assertLiteralTrio(ctx, es, outsideExistingID, "outside tx")
+	assertLiteralComparison(ctx, es, outsideExistingID, "outside tx")
 
 	insideExistingID := seedExistingTransactional()
 	tm, err := h.Factory.TransactionManager(ctx)
@@ -1451,8 +1451,84 @@ func testEntityCompareAndSaveExpectedIDIsLiteral(t *testing.T, h Harness) {
 	txID, txCtx := beginGuarded(t, tm, ctx)
 	esTx, err := h.Factory.EntityStore(txCtx)
 	require.NoError(t, err)
-	assertLiteralTrio(txCtx, esTx, insideExistingID, "inside tx")
+	assertLiteralComparison(txCtx, esTx, insideExistingID, "inside tx")
 	require.NoError(t, tm.Commit(txCtx, txID))
+}
+
+// testEntityCompareAndSaveEmptyExpectedIDRejected pins the empty
+// expectedTxID as a CONTRACT VIOLATION: the implementation must return an
+// error rather than comparing it. The empty string is what a missing
+// entity, a deleted entity and an entity written outside any transaction
+// all carry, so it distinguishes nothing; treating it as "expect no
+// entity" would let CompareAndSave overwrite an entity that exists.
+//
+// The rejection carries no sentinel — a caller bug is not a domain outcome
+// — so only require.Error is asserted, never a particular error value.
+//
+// Covered against every state the entity can be in: missing, existing, and
+// (inside a transaction, the only place the state exists) an entity with a
+// delete staged in the caller's own transaction. The existing-entity leg
+// re-reads afterwards, so a backend that errors AFTER writing fails here.
+func testEntityCompareAndSaveEmptyExpectedIDRejected(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+
+	seedExisting := func() string {
+		id := newID()
+		withTx(t, h, ctx, func(txCtx spiCtx) {
+			es, _ := h.Factory.EntityStore(txCtx)
+			_, err := es.Save(txCtx, newEntity(t, "m-cas-empty", id, map[string]any{"v": 1}))
+			require.NoError(t, err)
+		})
+		return id
+	}
+
+	assertRejected := func(opCtx spiCtx, es spi.EntityStore, existingID, label string) {
+		// Missing entity: rejected, and nothing created.
+		missingID := newID()
+		_, err := es.CompareAndSave(opCtx, newEntity(t, "m-cas-empty", missingID, map[string]any{"v": 2}), "")
+		require.Error(t, err,
+			"%s: empty expectedTxID against a missing entity must error, not create", label)
+		_, err = es.Get(opCtx, missingID)
+		require.ErrorIs(t, err, spi.ErrNotFound,
+			"%s: a rejected CompareAndSave must not have created the entity", label)
+
+		// Existing entity: rejected, and the entity is untouched.
+		_, err = es.CompareAndSave(opCtx, newEntity(t, "m-cas-empty", existingID, map[string]any{"v": 3}), "")
+		require.Error(t, err,
+			"%s: empty expectedTxID against an existing entity must error", label)
+		got, err := es.Get(opCtx, existingID)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"v":1}`, string(got.Data),
+			"%s: a rejected CompareAndSave must not have written", label)
+	}
+
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	assertRejected(ctx, es, seedExisting(), "outside tx")
+
+	insideExistingID := seedExisting()
+	stagedDeleteID := seedExisting()
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
+	esTx, err := h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+	assertRejected(txCtx, esTx, insideExistingID, "inside tx")
+
+	// Third state: a delete staged in this transaction. The entity's
+	// current transaction ID is empty in the transaction's own view, which
+	// is precisely the reading the old "expect no entity" rule would have
+	// matched — it must be rejected here too, and must not resurrect the
+	// entity.
+	require.NoError(t, esTx.Delete(txCtx, stagedDeleteID))
+	_, err = esTx.CompareAndSave(txCtx, newEntity(t, "m-cas-empty", stagedDeleteID, map[string]any{"v": 4}), "")
+	require.Error(t, err,
+		"inside tx: empty expectedTxID against a same-tx staged delete must error, not resurrect")
+	_, err = esTx.Get(txCtx, stagedDeleteID)
+	require.ErrorIs(t, err, spi.ErrNotFound,
+		"inside tx: a rejected CompareAndSave must leave the staged delete standing")
+
+	require.NoError(t, tm.Rollback(txCtx, txID))
 }
 
 func testEntityConcurrentConflict(t *testing.T, h Harness) {

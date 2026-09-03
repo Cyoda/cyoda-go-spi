@@ -69,12 +69,13 @@ type EntityStore interface {
 	// entity's current transaction ID as the caller's own transaction sees
 	// it: a same-transaction Delete or Save IS the current state, not the
 	// pre-transaction one, so comparing against a stale ID — including the
-	// transaction's own prior write — conflicts. The comparison is
-	// literal, with no synonyms: a missing or deleted entity has the empty
-	// transaction ID, so expectedTxID == "" means "expect no entity" and
-	// creates one; a non-empty expectedTxID against a missing entity
-	// conflicts rather than creating.
-	// Returns ErrConflict if the transaction ID has changed.
+	// transaction's own prior write — conflicts and returns ErrConflict.
+	// The comparison is literal, with no synonyms: a missing or deleted
+	// entity has the empty transaction ID, so expectedTxID == "" means
+	// "expect no entity" — it creates against a missing entity, but
+	// conflicts against one that already exists; conversely a non-empty
+	// expectedTxID against a missing entity conflicts rather than
+	// creating.
 	CompareAndSave(ctx context.Context, entity *Entity, expectedTxID string) (int64, error)
 	// SaveAll saves multiple entities, returning versions in iteration order.
 	// Backends may execute saves concurrently. On error, returns the first

@@ -697,7 +697,6 @@ func testTxDeleteThenCompareAndSave(t *testing.T, h Harness) {
 	require.NoError(t, esTx.Delete(txCtx, id))
 
 	update := newEntity(t, mref.EntityName, id, map[string]any{"n": 2})
-	update.Meta = committed.Meta
 	_, err = esTx.CompareAndSave(txCtx, update, committed.Meta.TransactionID)
 	require.ErrorIs(t, err, spi.ErrConflict, "CompareAndSave after a same-tx Delete must conflict")
 
@@ -733,6 +732,7 @@ func testTxDeleteThenSave(t *testing.T, h Harness) {
 	require.JSONEq(t, `{"n":2}`, string(got.Data))
 	versions, err := es.GetVersionMetadata(ctx, id, spi.VersionMetadataOptions{})
 	require.NoError(t, err)
+	require.NotEmpty(t, versions, "the entity must have version history after Delete-then-Save")
 	for _, v := range versions {
 		require.NotEqual(t, "DELETED", v.ChangeType, "no DELETED version may be written for an unstaged delete")
 	}
@@ -763,7 +763,6 @@ func testTxSaveThenCompareAndSave(t *testing.T, h Harness) {
 	require.NoError(t, err)
 
 	update := newEntity(t, mref.EntityName, id, map[string]any{"n": 3})
-	update.Meta = committed.Meta
 	_, err = esTx.CompareAndSave(txCtx, update, committed.Meta.TransactionID)
 	require.ErrorIs(t, err, spi.ErrConflict, "CompareAndSave against the pre-tx transaction ID must conflict after a same-tx Save")
 

@@ -39,7 +39,7 @@ func newEntity(t *testing.T, modelName, id string, payload map[string]any) *spi.
 // On any error (from fn or Commit), rolls back and fails the test.
 //
 // Use withTx ONLY for tests that need a committed baseline before the
-// real assertion (e.g., "save N entities, then GetAll returns N").
+// real assertion (e.g., "save N entities, then GetPage returns N").
 // Tests that must inspect IN-FLIGHT transaction state (CommitVisibility,
 // RollbackDiscards, Join, Savepoint variants) cannot use withTx — they
 // need explicit control over the Begin/Commit lifecycle.

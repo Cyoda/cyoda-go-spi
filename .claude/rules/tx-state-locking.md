@@ -31,7 +31,7 @@ require locks once `Begin` has returned.
 
 | Operation class | Lock posture | Examples |
 |---|---|---|
-| In-flight tx-path operation (read or write on tx state) | `tx.OpMu.RLock` | Save, CompareAndSave, Get, GetAll, GetAsAt, Delete, DeleteAll, Exists, Count, Savepoint |
+| In-flight tx-path operation (read or write on tx state) | `tx.OpMu.RLock` | Save, CompareAndSave, Get, GetPage, Search, Iterate, GetAsAt, Delete, DeleteAll, Exists, Count, Savepoint |
 | Closure operation (waits for in-flight to drain) | `tx.OpMu.Lock` | Commit, Rollback, RollbackToSavepoint |
 | Tx-state-free, manager-state-only | manager mutex only | ReleaseSavepoint |
 

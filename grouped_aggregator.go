@@ -10,7 +10,7 @@ import (
 //
 // May decline a specific request shape via ErrAggregationNotPushdownable;
 // the caller (typically the service layer) should then fall through to
-// the streaming-tally path via Iterable.
+// the streaming-tally path via EntityStore.Iterate.
 type GroupedAggregator interface {
 	GroupedAggregate(
 		ctx context.Context,

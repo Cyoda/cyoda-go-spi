@@ -130,7 +130,7 @@ func TestMergeBounded_ExactlyAtLimitSucceeds(t *testing.T) {
 }
 
 // TestMergeBounded_ZeroLimitRejected verifies limit <= 0 is a contract
-// violation (matching Searcher.Search's bounded-or-fail contract): there is
+// violation (matching EntityStore.Search's bounded-or-fail contract): there is
 // no "unbounded" mode, and the caller must not get a fully materialized
 // slice for a non-positive limit.
 func TestMergeBounded_ZeroLimitRejected(t *testing.T) {

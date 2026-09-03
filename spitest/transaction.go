@@ -46,6 +46,7 @@ func runTransactionSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "TxStateErrors/CommitAfterCommit", testTxStateCommitAfterCommit)
 	runSubtest(t, h, tracker, "TxStateErrors/CommitAfterRollback", testTxStateCommitAfterRollback)
 	runSubtest(t, h, tracker, "TxStateErrors/OpAfterRollback", testTxStateOpAfterRollback)
+	runSubtest(t, h, tracker, "TxStateErrors/OpAfterCommit", testTxStateOpAfterCommit)
 	runSubtest(t, h, tracker, "TxStateErrors/TenantMismatchOnJoin", testTxStateTenantMismatchOnJoin)
 	runSubtest(t, h, tracker, "TxStateErrors/TenantMismatchOnCommit", testTxStateTenantMismatchOnCommit)
 	runSubtest(t, h, tracker, "TxStateErrors/TenantMismatchOnGetSubmitTime", testTxStateTenantMismatchOnGetSubmitTime)
@@ -54,6 +55,9 @@ func runTransactionSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Attribution/OriginCaptureAndJoin", testTxOriginCaptureAndJoin)
 	runSubtest(t, h, tracker, "Attribution/OriginAmbientRoot", testTxOriginAmbientRoot)
 	runSubtest(t, h, tracker, "Attribution/DeleteAttributionSavepoint", testTxDeleteAttributionSavepoint)
+	runSubtest(t, h, tracker, "DeleteThenCompareAndSave", testTxDeleteThenCompareAndSave)
+	runSubtest(t, h, tracker, "DeleteThenSave", testTxDeleteThenSave)
+	runSubtest(t, h, tracker, "SaveThenCompareAndSave", testTxSaveThenCompareAndSave)
 }
 
 // Writes in an open tx are invisible to outside readers; after Commit
@@ -321,6 +325,86 @@ func testTxStateOpAfterRollback(t *testing.T, h Harness) {
 	require.Error(t, err, "Get after Rollback must fail")
 	require.True(t, errors.Is(err, spi.ErrTxTerminated),
 		"op after Rollback must wrap ErrTxTerminated; got: %v", err)
+}
+
+// requireTxAlreadyCommittedOrPurged asserts err wraps ErrTxAlreadyCommitted
+// or ErrTxNotFound, mirroring TxStateErrors/JoinAfterCommit's accept-either:
+// a backend that purges committed-transaction state from its manager
+// surfaces a registry miss (ErrTxNotFound) from store operations rather
+// than the specific ErrTxAlreadyCommitted.
+func requireTxAlreadyCommittedOrPurged(t *testing.T, err error, op string) {
+	t.Helper()
+	require.True(t,
+		errors.Is(err, spi.ErrTxAlreadyCommitted) || errors.Is(err, spi.ErrTxNotFound),
+		"%s after Commit must wrap ErrTxAlreadyCommitted or ErrTxNotFound (backends that purge committed-tx state collapse these); got: %v", op, err)
+}
+
+// testTxStateOpAfterCommit verifies that every data op against a committed
+// transaction's own context still fails — Save, CompareAndSave, Delete,
+// DeleteAll, and every read (GetPage, Iterate, Count, CountByState) — with
+// ErrTxAlreadyCommitted, or ErrTxNotFound on backends that purge
+// committed-tx state (see requireTxAlreadyCommittedOrPurged).
+// Unlike OpAfterRollback (which only pins the umbrella ErrTxTerminated),
+// this pins the specific already-committed/purged pair.
+func testTxStateOpAfterCommit(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	mref := spi.ModelRef{EntityName: "m-op-after-commit", ModelVersion: "1"}
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+
+	txID, txCtx := beginGuarded(t, tm, ctx)
+	es, err := h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+
+	id := newID()
+	_, err = es.Save(txCtx, newEntity(t, mref.EntityName, id, map[string]any{"k": "v"}))
+	require.NoError(t, err)
+	require.NoError(t, tm.Commit(txCtx, txID))
+
+	// A correct, current expectedTxID is used for CompareAndSave so the
+	// assertion pins the tx-state check, not an incidental ErrConflict from
+	// a wrong expectedTxID — nor the contract-violation error an empty
+	// expectedTxID now earns.
+	esOutside, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	committed, err := esOutside.Get(ctx, id)
+	require.NoError(t, err)
+	require.NotEmpty(t, committed.Meta.TransactionID,
+		"a transactional write must stamp EntityMeta.TransactionID; CompareAndSave has nothing valid to expect otherwise")
+
+	_, err = es.Save(txCtx, newEntity(t, mref.EntityName, newID(), map[string]any{"k": "v"}))
+	requireTxAlreadyCommittedOrPurged(t, err, "Save")
+
+	_, err = es.CompareAndSave(txCtx, newEntity(t, mref.EntityName, id, map[string]any{"k": "v2"}), committed.Meta.TransactionID)
+	requireTxAlreadyCommittedOrPurged(t, err, "CompareAndSave")
+
+	err = es.Delete(txCtx, id)
+	requireTxAlreadyCommittedOrPurged(t, err, "Delete")
+
+	err = es.DeleteAll(txCtx, mref)
+	requireTxAlreadyCommittedOrPurged(t, err, "DeleteAll")
+
+	_, err = es.GetPage(txCtx, mref, 10, 0, nil)
+	requireTxAlreadyCommittedOrPurged(t, err, "GetPage")
+
+	// Iterate may surface the error from Iterate() itself or from the
+	// returned iterator's Next()/Err(); accept either, but require one of
+	// them to carry it.
+	it, iterErr := es.Iterate(txCtx, mref, spi.Filter{}, spi.IterateOptions{})
+	if iterErr == nil {
+		require.NotNil(t, it, "Iterate returned a nil Iterator with a nil error")
+		for it.Next() {
+		}
+		iterErr = it.Err()
+		_ = it.Close()
+	}
+	requireTxAlreadyCommittedOrPurged(t, iterErr, "Iterate")
+
+	_, err = es.Count(txCtx, mref)
+	requireTxAlreadyCommittedOrPurged(t, err, "Count")
+
+	_, err = es.CountByState(txCtx, mref, nil)
+	requireTxAlreadyCommittedOrPurged(t, err, "CountByState")
 }
 
 // testTxStateTenantMismatchOnJoin verifies that tenant B cannot Join a
@@ -604,4 +688,111 @@ func testTxDeleteAttributionSavepoint(t *testing.T, h Harness) {
 	for _, m := range metaC {
 		require.False(t, m.Deleted, "C must have no deleted version/tombstone in its history — the discarded staged delete must not resurface at commit")
 	}
+}
+
+// A write compares against the transaction's own view: a same-transaction
+// delete is the current latest state, so CompareAndSave against it must
+// conflict on every backend, and the delete must stand at commit.
+func testTxDeleteThenCompareAndSave(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	mref := spi.ModelRef{EntityName: "m-tx-dcas", ModelVersion: "1"}
+	id := newID()
+	withTx(t, h, ctx, func(txCtx spiCtx) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		_, err := es.Save(txCtx, newEntity(t, mref.EntityName, id, map[string]any{"n": 1}))
+		require.NoError(t, err)
+	})
+	es, _ := h.Factory.EntityStore(ctx)
+	committed, err := es.Get(ctx, id)
+	require.NoError(t, err)
+	require.NotEmpty(t, committed.Meta.TransactionID,
+		"a transactional write must stamp EntityMeta.TransactionID; an empty expectedTxID is a contract violation, not a comparable value")
+
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
+	esTx, _ := h.Factory.EntityStore(txCtx)
+	require.NoError(t, esTx.Delete(txCtx, id))
+
+	update := newEntity(t, mref.EntityName, id, map[string]any{"n": 2})
+	_, err = esTx.CompareAndSave(txCtx, update, committed.Meta.TransactionID)
+	require.ErrorIs(t, err, spi.ErrConflict, "CompareAndSave after a same-tx Delete must conflict")
+
+	require.NoError(t, tm.Commit(txCtx, txID))
+	_, err = es.Get(ctx, id)
+	require.ErrorIs(t, err, spi.ErrNotFound, "the delete must stand after commit")
+}
+
+// Save after a same-transaction Delete is last-write-wins on the COMMITTED
+// OUTCOME: present after commit with the new payload. Version history is
+// deliberately not pinned here — memory and sqlite buffer the delete and
+// write one version row at commit, while postgres applies the delete
+// in-transaction at once, so its history shows a DELETED row followed by
+// the re-create's row. Both are correct; see cyoda-go's docs/CONSISTENCY.md
+// §6 ("Accepted as a detail, not a contract").
+//
+// This case pins the committed OUTCOME only. The buffer invariant that a
+// transaction's Deletes and DeleteAttribution maps always cover the same key
+// set is a plugin-internal property, pinned by each plugin's own unit tests
+// rather than at this seam — do not read a green cross-backend run here as
+// coverage of it.
+func testTxDeleteThenSave(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	mref := spi.ModelRef{EntityName: "m-tx-dsave", ModelVersion: "1"}
+	id := newID()
+	withTx(t, h, ctx, func(txCtx spiCtx) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		_, err := es.Save(txCtx, newEntity(t, mref.EntityName, id, map[string]any{"n": 1}))
+		require.NoError(t, err)
+	})
+
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
+	esTx, _ := h.Factory.EntityStore(txCtx)
+	require.NoError(t, esTx.Delete(txCtx, id))
+	_, err = esTx.Save(txCtx, newEntity(t, mref.EntityName, id, map[string]any{"n": 2}))
+	require.NoError(t, err)
+	require.NoError(t, tm.Commit(txCtx, txID))
+
+	es, _ := h.Factory.EntityStore(ctx)
+	got, err := es.Get(ctx, id)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"n":2}`, string(got.Data))
+}
+
+// A write compares against the transaction's own view: a same-transaction
+// Save is the current latest state, so CompareAndSave against the
+// pre-transaction (stale) transaction ID must conflict on every backend,
+// and the Save must stand at commit.
+func testTxSaveThenCompareAndSave(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	mref := spi.ModelRef{EntityName: "m-tx-scas", ModelVersion: "1"}
+	id := newID()
+	withTx(t, h, ctx, func(txCtx spiCtx) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		_, err := es.Save(txCtx, newEntity(t, mref.EntityName, id, map[string]any{"n": 1}))
+		require.NoError(t, err)
+	})
+	es, _ := h.Factory.EntityStore(ctx)
+	committed, err := es.Get(ctx, id)
+	require.NoError(t, err)
+	require.NotEmpty(t, committed.Meta.TransactionID,
+		"a transactional write must stamp EntityMeta.TransactionID; an empty expectedTxID is a contract violation, not a comparable value")
+
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
+	esTx, _ := h.Factory.EntityStore(txCtx)
+	_, err = esTx.Save(txCtx, newEntity(t, mref.EntityName, id, map[string]any{"n": 2}))
+	require.NoError(t, err)
+
+	update := newEntity(t, mref.EntityName, id, map[string]any{"n": 3})
+	_, err = esTx.CompareAndSave(txCtx, update, committed.Meta.TransactionID)
+	require.ErrorIs(t, err, spi.ErrConflict, "CompareAndSave against the pre-tx transaction ID must conflict after a same-tx Save")
+
+	require.NoError(t, tm.Commit(txCtx, txID))
+	got, err := es.Get(ctx, id)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"n":2}`, string(got.Data), "the Save must stand at commit, not the failed CompareAndSave")
 }

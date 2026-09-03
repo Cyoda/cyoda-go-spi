@@ -61,21 +61,8 @@ func countSearcherMatches(order []bool) int {
 	return n
 }
 
-// runSearcherSuite exercises the optional spi.Searcher contract.
-//
-// Backends whose EntityStore does not implement Searcher skip the whole group:
-// the interface is optional by design, so its absence is conformant, not a
-// failure. This is a type assertion rather than a Harness.Skip entry because
-// StoreFactoryConformance fails the run on any Skip key that never matches, so
-// a Skip entry for an absent interface would turn a conformant backend red.
+// runSearcherSuite exercises the EntityStore.Search contract.
 func runSearcherSuite(t *testing.T, h Harness, tracker *skipTracker) {
-	ctx := tenantContext(h.NewTenant())
-	store, err := h.Factory.EntityStore(ctx)
-	require.NoError(t, err)
-	if _, ok := store.(spi.Searcher); !ok {
-		t.Skip("EntityStore does not implement spi.Searcher (optional interface)")
-	}
-
 	// Two registered subtests, each seeding once and then asserting every
 	// case of the contract against that one seed. The nested case names
 	// (OverLimitFails, ...) are plain t.Run and are not Harness.Skip keys —
@@ -90,7 +77,7 @@ func runSearcherSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Pattern/MalformedLike", testPatternMalformedLike)
 }
 
-// testSearcherPITCommittedOnlyInTx pins the Searcher doc's committed-only
+// testSearcherPITCommittedOnlyInTx pins EntityStore.Search's committed-only
 // clause — "In-transaction point-in-time reads are committed-only — they never
 // see the transaction's own uncommitted writes for the PIT dimension" — which
 // nothing in the suite previously exercised.
@@ -103,7 +90,7 @@ func testSearcherPITCommittedOnlyInTx(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	f := newPITCommittedOnlyFixture(t, h, ctx, "searcher-pit-intx")
 
-	got, err := f.Store.(spi.Searcher).Search(f.Ctx, spi.Filter{}, spi.SearchOptions{
+	got, err := f.Store.Search(f.Ctx, spi.Filter{}, spi.SearchOptions{
 		ModelName:    f.ModelRef.EntityName,
 		ModelVersion: f.ModelRef.ModelVersion,
 		Limit:        100,
@@ -121,12 +108,12 @@ func testSearcherBoundedOrFailInTx(t *testing.T, h Harness) {
 	searcherBoundedOrFail(t, h, true)
 }
 
-// searcherBoundedOrFail seeds searcherSeedOrder and holds the backend to the
-// Searcher doc's contract: Limit is a cap on the matched set, so exceeding it
-// fails with ErrSearchResultLimitExceeded rather than returning a truncated
-// prefix, exactly-at-limit succeeds, and Limit <= 0 is a contract violation
-// the implementation must reject with an error rather than treating as
-// unbounded or substituting a default of its own.
+// searcherBoundedOrFail seeds searcherSeedOrder and holds the backend to
+// EntityStore.Search's contract: Limit is a cap on the matched set, so
+// exceeding it fails with ErrSearchResultLimitExceeded rather than returning
+// a truncated prefix, exactly-at-limit succeeds, and Limit <= 0 is a
+// contract violation the implementation must reject with an error rather
+// than treating as unbounded or substituting a default of its own.
 //
 // When inTx is set the assertions run inside a live transaction with the tail
 // of the match set staged but uncommitted, so each backend's
@@ -170,7 +157,7 @@ func searcherBoundedOrFail(t *testing.T, h Harness, inTx bool) {
 		if !inTx {
 			es, err := h.Factory.EntityStore(ctx)
 			require.NoError(t, err)
-			return es.(spi.Searcher).Search(ctx, filter, opts(limit))
+			return es.Search(ctx, filter, opts(limit))
 		}
 		tm, err := h.Factory.TransactionManager(ctx)
 		require.NoError(t, err)
@@ -180,7 +167,7 @@ func searcherBoundedOrFail(t *testing.T, h Harness, inTx bool) {
 		es, err := h.Factory.EntityStore(txCtx)
 		require.NoError(t, err)
 		seedSearcherEntities(t, txCtx, es, staged)
-		return es.(spi.Searcher).Search(txCtx, filter, opts(limit))
+		return es.Search(txCtx, filter, opts(limit))
 	}
 
 	t.Run("OverLimitFails", func(t *testing.T) {
@@ -215,11 +202,11 @@ func searcherBoundedOrFail(t *testing.T, h Harness, inTx bool) {
 // ---------------------------------------------------------------------------
 // Filter.Path grammar
 //
-// Shared by every filter-taking entry point on the SPI (Searcher.Search here,
-// Iterable.Iterate in iterable.go — the same reuse-across-suites arrangement
-// iterableModelRef already uses for the seed helpers). The vocabulary lives
-// here, next to Search, because Search is where a Filter first reaches a
-// backend.
+// Shared by every filter-taking entry point on the SPI (EntityStore.Search
+// here, EntityStore.Iterate in iterable.go — the same reuse-across-suites
+// arrangement iterableModelRef already uses for the seed helpers). The
+// vocabulary lives here, next to Search, because Search is where a Filter
+// first reaches a backend.
 //
 // The tables below are the executable form of Filter.Path's documented
 // grammar:
@@ -463,12 +450,11 @@ func testSearcherFilterPathGrammar(t *testing.T, h Harness) {
 
 	es, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
-	searcher := es.(spi.Searcher)
 
 	runFilterPathGrammar(t, "Search", func(t *testing.T, filter spi.Filter) error {
 		// Limit is comfortably above the seeded match count, so
 		// bounded-or-fail can never be what produces the error.
-		_, err := searcher.Search(ctx, filter, spi.SearchOptions{
+		_, err := es.Search(ctx, filter, spi.SearchOptions{
 			ModelName:    searcherModel,
 			ModelVersion: "1",
 			Limit:        1000,

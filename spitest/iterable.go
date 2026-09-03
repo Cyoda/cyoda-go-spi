@@ -18,22 +18,8 @@ import (
 // so reusing the model name across suites is collision-free.
 var iterableModelRef = spi.ModelRef{EntityName: searcherModel, ModelVersion: "1"}
 
-// runIterableSuite exercises the optional spi.Iterable contract.
-//
-// Backends whose EntityStore does not implement Iterable skip the whole
-// group: the interface is optional by design (same reasoning as
-// runSearcherSuite), so its absence is conformant, not a failure. This is a
-// type assertion rather than a Harness.Skip entry because StoreFactoryConformance
-// fails the run on any Skip key that never matches, so a Skip entry for an
-// absent interface would turn a conformant backend red.
+// runIterableSuite exercises the EntityStore.Iterate contract.
 func runIterableSuite(t *testing.T, h Harness, tracker *skipTracker) {
-	ctx := tenantContext(h.NewTenant())
-	store, err := h.Factory.EntityStore(ctx)
-	require.NoError(t, err)
-	if _, ok := store.(spi.Iterable); !ok {
-		t.Skip("EntityStore does not implement spi.Iterable (optional interface)")
-	}
-
 	runSubtest(t, h, tracker, "Unordered/YieldsAllMatches", testIterableUnorderedYieldsAllMatches)
 	runSubtest(t, h, tracker, "Ordered/EntityID", testIterableOrderedEntityID)
 	runSubtest(t, h, tracker, "Ordered/UserFieldWithTieBreak", testIterableOrderedUserFieldWithTieBreak)
@@ -70,13 +56,13 @@ func testIterableFilterPathGrammar(t *testing.T, h Harness) {
 
 	store, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
-	iterable := store.(spi.Iterable)
 
 	runFilterPathGrammar(t, "Iterate", func(t *testing.T, filter spi.Filter) error {
-		it, err := iterable.Iterate(ctx, iterableModelRef, filter, spi.IterateOptions{})
+		it, err := store.Iterate(ctx, iterableModelRef, filter, spi.IterateOptions{})
 		if err != nil {
 			return err
 		}
+		require.NotNil(t, it, "Iterate returned a nil Iterator with a nil error")
 		n := 0
 		for it.Next() {
 			n++
@@ -95,6 +81,9 @@ func testIterableFilterPathGrammar(t *testing.T, h Harness) {
 // result set, not the fine-grained Next()/Err()/Close() sequencing.
 func drainIterator(t *testing.T, it spi.Iterator) ([]*spi.Entity, error) {
 	t.Helper()
+	// A backend that returns (nil, nil) from Iterate would panic on the first
+	// Next() below; fail it as the contract violation it is instead.
+	require.NotNil(t, it, "Iterate returned a nil Iterator with a nil error")
 	var out []*spi.Entity
 	for it.Next() {
 		out = append(out, it.Entity())
@@ -129,14 +118,14 @@ func seedIterable(t *testing.T, h Harness, ctx spiCtx) {
 
 // testIterableUnorderedYieldsAllMatches: a zero-value Filter with an empty
 // OrderBy yields every entity for the model, in any order — the "yield all"
-// half of the Iterable doc's zero-value-Filter clause.
+// half of EntityStore.Iterate's zero-value-Filter clause.
 func testIterableUnorderedYieldsAllMatches(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	seedIterable(t, h, ctx)
 
 	store, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
-	it, err := store.(spi.Iterable).Iterate(ctx, iterableModelRef, spi.Filter{}, spi.IterateOptions{})
+	it, err := store.Iterate(ctx, iterableModelRef, spi.Filter{}, spi.IterateOptions{})
 	require.NoError(t, err)
 	got, err := drainIterator(t, it)
 	require.NoError(t, err)
@@ -153,7 +142,7 @@ func testIterableOrderedEntityID(t *testing.T, h Harness) {
 	store, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
 	opts := spi.IterateOptions{OrderBy: []spi.OrderSpec{{Source: spi.SourceMeta, Path: "id"}}}
-	it, err := store.(spi.Iterable).Iterate(ctx, iterableModelRef, spi.Filter{}, opts)
+	it, err := store.Iterate(ctx, iterableModelRef, spi.Filter{}, opts)
 	require.NoError(t, err)
 	got, err := drainIterator(t, it)
 	require.NoError(t, err)
@@ -176,7 +165,7 @@ func testIterableOrderedUserFieldWithTieBreak(t *testing.T, h Harness) {
 	store, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
 	opts := spi.IterateOptions{OrderBy: []spi.OrderSpec{{Source: spi.SourceData, Path: "status", Kind: spi.OrderText}}}
-	it, err := store.(spi.Iterable).Iterate(ctx, iterableModelRef, spi.Filter{}, opts)
+	it, err := store.Iterate(ctx, iterableModelRef, spi.Filter{}, opts)
 	require.NoError(t, err)
 	got, err := drainIterator(t, it)
 	require.NoError(t, err)
@@ -194,7 +183,7 @@ func testIterableOrderedUserFieldWithTieBreak(t *testing.T, h Harness) {
 
 // testIterableOrderedInTxErrors: a non-empty OrderBy with an ambient
 // transaction is unsupported and Iterate MUST return an error rather than
-// silently ignoring the order (see the Iterable doc comment).
+// silently ignoring the order (see EntityStore.Iterate's doc comment).
 func testIterableOrderedInTxErrors(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	tm, err := h.Factory.TransactionManager(ctx)
@@ -205,7 +194,7 @@ func testIterableOrderedInTxErrors(t *testing.T, h Harness) {
 	es, err := h.Factory.EntityStore(txCtx)
 	require.NoError(t, err)
 	opts := spi.IterateOptions{OrderBy: []spi.OrderSpec{{Source: spi.SourceMeta, Path: "id"}}}
-	_, err = es.(spi.Iterable).Iterate(txCtx, iterableModelRef, spi.Filter{}, opts)
+	_, err = es.Iterate(txCtx, iterableModelRef, spi.Filter{}, opts)
 	require.Error(t, err, "a non-empty OrderBy with an ambient transaction must error")
 }
 
@@ -226,7 +215,7 @@ func testIterableResidualAppliedInNext(t *testing.T, h Harness) {
 		Value:    searcherDecoyValue,
 		Declared: []spi.DataType{spi.String},
 	}
-	it, err := store.(spi.Iterable).Iterate(ctx, iterableModelRef, filter, spi.IterateOptions{})
+	it, err := store.Iterate(ctx, iterableModelRef, filter, spi.IterateOptions{})
 	require.NoError(t, err)
 	got, err := drainIterator(t, it)
 	require.NoError(t, err)
@@ -246,8 +235,9 @@ func testIterableCtxCancelObserved(t *testing.T, h Harness) {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	store, err := h.Factory.EntityStore(cancelCtx)
 	require.NoError(t, err)
-	it, err := store.(spi.Iterable).Iterate(cancelCtx, iterableModelRef, spi.Filter{}, spi.IterateOptions{})
+	it, err := store.Iterate(cancelCtx, iterableModelRef, spi.Filter{}, spi.IterateOptions{})
 	require.NoError(t, err)
+	require.NotNil(t, it, "Iterate returned a nil Iterator with a nil error")
 	defer func() { _ = it.Close() }()
 
 	require.True(t, it.Next(), "at least one entity must be available before cancellation")
@@ -272,8 +262,9 @@ func testIterableErrSticky(t *testing.T, h Harness) {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	store, err := h.Factory.EntityStore(cancelCtx)
 	require.NoError(t, err)
-	it, err := store.(spi.Iterable).Iterate(cancelCtx, iterableModelRef, spi.Filter{}, spi.IterateOptions{})
+	it, err := store.Iterate(cancelCtx, iterableModelRef, spi.Filter{}, spi.IterateOptions{})
 	require.NoError(t, err)
+	require.NotNil(t, it, "Iterate returned a nil Iterator with a nil error")
 	defer func() { _ = it.Close() }()
 
 	require.True(t, it.Next())
@@ -299,8 +290,9 @@ func testIterableCloseIdempotent(t *testing.T, h Harness) {
 
 	store, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
-	it, err := store.(spi.Iterable).Iterate(ctx, iterableModelRef, spi.Filter{}, spi.IterateOptions{})
+	it, err := store.Iterate(ctx, iterableModelRef, spi.Filter{}, spi.IterateOptions{})
 	require.NoError(t, err)
+	require.NotNil(t, it, "Iterate returned a nil Iterator with a nil error")
 
 	require.True(t, it.Next(), "at least one entity must be available mid-iteration")
 
@@ -310,7 +302,7 @@ func testIterableCloseIdempotent(t *testing.T, h Harness) {
 }
 
 // testIterablePITSnapshotVariant: PointInTime set to a cutoff between two
-// saves must yield the pre-cutoff state, exactly like Searcher/GetAsAt.
+// saves must yield the pre-cutoff state, exactly like Search/GetAsAt.
 func testIterablePITSnapshotVariant(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	mref := spi.ModelRef{EntityName: "iterable-pit", ModelVersion: "1"}
@@ -335,7 +327,7 @@ func testIterablePITSnapshotVariant(t *testing.T, h Harness) {
 
 	store, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
-	it, err := store.(spi.Iterable).Iterate(ctx, mref, spi.Filter{}, spi.IterateOptions{PointInTime: &asAt})
+	it, err := store.Iterate(ctx, mref, spi.Filter{}, spi.IterateOptions{PointInTime: &asAt})
 	require.NoError(t, err)
 	got, err := drainIterator(t, it)
 	require.NoError(t, err)
@@ -354,13 +346,13 @@ func testIterablePITSnapshotVariant(t *testing.T, h Harness) {
 // newPITCommittedOnlyFixture on why AsAt is in the future).
 //
 // OrderBy is left empty — ordered iteration inside a transaction is
-// unsupported per the spi.Iterable contract (see Ordered/InTxErrors), and this
-// subtest is about visibility, not order.
+// unsupported per EntityStore.Iterate's contract (see Ordered/InTxErrors),
+// and this subtest is about visibility, not order.
 func testIterablePITCommittedOnlyInTx(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	f := newPITCommittedOnlyFixture(t, h, ctx, "iterable-pit-intx")
 
-	it, err := f.Store.(spi.Iterable).Iterate(f.Ctx, f.ModelRef, spi.Filter{}, spi.IterateOptions{PointInTime: &f.AsAt})
+	it, err := f.Store.Iterate(f.Ctx, f.ModelRef, spi.Filter{}, spi.IterateOptions{PointInTime: &f.AsAt})
 	require.NoError(t, err)
 	got, err := drainIterator(t, it)
 	require.NoError(t, err)
@@ -392,7 +384,7 @@ func testIterableOverlaySnapshotAtOpen(t *testing.T, h Harness) {
 	_, err = es.Save(txCtx, newEntity(t, mref.EntityName, bufferedID, map[string]any{}))
 	require.NoError(t, err)
 
-	it, err := es.(spi.Iterable).Iterate(txCtx, mref, spi.Filter{}, spi.IterateOptions{})
+	it, err := es.Iterate(txCtx, mref, spi.Filter{}, spi.IterateOptions{})
 	require.NoError(t, err)
 	got, err := drainIterator(t, it)
 	require.NoError(t, err)
@@ -413,7 +405,7 @@ func testIterableOverlaySnapshotAtOpen(t *testing.T, h Harness) {
 // black-box (never via internal state) by having a second transaction commit
 // a conflicting write to the yielded entity, then checking whether the
 // first transaction's own commit is aborted by first-committer-wins — the
-// same technique the plugin-level Searcher/TrackingRead tests use.
+// same technique the plugin-level Search/TrackingRead tests use.
 func testIterableTrackingReadGating(t *testing.T, h Harness) {
 	t.Run("Enabled", func(t *testing.T) {
 		iterableTrackingReadCommitOutcome(t, h, true, false)
@@ -442,7 +434,7 @@ func iterableTrackingReadCommitOutcome(t *testing.T, h Harness, trackingRead, wa
 
 	esA, err := h.Factory.EntityStore(txCtx)
 	require.NoError(t, err)
-	it, err := esA.(spi.Iterable).Iterate(txCtx, mref, spi.Filter{}, spi.IterateOptions{TrackingRead: trackingRead})
+	it, err := esA.Iterate(txCtx, mref, spi.Filter{}, spi.IterateOptions{TrackingRead: trackingRead})
 	require.NoError(t, err)
 	got, err := drainIterator(t, it)
 	require.NoError(t, err)

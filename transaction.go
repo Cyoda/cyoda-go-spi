@@ -29,8 +29,11 @@ type TransactionManager interface {
 	Rollback(ctx context.Context, txID string) error
 
 	// Join returns a context carrying the TransactionState for an existing
-	// active transaction, allowing multiple goroutines to participate in
-	// the same tx.
+	// active transaction. Multiple goroutines may participate in the same
+	// tx, but only one operation at a time per transaction:
+	// application-side serialisation is required, per the Application
+	// contract below and [TransactionState]'s concurrency contract
+	// (cyoda-go serialises through its per-transaction gate).
 	//
 	// Two distinct contracts apply to a joined tx:
 	//

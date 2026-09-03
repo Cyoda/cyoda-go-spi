@@ -14,6 +14,108 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **`EntityStore` has no whole-model read; `Search` and `Iterate` are
+  required.** `GetAll` and `GetAllAsAt` are removed, and the optional
+  `Searcher` and `Iterable` interfaces are folded into `EntityStore` as
+  `Search` and `Iterate`. Every engine path that reads more than one entity
+  already required one of them and refused a store without it; an optional
+  interface every consumer requires only kept those refusal branches alive.
+  There is no deprecation window: a deprecated `Iterable`/`Searcher` alias
+  would keep `store.(spi.Iterable)` compiling and hide exactly the dead
+  branches the change removes.
+
+  **`CompareAndSave` requires a non-empty `expectedTxID`.** An empty one
+  is now a contract violation the implementation MUST reject with an
+  error — a caller bug, so it carries no sentinel, the treatment `Search`
+  already gives `Limit <= 0`. It used to mean "expect no entity", and that
+  reading was unsound: the compared field, `EntityMeta.TransactionID`, is
+  empty for an absent entity, for a deleted one, AND for an entity written
+  outside any transaction, so the empty string named all three at once and
+  a "create only" call could silently overwrite an entity that exists —
+  a fail-open on the one primitive whose job is to fail closed. The
+  capability this removes is atomic insert-if-absent, which had no caller;
+  unconditional create is `Save`'s job, and `Save` is likewise how a
+  deleted entity is re-created. Should insert-if-absent be wanted later it
+  gets its own explicit spelling rather than an overloaded sentinel.
+
+  The comparison for a non-empty `expectedTxID` is unchanged: a literal
+  string comparison against the entity's current `EntityMeta.TransactionID`
+  as the caller's own transaction sees it, with no synonyms and no
+  existence test. A missing or deleted entity carries the empty ID and so
+  matches no non-empty expected ID — `CompareAndSave` can never create and
+  never resurrect — and once a delete is staged in the caller's own
+  transaction, nothing can compare-and-save against that entity for the
+  rest of the transaction. `GetVersionByTransaction` already treated the
+  empty transaction ID as never matchable; the two now agree rather than
+  reading as opposite conventions for the same sentinel, and each
+  cross-references the other.
+
+  Doc-only contract clarifications ship alongside. `EntityStore.Search`'s
+  godoc states the operational definition of its in-transaction result:
+  identical to a committed-plus-buffer merge for the same transaction
+  state, the merge `MergeBounded` computes. `EntityStore.Iterate` absorbs
+  the full iteration semantics that previously sat as a detached comment in
+  `iterable.go` — including the rules `spitest` enforces (a non-empty
+  `OrderBy` with an ambient transaction MUST error; the engine-executed vs
+  self-executing `OrderBy` split; no retry on transient driver errors),
+  which `go doc` did not publish once the `Iterable` interface they were
+  attached to was gone. `TransactionManager.Join`'s godoc now states that
+  concurrent goroutines participate in the same transaction only through
+  application-side serialisation, one operation at a time per transaction.
+
+  **Two obligations `spitest` already enforces are now documented on the
+  interface.** `GetPage` MUST return a non-nil, empty slice for a page
+  with no rows — an empty model or an offset past the end — so the
+  idiomatic `return nil, nil` is a contract violation. `CountByState` MUST
+  return a non-nil map for every zero-count result, the in-transaction
+  ones (after a `DeleteAll`, say) included. Neither was stated anywhere
+  before; a backend returning nil was red with no rule to point at.
+
+  **Migration:** delete `GetAll`/`GetAllAsAt` from your store (read a model
+  with `GetPage` or `Iterate` with a zero-value filter); move your
+  `Search`/`Iterate` methods onto the store type if they were on a separate
+  one; drop `var _ spi.Searcher`/`spi.Iterable` assertions. `SearchOptions`,
+  `IterateOptions` and `Iterator` are unchanged. In `CompareAndSave`,
+  reject an empty `expectedTxID` up front with an error and delete the
+  create-on-empty path — there is no longer a case in which an empty
+  expected ID reaches the comparison.
+
+  spitest: `GetAll/EmptyModel`, `GetAll/Population`, `GetAllAsAt`,
+  `GetAllAsAt/CommittedOnlyInTx` and `TenantIsolation/GetAll` are gone
+  (`GetPage/*` already pins those contracts); new cases
+  `TenantIsolation/GetPage`, `Transaction/DeleteThenCompareAndSave` (a
+  compare-and-save after a same-transaction delete MUST conflict),
+  `Transaction/DeleteThenSave` (a save after a same-transaction delete
+  wins: the entity is present after commit with the new payload; version
+  history is backend-specific and not pinned),
+  `Transaction/SaveThenCompareAndSave`, `TxStateErrors/OpAfterCommit`
+  (every operation on a committed transaction's context, reads included,
+  fails with `ErrTxAlreadyCommitted`, or `ErrTxNotFound` on backends that
+  purge committed-tx state), `CompareAndSave/ExpectedIDIsLiteral`
+  (a non-empty expected transaction ID is compared literally — it
+  conflicts against a missing entity instead of creating it, and a stale
+  one conflicts against an existing entity without writing),
+  `CompareAndSave/EmptyExpectedIDRejected` (an empty expected transaction
+  ID errors, inside a transaction and outside one, against a missing
+  entity, an existing entity — left unchanged — and an entity with a
+  same-transaction delete staged),
+  `Entity/Count/InTxBufferShapes`, three cross-tenant cases for the
+  multi-entity reads this change makes mandatory —
+  `TenantIsolation/Search`, `TenantIsolation/Count` (both `Count` and
+  `CountByState`) and `GroupedAggregator/TenantIsolation`, each carrying a
+  positive control so an empty cross-tenant answer is evidence of scoping
+  rather than of a seed that never landed — and the gated
+  `GroupedAggregator/InTxRecordsNothing` suite (in-transaction grouped
+  aggregation records nothing into the read-set). A `Skip` map keyed on a
+  removed name fails the run.
+
+  The `Searcher` and `Iterable` spitest GROUP names are deliberately
+  unchanged even though the interfaces they were named for are gone:
+  renaming them would invalidate every consumer's `Harness.Skip` keys for
+  no contract benefit. `GroupedAggregator` is the remaining optional
+  interface, and like every type-asserted group it must NOT be given a
+  `Harness.Skip` entry — an unmatched `Skip` key fails the run.
+
 - **A schema node holds the set of kinds it was observed as.** `ModelNode.Kind()`,
   `.Types()`, `.Element()` and `.Children()` are replaced by `.Scalar()`,
   `.Object()`, `.Array()` — each returning that branch or nil — plus `.Kinds()`,

@@ -65,8 +65,41 @@ type ScheduledTaskStore interface {
 
 type EntityStore interface {
 	Save(ctx context.Context, entity *Entity) (int64, error)
-	// CompareAndSave saves the entity only if the current latest transaction ID matches expectedTxID.
-	// Returns ErrConflict if the transaction ID has changed.
+	// CompareAndSave saves the entity only if expectedTxID equals the
+	// entity's current transaction ID as the caller's own transaction sees
+	// it: a same-transaction Delete or Save IS the current state, not the
+	// pre-transaction one, so comparing against a stale ID — including the
+	// transaction's own prior write — conflicts and returns ErrConflict.
+	//
+	// expectedTxID MUST be non-empty. An empty expectedTxID is a contract
+	// violation and the implementation MUST return an error rather than
+	// comparing it — it is a caller bug, not a domain outcome, so it carries
+	// no sentinel (the same treatment Search gives Limit <= 0). The empty
+	// string is not a usable expectation: a missing entity, a deleted one,
+	// and an entity written outside any transaction all carry an empty
+	// EntityMeta.TransactionID — a non-transactional write may stamp none,
+	// and EntityVersionMeta.TransactionID shows the same empty value on the
+	// audit row — so "" cannot tell the three apart, and an "expect no
+	// entity" reading of it would silently overwrite an entity that exists.
+	//
+	// For a non-empty expectedTxID the rule is a literal string comparison
+	// against the entity's current EntityMeta.TransactionID. There are no
+	// synonyms and no existence test; every other case follows from the
+	// literal rule:
+	//
+	//   - A missing or deleted entity carries the empty transaction ID and
+	//     so matches no non-empty expectedTxID. CompareAndSave therefore
+	//     can never create, and never resurrect a deleted entity; Save is
+	//     the way to create or to re-create.
+	//   - Once a Delete is staged in the caller's own transaction, the
+	//     entity's current ID is empty in that transaction's view, so no
+	//     CompareAndSave can succeed against it for the rest of the
+	//     transaction. Save unstages the delete.
+	//
+	// This agrees with GetVersionByTransaction below: neither treats an
+	// empty transaction ID as a matchable value. There it is a lookup key
+	// that matches nothing and returns ErrNotFound; here it is rejected
+	// outright as a caller error.
 	CompareAndSave(ctx context.Context, entity *Entity, expectedTxID string) (int64, error)
 	// SaveAll saves multiple entities, returning versions in iteration order.
 	// Backends may execute saves concurrently. On error, returns the first
@@ -83,10 +116,6 @@ type EntityStore interface {
 	// a timestamp is not sufficient, because a transaction-stable clock makes
 	// the transaction's own writes fall inside every window it can compute.
 	GetAsAt(ctx context.Context, entityID string, asAt time.Time) (*Entity, error)
-	GetAll(ctx context.Context, modelRef ModelRef) ([]*Entity, error)
-	// GetAllAsAt is GetAsAt's collection form, with the same committed-only
-	// contract.
-	GetAllAsAt(ctx context.Context, modelRef ModelRef, asAt time.Time) ([]*Entity, error)
 	Delete(ctx context.Context, entityID string) error
 	DeleteAll(ctx context.Context, modelRef ModelRef) error
 	Exists(ctx context.Context, entityID string) (bool, error)
@@ -99,6 +128,11 @@ type EntityStore interface {
 	//
 	// Unknown model: returns an empty map with no error, matching Count's
 	// behavior (no model-registry check at this layer).
+	//
+	// The returned map is always non-nil on success. Every zero-count
+	// result — unknown model, empty model, an empty (non-nil) states slice,
+	// or a transaction whose own view holds no entities (after DeleteAll,
+	// say) — is an empty map, never nil.
 	//
 	// Implementations MUST push the state filter down to the storage layer
 	// when feasible. Callers may invoke this from inside a transaction; the
@@ -117,9 +151,14 @@ type EntityStore interface {
 	// substituting a default. Implementations fail fast on any row-level
 	// error rather than returning a partial page.
 	//
+	// A page with no rows — an empty model, or an offset past the end — MUST
+	// be a non-nil, empty slice with a nil error, never a nil slice. Callers
+	// distinguish "no rows" from "no page" without a nil check, so the
+	// idiomatic `return nil, nil` is a contract violation here.
+	//
 	// asAt == nil reads the live, in-transaction overlay: with an ambient
 	// transaction, the committed page is merged with the transaction's own
-	// write-set, and — unconditionally, unlike Searcher's opt-in
+	// write-set, and — unconditionally, unlike Search's and Iterate's opt-in
 	// TrackingRead — every entity on the returned page is recorded in the
 	// transaction's read-set. asAt != nil ignores any ambient transaction
 	// and reads committed-only state as of that instant.
@@ -138,6 +177,8 @@ type EntityStore interface {
 	//
 	// An empty txID never matches a stored-empty TransactionID
 	// (non-transactional writes carry one); it always returns ErrNotFound.
+	// CompareAndSave above takes the same line on the empty transaction ID
+	// — never a matchable value — and rejects it as a caller error.
 	GetVersionByTransaction(ctx context.Context, entityID, txID string) (*EntityVersion, error)
 
 	// GetVersionMetadata returns entityID's version metadata — no entity
@@ -155,6 +196,62 @@ type EntityStore interface {
 	// Deleted is true only on the DELETED tombstone row, and Version is
 	// populated on every returned row, including the tombstone.
 	GetVersionMetadata(ctx context.Context, entityID string, opts VersionMetadataOptions) ([]EntityVersionMeta, error)
+
+	// Search is the bounded-or-fail predicate read: SearchOptions.Limit >= 1
+	// is REQUIRED and caps the matched set; more matches than Limit MUST be
+	// ErrSearchResultLimitExceeded, never a truncated prefix; exactly at the
+	// limit succeeds; Limit <= 0 is a contract violation and MUST error.
+	// Search honours an active transaction (read-your-own-writes) unless
+	// PointInTime is set, in which case it is committed-only. With a
+	// transaction active the implementation overlays the transaction's
+	// write-set, so the result is identical to a committed-plus-buffer merge
+	// for the same transaction state — the merge MergeBounded computes.
+	// Returned entities enter the read-set only when
+	// SearchOptions.TrackingRead is set. See SearchOptions.
+	Search(ctx context.Context, filter Filter, opts SearchOptions) ([]*Entity, error)
+
+	// Iterate is the streamed predicate read: entities matching filter, one
+	// at a time, in bounded memory. See IterateOptions and Iterator.
+	//
+	// Semantics:
+	//   - Plugins push pushable parts of the filter into storage (SQL WHERE,
+	//     CQL index lookup); residual is applied inside Next() before
+	//     yielding.
+	//   - A zero-value Filter means "yield all entities for the model"
+	//     (subject to opts).
+	//   - IterateOptions.OrderBy: empty means order is unspecified. A backend
+	//     whose async search is engine-executed MUST honour a non-empty
+	//     OrderBy. A backend whose async search is self-executing MAY reject a
+	//     non-empty OrderBy with a plain error — there is no refusal sentinel,
+	//     callers see whatever error the plugin returns. A non-empty OrderBy
+	//     with an ambient transaction is unsupported; Iterate MUST return an
+	//     error rather than silently ignoring the order.
+	//   - Overlay semantics: with an ambient transaction, the merged
+	//     (committed ∪ transaction write-set) view is snapshotted at Iterate()
+	//     call time. Mutating the transaction while its iterator is open is
+	//     forbidden — the visibility of entities such a mutation would add,
+	//     remove, or change is unspecified for that already-open iterator.
+	//   - Implementations MUST NOT hold a global write-blocking lock for the
+	//     lifetime of the iterator (e.g. by holding only short-lived row
+	//     locks, or by paging through a cursor).
+	//   - The iterator MUST observe ctx cancellation: the underlying driver
+	//     surfaces an error; the iterator reports it via Err() and Next()
+	//     returns false.
+	//   - No retry on transient driver errors — the plugin surfaces the first
+	//     error and ends iteration.
+	//   - Err() returns that error stickily; subsequent Next() calls return
+	//     false.
+	//   - Close() is idempotent.
+	//
+	// ModelRef is a first-class argument because iteration is always scoped
+	// to exactly one model; IterateOptions carries only knobs that vary
+	// across calls against the same model.
+	//
+	// Every engine path that reads more than one entity — direct search on
+	// a store, async search, delete-all, conditional delete, grouped stats —
+	// consumes Search or Iterate. There is no whole-model read on this
+	// interface and no in-process fallback in the engine.
+	Iterate(ctx context.Context, model ModelRef, filter Filter, opts IterateOptions) (Iterator, error)
 }
 
 // SchemaDelta is an opaque, plugin-agnostic serialization of an

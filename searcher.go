@@ -1,42 +1,12 @@
 package spi
 
 import (
-	"context"
 	"time"
 )
 
-// Searcher is an optional interface for storage plugins that support
-// search predicate pushdown (e.g. SQL WHERE clauses). Plugins that
-// implement Searcher get native query execution; those that don't
-// fall back to in-memory filtering.
-//
-// Search is bounded-or-fail. SearchOptions.Limit >= 1 is REQUIRED: it is a
-// cap on the matched set, not a page size. An implementation that finds more
-// matches than Limit MUST return ErrSearchResultLimitExceeded and MUST NOT
-// return a truncated prefix — a silently truncated result is a wrong answer
-// the caller cannot distinguish from a complete one. Exactly-at-limit
-// succeeds.
-//
-// Limit <= 0 is a contract violation: the implementation MUST return an
-// error rather than treating it as "unbounded" or substituting a default of
-// its own. The engine resolves the direct-search default before calling, so
-// Search itself never needs to guess a bound.
-//
-// Search MUST honour an active transaction (read-your-own-writes): with no
-// transaction active it is a committed pushdown; with a transaction active it
-// overlays the transaction's write-set so the result is identical to what
-// GetAll + in-memory match would produce. In-transaction point-in-time reads
-// are committed-only — they never see the transaction's own uncommitted
-// writes for the PIT dimension. Returned entities enter the transaction's
-// read-set only when SearchOptions.TrackingRead is set; under bounded-or-fail
-// that is exactly the matched set, since there is no page smaller than it.
-type Searcher interface {
-	Search(ctx context.Context, filter Filter, opts SearchOptions) ([]*Entity, error)
-}
-
-// SearchOptions configures bounding, ordering, and scoping for a search.
-// There is no Offset: direct search does not paginate (async search does,
-// over its persisted result-ID list).
+// SearchOptions configures EntityStore.Search: bounding, ordering and
+// scoping. There is no Offset: direct search does not paginate (async
+// search does, over its persisted result-ID list).
 type SearchOptions struct {
 	ModelName    string
 	ModelVersion string
@@ -44,8 +14,8 @@ type SearchOptions struct {
 
 	// Limit is a bounded-or-fail cap on the matched set. Limit >= 1 is
 	// REQUIRED; Limit <= 0 is a contract violation and the implementation
-	// MUST return an error. See the Searcher doc comment — the full contract
-	// is load-bearing.
+	// MUST return an error. See EntityStore.Search's doc comment — the full
+	// contract is load-bearing.
 	Limit   int
 	OrderBy []OrderSpec
 
@@ -55,7 +25,7 @@ type SearchOptions struct {
 	// read, implemented optimistically). Default false: a plain snapshot
 	// predicate read that records nothing. No-op when no transaction is
 	// active. In-transaction search never prevents phantoms regardless of
-	// this flag (see docs/CONSISTENCY.md).
+	// this flag (see cyoda-go's docs/CONSISTENCY.md).
 	TrackingRead bool
 }
 

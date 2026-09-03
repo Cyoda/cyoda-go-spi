@@ -20,14 +20,13 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "SaveAll/Ordering", testEntitySaveAllOrdering)
 	runSubtest(t, h, tracker, "SaveAll/PartialFailureAtomicity", testEntitySaveAllAtomicity)
 	runSubtest(t, h, tracker, "Get/NotFound", testEntityGetNotFound)
-	runSubtest(t, h, tracker, "GetAll/EmptyModel", testEntityGetAllEmpty)
-	runSubtest(t, h, tracker, "GetAll/Population", testEntityGetAllPopulation)
 	runSubtest(t, h, tracker, "Delete", testEntityDelete)
 	runSubtest(t, h, tracker, "Delete/NotFound", testEntityDeleteNotFound)
 	runSubtest(t, h, tracker, "DeleteAll", testEntityDeleteAll)
 	runSubtest(t, h, tracker, "Exists", testEntityExists)
 	runSubtest(t, h, tracker, "Count", testEntityCount)
 	runSubtest(t, h, tracker, "CountByState", testEntityCountByState)
+	runSubtest(t, h, tracker, "Count/InTxBufferShapes", testEntityCountInTxBufferShapes)
 	runSubtest(t, h, tracker, "JSONFidelity/DeepNesting", testEntityJSONFidelity)
 
 	// Temporal group (Task 5)
@@ -35,8 +34,6 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "GetAsAt/FullMetaPopulated", testEntityGetAsAtMeta)
 	runSubtest(t, h, tracker, "GetAsAt/BeforeAnyWrite", testEntityGetAsAtBefore)
 	runSubtest(t, h, tracker, "GetAsAt/CommittedOnlyInTx", testEntityGetAsAtCommittedOnlyInTx)
-	runSubtest(t, h, tracker, "GetAllAsAt", testEntityGetAllAsAt)
-	runSubtest(t, h, tracker, "GetAllAsAt/CommittedOnlyInTx", testEntityGetAllAsAtCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "GetVersionMetadata/Ordering", testEntityVersionMetadataOrdering)
 	runSubtest(t, h, tracker, "GetVersionMetadata/EmptyWindowIsNotAnError", testEntityGetVersionMetadataEmptyWindowIsNotAnError)
 	runSubtest(t, h, tracker, "GetVersionMetadata/LimitCaps", testEntityGetVersionMetadataLimitCaps)
@@ -56,11 +53,15 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	// Concurrent / Isolation group (Task 6)
 	runSubtest(t, h, tracker, "CompareAndSave/Success", testEntityCompareAndSaveSuccess)
 	runSubtest(t, h, tracker, "CompareAndSave/Conflict", testEntityCompareAndSaveConflict)
+	runSubtest(t, h, tracker, "CompareAndSave/ExpectedIDIsLiteral", testEntityCompareAndSaveExpectedIDIsLiteral)
+	runSubtest(t, h, tracker, "CompareAndSave/EmptyExpectedIDRejected", testEntityCompareAndSaveEmptyExpectedIDRejected)
 	runSubtest(t, h, tracker, "Concurrent/ConflictingUpdate", testEntityConcurrentConflict)
 	runSubtest(t, h, tracker, "Concurrent/DifferentEntities", testEntityConcurrentDifferent)
 	runSubtest(t, h, tracker, "TenantIsolation/Get", testEntityTenantIsolationGet)
-	runSubtest(t, h, tracker, "TenantIsolation/GetAll", testEntityTenantIsolationGetAll)
 	runSubtest(t, h, tracker, "TenantIsolation/Delete", testEntityTenantIsolationDelete)
+	runSubtest(t, h, tracker, "TenantIsolation/GetPage", testEntityTenantIsolationGetPage)
+	runSubtest(t, h, tracker, "TenantIsolation/Search", testEntityTenantIsolationSearch)
+	runSubtest(t, h, tracker, "TenantIsolation/Count", testEntityTenantIsolationCount)
 	runSubtest(t, h, tracker, "EmptyTenant", testEntityEmptyTenant)
 
 	// Attribution group (follow-on-action attribution design)
@@ -121,32 +122,6 @@ func testEntityGetNotFound(t *testing.T, h Harness) {
 	es, _ := h.Factory.EntityStore(ctx)
 	_, err := es.Get(ctx, newID()) // valid UUID that was never written
 	require.ErrorIs(t, err, spi.ErrNotFound)
-}
-
-func testEntityGetAllEmpty(t *testing.T, h Harness) {
-	ctx := tenantContext(h.NewTenant())
-	es, _ := h.Factory.EntityStore(ctx)
-	got, err := es.GetAll(ctx, spi.ModelRef{EntityName: "m-empty", ModelVersion: "1"})
-	require.NoError(t, err)
-	require.NotNil(t, got, "GetAll on empty model must return non-nil slice")
-	require.Len(t, got, 0)
-}
-
-func testEntityGetAllPopulation(t *testing.T, h Harness) {
-	ctx := tenantContext(h.NewTenant())
-	const n = 5
-	withTx(t, h, ctx, func(txCtx context.Context) {
-		es, _ := h.Factory.EntityStore(txCtx)
-		for i := 0; i < n; i++ {
-			_, err := es.Save(txCtx, newEntity(t, "m-pop", newID(), map[string]any{"i": i}))
-			require.NoError(t, err)
-		}
-	})
-
-	es, _ := h.Factory.EntityStore(ctx)
-	got, err := es.GetAll(ctx, spi.ModelRef{EntityName: "m-pop", ModelVersion: "1"})
-	require.NoError(t, err)
-	require.Len(t, got, n)
 }
 
 func testEntityDelete(t *testing.T, h Harness) {
@@ -377,6 +352,75 @@ func testEntityCountByState(t *testing.T, h Harness) {
 		"after state transition, entity must count under post-transition state")
 }
 
+// In-transaction Count and CountByState reflect the transaction's own view
+// for every buffer shape: create, update with state change, delete of a
+// committed entity, create-then-delete, delete-then-save, and DeleteAll.
+func testEntityCountInTxBufferShapes(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	mref := spi.ModelRef{EntityName: "m-cnt-tx", ModelVersion: "1"}
+	ids := make([]string, 4)
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		for i := range ids {
+			ids[i] = newID()
+			state := []string{"open", "closed"}[i%2]
+			// The payload embeds _meta.state alongside Meta.State for the same
+			// reason testEntityCountByState does — see its comment: a backend
+			// whose lifecycle indexer derives the PRIOR state from the prior
+			// payload sees oldState="" without it, never emits the OUT marker,
+			// and the "update with state change" step below would not exercise
+			// the transition its expectation depends on.
+			e := newEntity(t, mref.EntityName, ids[i], map[string]any{
+				"i":     i,
+				"_meta": map[string]any{"state": state},
+			})
+			e.Meta.State = state
+			_, err := es.Save(txCtx, e)
+			require.NoError(t, err)
+		}
+	})
+
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	_, txCtx := beginGuarded(t, tm, ctx)
+	es, _ := h.Factory.EntityStore(txCtx)
+	save := func(id, state string) {
+		// _meta.state as above: the re-save of a committed entity below is a
+		// prior-state-derived transition on indexer-backed backends.
+		e := newEntity(t, mref.EntityName, id, map[string]any{
+			"_meta": map[string]any{"state": state},
+		})
+		e.Meta.State = state
+		_, err := es.Save(txCtx, e)
+		require.NoError(t, err)
+	}
+	check := func(step string, total int64, byState map[string]int64) {
+		n, err := es.Count(txCtx, mref)
+		require.NoError(t, err, step)
+		require.Equal(t, total, n, step)
+		got, err := es.CountByState(txCtx, mref, nil)
+		require.NoError(t, err, step)
+		require.Equal(t, byState, got, step)
+	}
+	check("baseline", 4, map[string]int64{"open": 2, "closed": 2})
+	n0 := newID()
+	save(n0, "open")
+	check("create", 5, map[string]int64{"open": 3, "closed": 2})
+	save(ids[1], "open")
+	check("update with state change", 5, map[string]int64{"open": 4, "closed": 1})
+	require.NoError(t, es.Delete(txCtx, ids[2]))
+	check("delete committed", 4, map[string]int64{"open": 3, "closed": 1})
+	n1 := newID()
+	save(n1, "closed")
+	require.NoError(t, es.Delete(txCtx, n1))
+	check("create then delete", 4, map[string]int64{"open": 3, "closed": 1})
+	require.NoError(t, es.Delete(txCtx, ids[3]))
+	save(ids[3], "open")
+	check("delete then save", 4, map[string]int64{"open": 4})
+	require.NoError(t, es.DeleteAll(txCtx, mref))
+	check("after DeleteAll", 0, map[string]int64{})
+}
+
 func testEntitySaveAllOrdering(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	mref := spi.ModelRef{EntityName: "m-sa", ModelVersion: "1"}
@@ -504,35 +548,8 @@ func testEntityGetAsAtBefore(t *testing.T, h Harness) {
 	require.ErrorIs(t, err, spi.ErrNotFound)
 }
 
-func testEntityGetAllAsAt(t *testing.T, h Harness) {
-	ctx := tenantContext(h.NewTenant())
-	mref := spi.ModelRef{EntityName: "m-allasat", ModelVersion: "1"}
-	withTx(t, h, ctx, func(txCtx context.Context) {
-		es, _ := h.Factory.EntityStore(txCtx)
-		for i := 0; i < 3; i++ {
-			_, err := es.Save(txCtx, newEntity(t, "m-allasat", newID(), map[string]any{"i": i}))
-			require.NoError(t, err)
-		}
-	})
-	h.AdvanceClock(1 * time.Millisecond)
-	asAt := h.Now().UTC()
-	h.AdvanceClock(1 * time.Millisecond)
-
-	// Fourth entity written AFTER asAt — must not be returned.
-	withTx(t, h, ctx, func(txCtx context.Context) {
-		es, _ := h.Factory.EntityStore(txCtx)
-		_, err := es.Save(txCtx, newEntity(t, "m-allasat", newID(), map[string]any{"i": 99}))
-		require.NoError(t, err)
-	})
-
-	es, _ := h.Factory.EntityStore(ctx)
-	got, err := es.GetAllAsAt(ctx, mref, asAt)
-	require.NoError(t, err)
-	require.Len(t, got, 3, "GetAllAsAt must exclude writes after asAt")
-}
-
 // pitFixture is the shared setup for the point-in-time committed-only family
-// (GetAsAt, GetAllAsAt, GetPage(asAt), Iterate(PointInTime), Search(PointInTime)).
+// (GetAsAt, GetPage(asAt), Iterate(PointInTime), Search(PointInTime)).
 // See newPITCommittedOnlyFixture.
 type pitFixture struct {
 	// ModelRef scopes every collection-shaped read in the family.
@@ -643,17 +660,6 @@ func testEntityGetAsAtCommittedOnlyInTx(t *testing.T, h Harness) {
 	_, err = f.Store.GetAsAt(f.Ctx, f.DirtyID, f.AsAt)
 	require.ErrorIs(t, err, spi.ErrNotFound,
 		"GetAsAt must not surface an entity the ambient transaction created but has not committed")
-}
-
-// testEntityGetAllAsAtCommittedOnlyInTx: the collection form of the same
-// contract.
-func testEntityGetAllAsAtCommittedOnlyInTx(t *testing.T, h Harness) {
-	ctx := tenantContext(h.NewTenant())
-	f := newPITCommittedOnlyFixture(t, h, ctx, "m-pit-getallasat")
-
-	got, err := f.Store.GetAllAsAt(f.Ctx, f.ModelRef, f.AsAt)
-	require.NoError(t, err)
-	f.requireCommittedOnly(t, "GetAllAsAt", got)
 }
 
 // testEntityGetPageAsAtCommittedOnlyInTx holds GetPage's asAt path to the same
@@ -886,7 +892,7 @@ func testEntityGetPageOrderAndBounds(t *testing.T, h Harness) {
 
 // testEntityGetPageAsAtSnapshot verifies GetPage's asAt parameter reads
 // committed-only state as of the given instant, excluding writes after it —
-// mirroring GetAllAsAt's contract — AND that asAt ignores any ambient
+// mirroring GetAsAt's contract — AND that asAt ignores any ambient
 // transaction's own overlay, reading committed-only state even when called
 // through a transaction's own context.
 func testEntityGetPageAsAtSnapshot(t *testing.T, h Harness) {
@@ -953,7 +959,7 @@ func testEntityGetPageAsAtSnapshot(t *testing.T, h Harness) {
 	require.NoError(t, tm.Rollback(txCtx, txID))
 }
 
-// entityIDs extracts Meta.ID from a GetPage/GetAll result in order.
+// entityIDs extracts Meta.ID from a GetPage result in order.
 func entityIDs(es []*spi.Entity) []string {
 	ids := make([]string, len(es))
 	for i, e := range es {
@@ -1093,7 +1099,7 @@ func testEntityGetPageInTxWithStagedDeletes(t *testing.T, h Harness) {
 
 // testEntityGetPageInTxRecordsReadSet pins GetPage's documented unconditional
 // (non-opt-in) read-set recording when asAt == nil inside a transaction —
-// unlike Searcher/Iterate's opt-in TrackingRead — and, discriminatingly,
+// unlike Search's and Iterate's opt-in TrackingRead — and, discriminatingly,
 // that the recording is scoped to the PAGE, not the whole model. This is
 // the deliberate narrowing of first-committer-wins from model-wide to
 // page-wide the GetPage doc comment calls out.
@@ -1342,6 +1348,8 @@ func testEntityCompareAndSaveSuccess(t *testing.T, h Harness) {
 	got, err := es.Get(ctx, id)
 	require.NoError(t, err)
 	firstTxID := got.Meta.TransactionID
+	require.NotEmpty(t, firstTxID,
+		"a transactional write must stamp EntityMeta.TransactionID; an empty expectedTxID is a contract violation, not a comparable value")
 
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -1372,6 +1380,155 @@ func testEntityCompareAndSaveConflict(t *testing.T, h Harness) {
 	es, _ := h.Factory.EntityStore(txCtx)
 	_, err = es.CompareAndSave(txCtx, newEntity(t, "m-cas", id, map[string]any{}), "stale-tx-id")
 	require.ErrorIs(t, err, spi.ErrConflict, "CompareAndSave with stale expectedTxID must return ErrConflict")
+}
+
+// testEntityCompareAndSaveExpectedIDIsLiteral pins the comparison rule for
+// a NON-EMPTY expectedTxID: it is compared literally against the entity's
+// current EntityMeta.TransactionID, with no existence test folded in. So a
+// non-empty ID conflicts against a missing entity — CompareAndSave never
+// creates — and a stale non-empty ID conflicts against an entity that
+// exists. Run both outside a transaction and inside one, since the
+// comparison is against the caller's own transactional view either way.
+//
+// The empty expectedTxID is not part of this case: it is a contract
+// violation, pinned by CompareAndSave/EmptyExpectedIDRejected below.
+//
+// The "existing entity" is still seeded through a committed transaction, so
+// it carries a real, non-empty transaction ID. On a backend that stamps
+// none for non-transactional writes (see EntityVersionMeta.TransactionID's
+// doc comment) a non-transactionally seeded entity would carry the empty
+// ID, and this leg would degenerate into the same non-empty-versus-empty
+// comparison the missing-entity leg already makes.
+func testEntityCompareAndSaveExpectedIDIsLiteral(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+
+	// seedExistingTransactional creates an entity via its own committed
+	// transaction — separate from, and completed before, any transaction
+	// assertLiteralComparison itself runs under — so it carries a real
+	// transaction ID regardless of whether a backend stamps one on
+	// non-transactional writes.
+	seedExistingTransactional := func() string {
+		id := newID()
+		withTx(t, h, ctx, func(txCtx spiCtx) {
+			es, _ := h.Factory.EntityStore(txCtx)
+			_, err := es.Save(txCtx, newEntity(t, "m-cas-lit", id, map[string]any{"v": 3}))
+			require.NoError(t, err)
+		})
+		return id
+	}
+
+	assertLiteralComparison := func(opCtx spiCtx, es spi.EntityStore, existingID, label string) {
+		// A non-empty expectedTxID against a missing entity conflicts —
+		// it does not create, even though there is nothing to compare
+		// against but "no entity".
+		missingID := newID()
+		_, err := es.CompareAndSave(opCtx, newEntity(t, "m-cas-lit", missingID, map[string]any{"v": 1}), "nonexistent-tx-id")
+		require.ErrorIs(t, err, spi.ErrConflict,
+			"%s: non-empty expectedTxID against a missing entity must conflict, not create", label)
+		_, err = es.Get(opCtx, missingID)
+		require.ErrorIs(t, err, spi.ErrNotFound,
+			"%s: a conflicting CompareAndSave must not have created the entity", label)
+
+		// A stale non-empty expectedTxID against an entity that exists
+		// conflicts: the stored transaction ID is real and different.
+		_, err = es.CompareAndSave(opCtx, newEntity(t, "m-cas-lit", existingID, map[string]any{"v": 4}), "nonexistent-tx-id")
+		require.ErrorIs(t, err, spi.ErrConflict,
+			"%s: stale non-empty expectedTxID against an existing entity must conflict", label)
+		got, err := es.Get(opCtx, existingID)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"v":3}`, string(got.Data),
+			"%s: a conflicting CompareAndSave must not have written", label)
+	}
+
+	outsideExistingID := seedExistingTransactional()
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	assertLiteralComparison(ctx, es, outsideExistingID, "outside tx")
+
+	insideExistingID := seedExistingTransactional()
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
+	esTx, err := h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+	assertLiteralComparison(txCtx, esTx, insideExistingID, "inside tx")
+	require.NoError(t, tm.Commit(txCtx, txID))
+}
+
+// testEntityCompareAndSaveEmptyExpectedIDRejected pins the empty
+// expectedTxID as a CONTRACT VIOLATION: the implementation must return an
+// error rather than comparing it. The empty string is what a missing
+// entity, a deleted entity and an entity written outside any transaction
+// all carry, so it distinguishes nothing; treating it as "expect no
+// entity" would let CompareAndSave overwrite an entity that exists.
+//
+// The rejection carries no sentinel — a caller bug is not a domain outcome
+// — so only require.Error is asserted, never a particular error value.
+//
+// Covered against every state the entity can be in: missing, existing, and
+// (inside a transaction, the only place the state exists) an entity with a
+// delete staged in the caller's own transaction. The existing-entity leg
+// re-reads afterwards, so a backend that errors AFTER writing fails here.
+func testEntityCompareAndSaveEmptyExpectedIDRejected(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+
+	seedExisting := func() string {
+		id := newID()
+		withTx(t, h, ctx, func(txCtx spiCtx) {
+			es, _ := h.Factory.EntityStore(txCtx)
+			_, err := es.Save(txCtx, newEntity(t, "m-cas-empty", id, map[string]any{"v": 1}))
+			require.NoError(t, err)
+		})
+		return id
+	}
+
+	assertRejected := func(opCtx spiCtx, es spi.EntityStore, existingID, label string) {
+		// Missing entity: rejected, and nothing created.
+		missingID := newID()
+		_, err := es.CompareAndSave(opCtx, newEntity(t, "m-cas-empty", missingID, map[string]any{"v": 2}), "")
+		require.Error(t, err,
+			"%s: empty expectedTxID against a missing entity must error, not create", label)
+		_, err = es.Get(opCtx, missingID)
+		require.ErrorIs(t, err, spi.ErrNotFound,
+			"%s: a rejected CompareAndSave must not have created the entity", label)
+
+		// Existing entity: rejected, and the entity is untouched.
+		_, err = es.CompareAndSave(opCtx, newEntity(t, "m-cas-empty", existingID, map[string]any{"v": 3}), "")
+		require.Error(t, err,
+			"%s: empty expectedTxID against an existing entity must error", label)
+		got, err := es.Get(opCtx, existingID)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"v":1}`, string(got.Data),
+			"%s: a rejected CompareAndSave must not have written", label)
+	}
+
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	assertRejected(ctx, es, seedExisting(), "outside tx")
+
+	insideExistingID := seedExisting()
+	stagedDeleteID := seedExisting()
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
+	esTx, err := h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+	assertRejected(txCtx, esTx, insideExistingID, "inside tx")
+
+	// Third state: a delete staged in this transaction. The entity's
+	// current transaction ID is empty in the transaction's own view, which
+	// is precisely the reading the old "expect no entity" rule would have
+	// matched — it must be rejected here too, and must not resurrect the
+	// entity.
+	require.NoError(t, esTx.Delete(txCtx, stagedDeleteID))
+	_, err = esTx.CompareAndSave(txCtx, newEntity(t, "m-cas-empty", stagedDeleteID, map[string]any{"v": 4}), "")
+	require.Error(t, err,
+		"inside tx: empty expectedTxID against a same-tx staged delete must error, not resurrect")
+	_, err = esTx.Get(txCtx, stagedDeleteID)
+	require.ErrorIs(t, err, spi.ErrNotFound,
+		"inside tx: a rejected CompareAndSave must leave the staged delete standing")
+
+	require.NoError(t, tm.Rollback(txCtx, txID))
 }
 
 func testEntityConcurrentConflict(t *testing.T, h Harness) {
@@ -1488,23 +1645,6 @@ func testEntityTenantIsolationGet(t *testing.T, h Harness) {
 	require.ErrorIs(t, err, spi.ErrNotFound, "cross-tenant Get must return ErrNotFound")
 }
 
-func testEntityTenantIsolationGetAll(t *testing.T, h Harness) {
-	tA, tB := h.NewTenant(), h.NewTenant()
-	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
-	mref := spi.ModelRef{EntityName: "m-tigetall", ModelVersion: "1"}
-
-	withTx(t, h, ctxA, func(txCtx context.Context) {
-		es, _ := h.Factory.EntityStore(txCtx)
-		_, err := es.Save(txCtx, newEntity(t, "m-tigetall", newID(), map[string]any{}))
-		require.NoError(t, err)
-	})
-
-	esB, _ := h.Factory.EntityStore(ctxB)
-	got, err := esB.GetAll(ctxB, mref)
-	require.NoError(t, err)
-	require.Len(t, got, 0, "tenant B must not see tenant A's writes")
-}
-
 func testEntityTenantIsolationDelete(t *testing.T, h Harness) {
 	tA, tB := h.NewTenant(), h.NewTenant()
 	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
@@ -1527,6 +1667,114 @@ func testEntityTenantIsolationDelete(t *testing.T, h Harness) {
 	esB, _ := h.Factory.EntityStore(txCtxB)
 	err = esB.Delete(txCtxB, id)
 	require.ErrorIs(t, err, spi.ErrNotFound, "cross-tenant Delete must return ErrNotFound")
+}
+
+func testEntityTenantIsolationGetPage(t *testing.T, h Harness) {
+	tA, tB := h.NewTenant(), h.NewTenant()
+	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
+	mref := spi.ModelRef{EntityName: "m-tigetpage", ModelVersion: "1"}
+
+	withTx(t, h, ctxA, func(txCtx context.Context) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		_, err := es.Save(txCtx, newEntity(t, "m-tigetpage", newID(), map[string]any{}))
+		require.NoError(t, err)
+	})
+
+	esB, _ := h.Factory.EntityStore(ctxB)
+	got, err := esB.GetPage(ctxB, mref, 10, 0, nil)
+	require.NoError(t, err)
+	require.Len(t, got, 0, "tenant B must not see tenant A's writes")
+
+	it, err := esB.Iterate(ctxB, mref, spi.Filter{}, spi.IterateOptions{})
+	require.NoError(t, err)
+	require.NotNil(t, it, "Iterate returned a nil Iterator with a nil error")
+	rows, err := drainIterator(t, it)
+	require.NoError(t, err)
+	require.Len(t, rows, 0, "tenant B must not iterate tenant A's writes")
+}
+
+// testEntityTenantIsolationSearch: tenant B's Search over a predicate that
+// matches tenant A's entity must return nothing.
+//
+// Search is a required EntityStore method, so every backend pushes this
+// predicate down; a pushdown whose WHERE clause forgets the tenant column
+// leaks A's rows to B on the read path the engine uses for every direct
+// search. The positive control — the identical Search from tenant A, which
+// MUST find the entity — is what makes the empty result from B evidence of
+// scoping rather than evidence that the seed or the predicate silently did
+// nothing.
+func testEntityTenantIsolationSearch(t *testing.T, h Harness) {
+	tA, tB := h.NewTenant(), h.NewTenant()
+	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
+	const model = "m-tisearch"
+	filter := spi.Filter{
+		Op:       spi.FilterEq,
+		Source:   spi.SourceData,
+		Path:     "status",
+		Value:    searcherMatchValue,
+		Declared: []spi.DataType{spi.String},
+	}
+	opts := spi.SearchOptions{ModelName: model, ModelVersion: "1", Limit: 100}
+
+	withTx(t, h, ctxA, func(txCtx context.Context) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		_, err := es.Save(txCtx, newEntity(t, model, newID(),
+			map[string]any{"status": searcherMatchValue}))
+		require.NoError(t, err)
+	})
+
+	esA, _ := h.Factory.EntityStore(ctxA)
+	ownerGot, err := esA.Search(ctxA, filter, opts)
+	require.NoError(t, err)
+	require.Len(t, ownerGot, 1,
+		"control: the owning tenant's Search must find the seeded entity, so tenant B's empty result below is evidence of tenant scoping")
+
+	esB, _ := h.Factory.EntityStore(ctxB)
+	got, err := esB.Search(ctxB, filter, opts)
+	require.NoError(t, err)
+	require.Len(t, got, 0, "cross-tenant Search must not return tenant A's entities")
+}
+
+// testEntityTenantIsolationCount: tenant B's Count and CountByState over
+// tenant A's model must report zero and an empty map.
+//
+// The counting reads are aggregate pushdowns of their own — a COUNT(*) or a
+// GROUP BY that omits the tenant column leaks A's population to B as a
+// number even though no row crosses the boundary. Tenant A's own Count and
+// CountByState are asserted first as the positive control.
+func testEntityTenantIsolationCount(t *testing.T, h Harness) {
+	tA, tB := h.NewTenant(), h.NewTenant()
+	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
+	mref := spi.ModelRef{EntityName: "m-ticount", ModelVersion: "1"}
+
+	withTx(t, h, ctxA, func(txCtx context.Context) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		for _, state := range []string{"open", "closed"} {
+			e := newEntity(t, mref.EntityName, newID(), map[string]any{})
+			e.Meta.State = state
+			_, err := es.Save(txCtx, e)
+			require.NoError(t, err)
+		}
+	})
+
+	esA, _ := h.Factory.EntityStore(ctxA)
+	ownerN, err := esA.Count(ctxA, mref)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), ownerN,
+		"control: the owning tenant must count its own entities, so tenant B's zero below is evidence of tenant scoping")
+	ownerByState, err := esA.CountByState(ctxA, mref, nil)
+	require.NoError(t, err)
+	require.Equal(t, map[string]int64{"open": 1, "closed": 1}, ownerByState,
+		"control: the owning tenant must see its own per-state counts")
+
+	esB, _ := h.Factory.EntityStore(ctxB)
+	n, err := esB.Count(ctxB, mref)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), n, "cross-tenant Count must not count tenant A's entities")
+	byState, err := esB.CountByState(ctxB, mref, nil)
+	require.NoError(t, err)
+	require.Equal(t, map[string]int64{}, byState,
+		"cross-tenant CountByState must return an empty (non-nil) map, not tenant A's per-state counts")
 }
 
 // testEntityExecutorRoundTrip verifies that the ChangeUser/ChangeUserKind/
@@ -1589,11 +1837,9 @@ func testEntityEmptyTenant(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	mref := spi.ModelRef{EntityName: "m-empty", ModelVersion: "1"}
 	es, _ := h.Factory.EntityStore(ctx)
-	got, err := es.GetAll(ctx, mref)
+	got, err := es.GetPage(ctx, mref, 10, 0, nil)
 	require.NoError(t, err)
-	// Note: testEntityGetAllEmpty asserts non-nil; this subtest tests the
-	// broader EmptyTenant invariant (Count == 0). If the memory plugin
-	// returns nil from GetAll, this still works because len(nil) == 0.
+	require.NotNil(t, got, "GetPage on an empty model must return a non-nil, empty page")
 	require.Len(t, got, 0)
 	n, err := es.Count(ctx, mref)
 	require.NoError(t, err)

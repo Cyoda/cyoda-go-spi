@@ -71,29 +71,35 @@ type EntityStore interface {
 	// pre-transaction one, so comparing against a stale ID — including the
 	// transaction's own prior write — conflicts and returns ErrConflict.
 	//
-	// The rule is a literal string comparison of expectedTxID against that
-	// current EntityMeta.TransactionID. There are no synonyms and no
-	// existence test; every other case follows from the literal rule:
+	// expectedTxID MUST be non-empty. An empty expectedTxID is a contract
+	// violation and the implementation MUST return an error rather than
+	// comparing it — it is a caller bug, not a domain outcome, so it carries
+	// no sentinel (the same treatment Search gives Limit <= 0). The empty
+	// string is not a usable expectation: a missing entity, a deleted one,
+	// and an entity written outside any transaction all carry an empty
+	// EntityMeta.TransactionID — a non-transactional write may stamp none,
+	// and EntityVersionMeta.TransactionID shows the same empty value on the
+	// audit row — so "" cannot tell the three apart, and an "expect no
+	// entity" reading of it would silently overwrite an entity that exists.
 	//
-	//   - A missing or deleted entity carries the empty transaction ID, so
-	//     expectedTxID == "" creates against one — this, and only this, is
-	//     the sense in which "" means "expect no entity". Conversely a
-	//     non-empty expectedTxID against a missing entity conflicts rather
-	//     than creating.
-	//   - A version written outside any transaction may itself carry the
-	//     empty ID (EntityMeta.TransactionID is the compared field;
-	//     EntityVersionMeta.TransactionID shows the same empty value on the
-	//     audit row). The comparison is still literal, so "" matches such a
-	//     version and the save succeeds against an entity that does exist.
-	//     That is the literal rule applied consistently, not an exception
-	//     to an "expect no entity" rule.
+	// For a non-empty expectedTxID the rule is a literal string comparison
+	// against the entity's current EntityMeta.TransactionID. There are no
+	// synonyms and no existence test; every other case follows from the
+	// literal rule:
 	//
-	// The empty string is deliberately the opposite convention here from
-	// GetVersionByTransaction below, where an empty txID never matches a
-	// stored-empty TransactionID and always returns ErrNotFound. Same
-	// sentinel, same interface, opposite meaning: here it is a literal value
-	// to compare, there it is a lookup key that matches nothing. Both are
-	// intended; neither is a typo.
+	//   - A missing or deleted entity carries the empty transaction ID and
+	//     so matches no non-empty expectedTxID. CompareAndSave therefore
+	//     can never create, and never resurrect a deleted entity; Save is
+	//     the way to create or to re-create.
+	//   - Once a Delete is staged in the caller's own transaction, the
+	//     entity's current ID is empty in that transaction's view, so no
+	//     CompareAndSave can succeed against it for the rest of the
+	//     transaction. Save unstages the delete.
+	//
+	// This agrees with GetVersionByTransaction below: neither treats an
+	// empty transaction ID as a matchable value. There it is a lookup key
+	// that matches nothing and returns ErrNotFound; here it is rejected
+	// outright as a caller error.
 	CompareAndSave(ctx context.Context, entity *Entity, expectedTxID string) (int64, error)
 	// SaveAll saves multiple entities, returning versions in iteration order.
 	// Backends may execute saves concurrently. On error, returns the first
@@ -171,6 +177,8 @@ type EntityStore interface {
 	//
 	// An empty txID never matches a stored-empty TransactionID
 	// (non-transactional writes carry one); it always returns ErrNotFound.
+	// CompareAndSave above takes the same line on the empty transaction ID
+	// — never a matchable value — and rejects it as a caller error.
 	GetVersionByTransaction(ctx context.Context, entityID, txID string) (*EntityVersion, error)
 
 	// GetVersionMetadata returns entityID's version metadata — no entity

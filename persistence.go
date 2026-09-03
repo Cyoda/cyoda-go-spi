@@ -65,7 +65,15 @@ type ScheduledTaskStore interface {
 
 type EntityStore interface {
 	Save(ctx context.Context, entity *Entity) (int64, error)
-	// CompareAndSave saves the entity only if the current latest transaction ID matches expectedTxID.
+	// CompareAndSave saves the entity only if expectedTxID matches the
+	// entity's current transaction ID as the caller's own transaction sees
+	// it: a same-transaction Delete or Save IS the current state, not the
+	// pre-transaction one, so comparing against a stale ID — including the
+	// transaction's own prior write — conflicts. The comparison is
+	// literal, with no synonyms: a missing or deleted entity has the empty
+	// transaction ID, so expectedTxID == "" means "expect no entity" and
+	// creates one; a non-empty expectedTxID against a missing entity
+	// conflicts rather than creating.
 	// Returns ErrConflict if the transaction ID has changed.
 	CompareAndSave(ctx context.Context, entity *Entity, expectedTxID string) (int64, error)
 	// SaveAll saves multiple entities, returning versions in iteration order.

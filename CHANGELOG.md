@@ -24,20 +24,37 @@ MAINTAINING.md.
   would keep `store.(spi.Iterable)` compiling and hide exactly the dead
   branches the change removes.
 
-  Doc-only contract clarifications ship with it. `CompareAndSave`'s godoc
-  now states the literal expected-ID rule as the single rule: the
-  comparison is a literal string comparison against the entity's current
-  `EntityMeta.TransactionID` as the caller's own transaction sees it, with
-  no synonyms and no existence test — a missing or deleted entity carries
-  the empty transaction ID, which is the sense in which `expectedTxID ==
-  ""` means "expect no entity", while a version written outside any
-  transaction also carries it and so is matched by `""` too. The opposite
-  convention `GetVersionByTransaction` gives the same empty sentinel is
-  now cross-referenced from both. `EntityStore.Search`'s godoc states the
-  operational definition of its in-transaction result: identical to a
-  committed-plus-buffer merge for the same transaction state, the merge
-  `MergeBounded` computes. `EntityStore.Iterate` absorbs the full
-  iteration semantics that previously sat as a detached comment in
+  **`CompareAndSave` requires a non-empty `expectedTxID`.** An empty one
+  is now a contract violation the implementation MUST reject with an
+  error — a caller bug, so it carries no sentinel, the treatment `Search`
+  already gives `Limit <= 0`. It used to mean "expect no entity", and that
+  reading was unsound: the compared field, `EntityMeta.TransactionID`, is
+  empty for an absent entity, for a deleted one, AND for an entity written
+  outside any transaction, so the empty string named all three at once and
+  a "create only" call could silently overwrite an entity that exists —
+  a fail-open on the one primitive whose job is to fail closed. The
+  capability this removes is atomic insert-if-absent, which had no caller;
+  unconditional create is `Save`'s job, and `Save` is likewise how a
+  deleted entity is re-created. Should insert-if-absent be wanted later it
+  gets its own explicit spelling rather than an overloaded sentinel.
+
+  The comparison for a non-empty `expectedTxID` is unchanged: a literal
+  string comparison against the entity's current `EntityMeta.TransactionID`
+  as the caller's own transaction sees it, with no synonyms and no
+  existence test. A missing or deleted entity carries the empty ID and so
+  matches no non-empty expected ID — `CompareAndSave` can never create and
+  never resurrect — and once a delete is staged in the caller's own
+  transaction, nothing can compare-and-save against that entity for the
+  rest of the transaction. `GetVersionByTransaction` already treated the
+  empty transaction ID as never matchable; the two now agree rather than
+  reading as opposite conventions for the same sentinel, and each
+  cross-references the other.
+
+  Doc-only contract clarifications ship alongside. `EntityStore.Search`'s
+  godoc states the operational definition of its in-transaction result:
+  identical to a committed-plus-buffer merge for the same transaction
+  state, the merge `MergeBounded` computes. `EntityStore.Iterate` absorbs
+  the full iteration semantics that previously sat as a detached comment in
   `iterable.go` — including the rules `spitest` enforces (a non-empty
   `OrderBy` with an ambient transaction MUST error; the engine-executed vs
   self-executing `OrderBy` split; no retry on transient driver errors),
@@ -58,7 +75,10 @@ MAINTAINING.md.
   with `GetPage` or `Iterate` with a zero-value filter); move your
   `Search`/`Iterate` methods onto the store type if they were on a separate
   one; drop `var _ spi.Searcher`/`spi.Iterable` assertions. `SearchOptions`,
-  `IterateOptions` and `Iterator` are unchanged.
+  `IterateOptions` and `Iterator` are unchanged. In `CompareAndSave`,
+  reject an empty `expectedTxID` up front with an error and delete the
+  create-on-empty path — there is no longer a case in which an empty
+  expected ID reaches the comparison.
 
   spitest: `GetAll/EmptyModel`, `GetAll/Population`, `GetAllAsAt`,
   `GetAllAsAt/CommittedOnlyInTx` and `TenantIsolation/GetAll` are gone
@@ -72,8 +92,13 @@ MAINTAINING.md.
   (every operation on a committed transaction's context, reads included,
   fails with `ErrTxAlreadyCommitted`, or `ErrTxNotFound` on backends that
   purge committed-tx state), `CompareAndSave/ExpectedIDIsLiteral`
-  (the expected transaction ID is compared literally; a missing or deleted
-  entity has the empty ID, so `""` means "expect no entity"),
+  (a non-empty expected transaction ID is compared literally — it
+  conflicts against a missing entity instead of creating it, and a stale
+  one conflicts against an existing entity without writing),
+  `CompareAndSave/EmptyExpectedIDRejected` (an empty expected transaction
+  ID errors, inside a transaction and outside one, against a missing
+  entity, an existing entity — left unchanged — and an entity with a
+  same-transaction delete staged),
   `Entity/Count/InTxBufferShapes`, three cross-tenant cases for the
   multi-entity reads this change makes mandatory —
   `TenantIsolation/Search`, `TenantIsolation/Count` (both `Count` and

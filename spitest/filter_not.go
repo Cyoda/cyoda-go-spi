@@ -9,15 +9,15 @@ import (
 )
 
 // filter_not.go pins spi.FilterNot's universal-quantifier semantics and its
-// arity guard at every filter-taking entry point the suite covers (Searcher,
-// Iterable). Without cases here, [spi.FilterNot]'s doc comment and
-// docs/cloud-parity/path-grammar.md section 5 are advice a backend can drift
-// from silently — nothing in the harness previously ran a FilterNot through a
-// real backend.
+// arity guard at every filter-taking entry point the suite covers
+// (EntityStore.Search, EntityStore.Iterate). Without cases here,
+// [spi.FilterNot]'s doc comment and docs/cloud-parity/path-grammar.md
+// section 5 are advice a backend can drift from silently — nothing in the
+// harness previously ran a FilterNot through a real backend.
 
 // filterNotModel is the model FilterNot subtests seed into. Each subtest
 // runs under a fresh tenant (see tenantContext), so reusing a fixed name
-// across the Searcher and Iterable suites is collision-free — the same
+// across the Search and Iterate suites is collision-free — the same
 // convention iterableModelRef already uses for searcherModel.
 const filterNotModel = "filter-not"
 
@@ -168,10 +168,9 @@ func testSearcherFilterNot(t *testing.T, h Harness) {
 
 	es, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
-	searcher := es.(spi.Searcher)
 
 	runFilterNotConformance(t, "Search", func(t *testing.T, filter spi.Filter) ([]*spi.Entity, error) {
-		return searcher.Search(ctx, filter, spi.SearchOptions{
+		return es.Search(ctx, filter, spi.SearchOptions{
 			ModelName:    filterNotModel,
 			ModelVersion: "1",
 			Limit:        1000,
@@ -193,11 +192,10 @@ func testIterableFilterNot(t *testing.T, h Harness) {
 
 	store, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
-	iterable := store.(spi.Iterable)
 	mref := spi.ModelRef{EntityName: filterNotModel, ModelVersion: "1"}
 
 	runFilterNotConformance(t, "Iterate", func(t *testing.T, filter spi.Filter) ([]*spi.Entity, error) {
-		it, err := iterable.Iterate(ctx, mref, filter, spi.IterateOptions{})
+		it, err := store.Iterate(ctx, mref, filter, spi.IterateOptions{})
 		if err != nil {
 			return nil, err
 		}

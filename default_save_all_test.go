@@ -33,12 +33,6 @@ func (m *mockEntityStore) Get(context.Context, string) (*spi.Entity, error) { re
 func (m *mockEntityStore) GetAsAt(_ context.Context, _ string, _ time.Time) (*spi.Entity, error) {
 	return nil, nil
 }
-func (m *mockEntityStore) GetAll(context.Context, spi.ModelRef) ([]*spi.Entity, error) {
-	return nil, nil
-}
-func (m *mockEntityStore) GetAllAsAt(_ context.Context, _ spi.ModelRef, _ time.Time) ([]*spi.Entity, error) {
-	return nil, nil
-}
 func (m *mockEntityStore) Delete(context.Context, string) error               { return nil }
 func (m *mockEntityStore) DeleteAll(context.Context, spi.ModelRef) error      { return nil }
 func (m *mockEntityStore) Exists(context.Context, string) (bool, error)       { return false, nil }
@@ -53,6 +47,12 @@ func (m *mockEntityStore) GetVersionByTransaction(context.Context, string, strin
 	return nil, nil
 }
 func (m *mockEntityStore) GetVersionMetadata(context.Context, string, spi.VersionMetadataOptions) ([]spi.EntityVersionMeta, error) {
+	return nil, nil
+}
+func (m *mockEntityStore) Search(context.Context, spi.Filter, spi.SearchOptions) ([]*spi.Entity, error) {
+	return nil, nil
+}
+func (m *mockEntityStore) Iterate(context.Context, spi.ModelRef, spi.Filter, spi.IterateOptions) (spi.Iterator, error) {
 	return nil, nil
 }
 

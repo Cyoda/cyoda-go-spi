@@ -20,8 +20,6 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "SaveAll/Ordering", testEntitySaveAllOrdering)
 	runSubtest(t, h, tracker, "SaveAll/PartialFailureAtomicity", testEntitySaveAllAtomicity)
 	runSubtest(t, h, tracker, "Get/NotFound", testEntityGetNotFound)
-	runSubtest(t, h, tracker, "GetAll/EmptyModel", testEntityGetAllEmpty)
-	runSubtest(t, h, tracker, "GetAll/Population", testEntityGetAllPopulation)
 	runSubtest(t, h, tracker, "Delete", testEntityDelete)
 	runSubtest(t, h, tracker, "Delete/NotFound", testEntityDeleteNotFound)
 	runSubtest(t, h, tracker, "DeleteAll", testEntityDeleteAll)
@@ -35,8 +33,6 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "GetAsAt/FullMetaPopulated", testEntityGetAsAtMeta)
 	runSubtest(t, h, tracker, "GetAsAt/BeforeAnyWrite", testEntityGetAsAtBefore)
 	runSubtest(t, h, tracker, "GetAsAt/CommittedOnlyInTx", testEntityGetAsAtCommittedOnlyInTx)
-	runSubtest(t, h, tracker, "GetAllAsAt", testEntityGetAllAsAt)
-	runSubtest(t, h, tracker, "GetAllAsAt/CommittedOnlyInTx", testEntityGetAllAsAtCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "GetVersionMetadata/Ordering", testEntityVersionMetadataOrdering)
 	runSubtest(t, h, tracker, "GetVersionMetadata/EmptyWindowIsNotAnError", testEntityGetVersionMetadataEmptyWindowIsNotAnError)
 	runSubtest(t, h, tracker, "GetVersionMetadata/LimitCaps", testEntityGetVersionMetadataLimitCaps)
@@ -59,7 +55,6 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Concurrent/ConflictingUpdate", testEntityConcurrentConflict)
 	runSubtest(t, h, tracker, "Concurrent/DifferentEntities", testEntityConcurrentDifferent)
 	runSubtest(t, h, tracker, "TenantIsolation/Get", testEntityTenantIsolationGet)
-	runSubtest(t, h, tracker, "TenantIsolation/GetAll", testEntityTenantIsolationGetAll)
 	runSubtest(t, h, tracker, "TenantIsolation/Delete", testEntityTenantIsolationDelete)
 	runSubtest(t, h, tracker, "EmptyTenant", testEntityEmptyTenant)
 
@@ -121,32 +116,6 @@ func testEntityGetNotFound(t *testing.T, h Harness) {
 	es, _ := h.Factory.EntityStore(ctx)
 	_, err := es.Get(ctx, newID()) // valid UUID that was never written
 	require.ErrorIs(t, err, spi.ErrNotFound)
-}
-
-func testEntityGetAllEmpty(t *testing.T, h Harness) {
-	ctx := tenantContext(h.NewTenant())
-	es, _ := h.Factory.EntityStore(ctx)
-	got, err := es.GetAll(ctx, spi.ModelRef{EntityName: "m-empty", ModelVersion: "1"})
-	require.NoError(t, err)
-	require.NotNil(t, got, "GetAll on empty model must return non-nil slice")
-	require.Len(t, got, 0)
-}
-
-func testEntityGetAllPopulation(t *testing.T, h Harness) {
-	ctx := tenantContext(h.NewTenant())
-	const n = 5
-	withTx(t, h, ctx, func(txCtx context.Context) {
-		es, _ := h.Factory.EntityStore(txCtx)
-		for i := 0; i < n; i++ {
-			_, err := es.Save(txCtx, newEntity(t, "m-pop", newID(), map[string]any{"i": i}))
-			require.NoError(t, err)
-		}
-	})
-
-	es, _ := h.Factory.EntityStore(ctx)
-	got, err := es.GetAll(ctx, spi.ModelRef{EntityName: "m-pop", ModelVersion: "1"})
-	require.NoError(t, err)
-	require.Len(t, got, n)
 }
 
 func testEntityDelete(t *testing.T, h Harness) {
@@ -504,35 +473,8 @@ func testEntityGetAsAtBefore(t *testing.T, h Harness) {
 	require.ErrorIs(t, err, spi.ErrNotFound)
 }
 
-func testEntityGetAllAsAt(t *testing.T, h Harness) {
-	ctx := tenantContext(h.NewTenant())
-	mref := spi.ModelRef{EntityName: "m-allasat", ModelVersion: "1"}
-	withTx(t, h, ctx, func(txCtx context.Context) {
-		es, _ := h.Factory.EntityStore(txCtx)
-		for i := 0; i < 3; i++ {
-			_, err := es.Save(txCtx, newEntity(t, "m-allasat", newID(), map[string]any{"i": i}))
-			require.NoError(t, err)
-		}
-	})
-	h.AdvanceClock(1 * time.Millisecond)
-	asAt := h.Now().UTC()
-	h.AdvanceClock(1 * time.Millisecond)
-
-	// Fourth entity written AFTER asAt — must not be returned.
-	withTx(t, h, ctx, func(txCtx context.Context) {
-		es, _ := h.Factory.EntityStore(txCtx)
-		_, err := es.Save(txCtx, newEntity(t, "m-allasat", newID(), map[string]any{"i": 99}))
-		require.NoError(t, err)
-	})
-
-	es, _ := h.Factory.EntityStore(ctx)
-	got, err := es.GetAllAsAt(ctx, mref, asAt)
-	require.NoError(t, err)
-	require.Len(t, got, 3, "GetAllAsAt must exclude writes after asAt")
-}
-
 // pitFixture is the shared setup for the point-in-time committed-only family
-// (GetAsAt, GetAllAsAt, GetPage(asAt), Iterate(PointInTime), Search(PointInTime)).
+// (GetAsAt, GetPage(asAt), Iterate(PointInTime), Search(PointInTime)).
 // See newPITCommittedOnlyFixture.
 type pitFixture struct {
 	// ModelRef scopes every collection-shaped read in the family.
@@ -643,17 +585,6 @@ func testEntityGetAsAtCommittedOnlyInTx(t *testing.T, h Harness) {
 	_, err = f.Store.GetAsAt(f.Ctx, f.DirtyID, f.AsAt)
 	require.ErrorIs(t, err, spi.ErrNotFound,
 		"GetAsAt must not surface an entity the ambient transaction created but has not committed")
-}
-
-// testEntityGetAllAsAtCommittedOnlyInTx: the collection form of the same
-// contract.
-func testEntityGetAllAsAtCommittedOnlyInTx(t *testing.T, h Harness) {
-	ctx := tenantContext(h.NewTenant())
-	f := newPITCommittedOnlyFixture(t, h, ctx, "m-pit-getallasat")
-
-	got, err := f.Store.GetAllAsAt(f.Ctx, f.ModelRef, f.AsAt)
-	require.NoError(t, err)
-	f.requireCommittedOnly(t, "GetAllAsAt", got)
 }
 
 // testEntityGetPageAsAtCommittedOnlyInTx holds GetPage's asAt path to the same
@@ -886,7 +817,7 @@ func testEntityGetPageOrderAndBounds(t *testing.T, h Harness) {
 
 // testEntityGetPageAsAtSnapshot verifies GetPage's asAt parameter reads
 // committed-only state as of the given instant, excluding writes after it —
-// mirroring GetAllAsAt's contract — AND that asAt ignores any ambient
+// mirroring GetAsAt's contract — AND that asAt ignores any ambient
 // transaction's own overlay, reading committed-only state even when called
 // through a transaction's own context.
 func testEntityGetPageAsAtSnapshot(t *testing.T, h Harness) {
@@ -953,7 +884,7 @@ func testEntityGetPageAsAtSnapshot(t *testing.T, h Harness) {
 	require.NoError(t, tm.Rollback(txCtx, txID))
 }
 
-// entityIDs extracts Meta.ID from a GetPage/GetAll result in order.
+// entityIDs extracts Meta.ID from a GetPage result in order.
 func entityIDs(es []*spi.Entity) []string {
 	ids := make([]string, len(es))
 	for i, e := range es {
@@ -1488,23 +1419,6 @@ func testEntityTenantIsolationGet(t *testing.T, h Harness) {
 	require.ErrorIs(t, err, spi.ErrNotFound, "cross-tenant Get must return ErrNotFound")
 }
 
-func testEntityTenantIsolationGetAll(t *testing.T, h Harness) {
-	tA, tB := h.NewTenant(), h.NewTenant()
-	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
-	mref := spi.ModelRef{EntityName: "m-tigetall", ModelVersion: "1"}
-
-	withTx(t, h, ctxA, func(txCtx context.Context) {
-		es, _ := h.Factory.EntityStore(txCtx)
-		_, err := es.Save(txCtx, newEntity(t, "m-tigetall", newID(), map[string]any{}))
-		require.NoError(t, err)
-	})
-
-	esB, _ := h.Factory.EntityStore(ctxB)
-	got, err := esB.GetAll(ctxB, mref)
-	require.NoError(t, err)
-	require.Len(t, got, 0, "tenant B must not see tenant A's writes")
-}
-
 func testEntityTenantIsolationDelete(t *testing.T, h Harness) {
 	tA, tB := h.NewTenant(), h.NewTenant()
 	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
@@ -1589,11 +1503,9 @@ func testEntityEmptyTenant(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	mref := spi.ModelRef{EntityName: "m-empty", ModelVersion: "1"}
 	es, _ := h.Factory.EntityStore(ctx)
-	got, err := es.GetAll(ctx, mref)
+	got, err := es.GetPage(ctx, mref, 10, 0, nil)
 	require.NoError(t, err)
-	// Note: testEntityGetAllEmpty asserts non-nil; this subtest tests the
-	// broader EmptyTenant invariant (Count == 0). If the memory plugin
-	// returns nil from GetAll, this still works because len(nil) == 0.
+	require.NotNil(t, got, "GetPage on an empty model must return a non-nil, empty page")
 	require.Len(t, got, 0)
 	n, err := es.Count(ctx, mref)
 	require.NoError(t, err)

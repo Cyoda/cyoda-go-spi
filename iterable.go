@@ -1,12 +1,10 @@
 package spi
 
 import (
-	"context"
 	"time"
 )
 
-// Iterable is an optional capability on a storage backend that yields
-// entities matching a filter, one at a time, with bounded memory.
+// Iterator and IterateOptions support EntityStore.Iterate.
 //
 // Semantics:
 //   - Plugins push pushable parts of the filter into storage (SQL WHERE,
@@ -37,23 +35,9 @@ import (
 //     false.
 //   - Close() is idempotent.
 //
-// Iterable is optional SPI-wide, the same way Searcher is: the engine's
-// streamed async-search and scoped-delete paths use it when the backing
-// store implements it, and a store implementing neither Searcher nor
-// Iterable runs the engine's documented in-process fallback (GetAll plus
-// in-memory filtering).
-//
 // (ModelRef is hoisted as a first-class argument because iteration is
 // always scoped to exactly one model; IterateOptions carries only knobs
 // that vary across calls against the same model.)
-type Iterable interface {
-	Iterate(
-		ctx context.Context,
-		model ModelRef,
-		filter Filter,
-		opts IterateOptions,
-	) (Iterator, error)
-}
 
 // Iterator yields entities one at a time. Standard Go iterator shape
 // modeled after database/sql.Rows.
@@ -79,11 +63,11 @@ type IterateOptions struct {
 	PointInTime *time.Time
 
 	// OrderBy specifies the sort keys applied to yielded entities. Empty
-	// means order is unspecified — this differs from Searcher, where an
-	// empty OrderBy still yields the engine's canonical entity-ID order.
-	// See the Iterable doc comment for which backends must honour a
-	// non-empty OrderBy, and why a non-empty OrderBy with an ambient
-	// transaction is an error.
+	// means order is unspecified — this differs from EntityStore.Search,
+	// where an empty OrderBy still yields the engine's canonical entity-ID
+	// order. See this file's leading Semantics comment for which backends
+	// must honour a non-empty OrderBy, and why a non-empty OrderBy with an
+	// ambient transaction is an error.
 	OrderBy []OrderSpec
 
 	// TrackingRead, when true and a transaction is active, records the

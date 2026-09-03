@@ -83,10 +83,6 @@ type EntityStore interface {
 	// a timestamp is not sufficient, because a transaction-stable clock makes
 	// the transaction's own writes fall inside every window it can compute.
 	GetAsAt(ctx context.Context, entityID string, asAt time.Time) (*Entity, error)
-	GetAll(ctx context.Context, modelRef ModelRef) ([]*Entity, error)
-	// GetAllAsAt is GetAsAt's collection form, with the same committed-only
-	// contract.
-	GetAllAsAt(ctx context.Context, modelRef ModelRef, asAt time.Time) ([]*Entity, error)
 	Delete(ctx context.Context, entityID string) error
 	DeleteAll(ctx context.Context, modelRef ModelRef) error
 	Exists(ctx context.Context, entityID string) (bool, error)
@@ -155,6 +151,32 @@ type EntityStore interface {
 	// Deleted is true only on the DELETED tombstone row, and Version is
 	// populated on every returned row, including the tombstone.
 	GetVersionMetadata(ctx context.Context, entityID string, opts VersionMetadataOptions) ([]EntityVersionMeta, error)
+
+	// Search is the bounded-or-fail predicate read: SearchOptions.Limit >= 1
+	// is REQUIRED and caps the matched set; more matches than Limit MUST be
+	// ErrSearchResultLimitExceeded, never a truncated prefix; exactly at the
+	// limit succeeds; Limit <= 0 is a contract violation and MUST error.
+	// Search honours an active transaction (read-your-own-writes) unless
+	// PointInTime is set, in which case it is committed-only. Returned
+	// entities enter the read-set only when SearchOptions.TrackingRead is
+	// set. See SearchOptions.
+	Search(ctx context.Context, filter Filter, opts SearchOptions) ([]*Entity, error)
+
+	// Iterate is the streamed predicate read: entities matching filter, one
+	// at a time, in bounded memory. A zero-value Filter yields every entity
+	// of the model. Pushable parts of the filter go to storage; the residual
+	// is applied inside Next(). With an ambient transaction the merged
+	// (committed ∪ write-set) view is snapshotted at the call; mutating the
+	// transaction while an iterator is open is forbidden. Implementations
+	// MUST NOT hold a write-blocking lock for the iterator's lifetime, MUST
+	// observe ctx cancellation, surface the first error stickily via Err(),
+	// and make Close() idempotent. See IterateOptions and Iterator.
+	//
+	// Every engine path that reads more than one entity — direct search on
+	// a store, async search, delete-all, conditional delete, grouped stats —
+	// consumes Search or Iterate. There is no whole-model read on this
+	// interface and no in-process fallback in the engine.
+	Iterate(ctx context.Context, model ModelRef, filter Filter, opts IterateOptions) (Iterator, error)
 }
 
 // SchemaDelta is an opaque, plugin-agnostic serialization of an

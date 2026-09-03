@@ -23,7 +23,7 @@ var patternSeed = []string{
 	"abc",
 }
 
-// testPatternLikeGrammar pins the LIKE grammar through the Searcher surface.
+// testPatternLikeGrammar pins the LIKE grammar through the Search surface.
 // LIKE is a glob: '%' is any run INCLUDING newlines, '_' is exactly one rune
 // INCLUDING a newline, and '\X' is the literal X for any X. It is NOT a regex,
 // and a backend translating it to one will fail these rows.
@@ -80,7 +80,7 @@ func testPatternMalformedLike(t *testing.T, h Harness) {
 	}
 }
 
-func seedPatternEntities(t *testing.T, h Harness, ctx context.Context) spi.Searcher {
+func seedPatternEntities(t *testing.T, h Harness, ctx context.Context) spi.EntityStore {
 	t.Helper()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -92,10 +92,10 @@ func seedPatternEntities(t *testing.T, h Harness, ctx context.Context) spi.Searc
 	})
 	es, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
-	return es.(spi.Searcher)
+	return es
 }
 
-func searchPatternNames(t *testing.T, ctx context.Context, s spi.Searcher, op spi.FilterOp, operand string) []string {
+func searchPatternNames(t *testing.T, ctx context.Context, s spi.EntityStore, op spi.FilterOp, operand string) []string {
 	t.Helper()
 	res, err := s.Search(ctx, spi.Filter{
 		Op:       op,

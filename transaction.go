@@ -30,7 +30,11 @@ type TransactionManager interface {
 
 	// Join returns a context carrying the TransactionState for an existing
 	// active transaction, allowing multiple goroutines to participate in
-	// the same tx.
+	// the same tx — but only one operation at a time per transaction:
+	// application-side serialisation is required, per TransactionState's
+	// concurrency contract below (cyoda-go serialises through its
+	// per-transaction gate), so the two docs do not read as a
+	// contradiction.
 	//
 	// Two distinct contracts apply to a joined tx:
 	//

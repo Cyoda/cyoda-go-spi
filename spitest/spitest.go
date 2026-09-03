@@ -156,6 +156,7 @@ func StoreFactoryConformance(t *testing.T, h Harness) {
 	t.Run("AsyncSearch", func(t *testing.T) { runAsyncSearchSuite(t, h, tracker) })
 	t.Run("Searcher", func(t *testing.T) { runSearcherSuite(t, h, tracker) })
 	t.Run("Iterable", func(t *testing.T) { runIterableSuite(t, h, tracker) })
+	t.Run("GroupedAggregator", func(t *testing.T) { runGroupedAggregatorSuite(t, h, tracker) })
 }
 
 func defaultNewTenant() spi.TenantID {

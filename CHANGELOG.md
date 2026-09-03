@@ -24,14 +24,35 @@ MAINTAINING.md.
   would keep `store.(spi.Iterable)` compiling and hide exactly the dead
   branches the change removes.
 
-  Two doc-only contract clarifications ship with it. `CompareAndSave`'s
-  godoc now states the literal expected-ID rule: the comparison is against
-  the caller's own transactional view, with no synonyms — a missing or
-  deleted entity has the empty transaction ID, so `expectedTxID == ""`
-  means "expect no entity". `TransactionManager.Join`'s godoc now states
-  that concurrent goroutines participate in the same transaction only
-  through application-side serialisation, one operation at a time per
-  transaction.
+  Doc-only contract clarifications ship with it. `CompareAndSave`'s godoc
+  now states the literal expected-ID rule as the single rule: the
+  comparison is a literal string comparison against the entity's current
+  `EntityMeta.TransactionID` as the caller's own transaction sees it, with
+  no synonyms and no existence test — a missing or deleted entity carries
+  the empty transaction ID, which is the sense in which `expectedTxID ==
+  ""` means "expect no entity", while a version written outside any
+  transaction also carries it and so is matched by `""` too. The opposite
+  convention `GetVersionByTransaction` gives the same empty sentinel is
+  now cross-referenced from both. `EntityStore.Search`'s godoc states the
+  operational definition of its in-transaction result: identical to a
+  committed-plus-buffer merge for the same transaction state, the merge
+  `MergeBounded` computes. `EntityStore.Iterate` absorbs the full
+  iteration semantics that previously sat as a detached comment in
+  `iterable.go` — including the rules `spitest` enforces (a non-empty
+  `OrderBy` with an ambient transaction MUST error; the engine-executed vs
+  self-executing `OrderBy` split; no retry on transient driver errors),
+  which `go doc` did not publish once the `Iterable` interface they were
+  attached to was gone. `TransactionManager.Join`'s godoc now states that
+  concurrent goroutines participate in the same transaction only through
+  application-side serialisation, one operation at a time per transaction.
+
+  **Two obligations `spitest` already enforces are now documented on the
+  interface.** `GetPage` MUST return a non-nil, empty slice for a page
+  with no rows — an empty model or an offset past the end — so the
+  idiomatic `return nil, nil` is a contract violation. `CountByState` MUST
+  return a non-nil map for every zero-count result, the in-transaction
+  ones (after a `DeleteAll`, say) included. Neither was stated anywhere
+  before; a backend returning nil was red with no rule to point at.
 
   **Migration:** delete `GetAll`/`GetAllAsAt` from your store (read a model
   with `GetPage` or `Iterate` with a zero-value filter); move your
@@ -53,10 +74,22 @@ MAINTAINING.md.
   purge committed-tx state), `CompareAndSave/ExpectedIDIsLiteral`
   (the expected transaction ID is compared literally; a missing or deleted
   entity has the empty ID, so `""` means "expect no entity"),
-  `Entity/Count/InTxBufferShapes`, and the gated
+  `Entity/Count/InTxBufferShapes`, three cross-tenant cases for the
+  multi-entity reads this change makes mandatory —
+  `TenantIsolation/Search`, `TenantIsolation/Count` (both `Count` and
+  `CountByState`) and `GroupedAggregator/TenantIsolation`, each carrying a
+  positive control so an empty cross-tenant answer is evidence of scoping
+  rather than of a seed that never landed — and the gated
   `GroupedAggregator/InTxRecordsNothing` suite (in-transaction grouped
   aggregation records nothing into the read-set). A `Skip` map keyed on a
   removed name fails the run.
+
+  The `Searcher` and `Iterable` spitest GROUP names are deliberately
+  unchanged even though the interfaces they were named for are gone:
+  renaming them would invalidate every consumer's `Harness.Skip` keys for
+  no contract benefit. `GroupedAggregator` is the remaining optional
+  interface, and like every type-asserted group it must NOT be given a
+  `Harness.Skip` entry — an unmatched `Skip` key fails the run.
 
 - **A schema node holds the set of kinds it was observed as.** `ModelNode.Kind()`,
   `.Types()`, `.Element()` and `.Children()` are replaced by `.Scalar()`,

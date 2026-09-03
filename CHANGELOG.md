@@ -29,11 +29,9 @@ MAINTAINING.md.
   the caller's own transactional view, with no synonyms — a missing or
   deleted entity has the empty transaction ID, so `expectedTxID == ""`
   means "expect no entity". `TransactionManager.Join`'s godoc now states
-  that concurrent goroutines join the same transaction only through
-  application-side serialisation: the plugin's own locking admits multiple
-  concurrent readers but does not protect two concurrent writers to the
-  same transaction's buffers, so the application must run one write at a
-  time per transaction.
+  that concurrent goroutines participate in the same transaction only
+  through application-side serialisation, one operation at a time per
+  transaction.
 
   **Migration:** delete `GetAll`/`GetAllAsAt` from your store (read a model
   with `GetPage` or `Iterate` with a zero-value filter); move your

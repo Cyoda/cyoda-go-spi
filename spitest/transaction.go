@@ -327,12 +327,25 @@ func testTxStateOpAfterRollback(t *testing.T, h Harness) {
 		"op after Rollback must wrap ErrTxTerminated; got: %v", err)
 }
 
+// requireTxAlreadyCommittedOrPurged asserts err wraps ErrTxAlreadyCommitted
+// or ErrTxNotFound, mirroring TxStateErrors/JoinAfterCommit's accept-either:
+// a backend that purges committed-transaction state from its manager
+// surfaces a registry miss (ErrTxNotFound) from store operations rather
+// than the specific ErrTxAlreadyCommitted.
+func requireTxAlreadyCommittedOrPurged(t *testing.T, err error, op string) {
+	t.Helper()
+	require.True(t,
+		errors.Is(err, spi.ErrTxAlreadyCommitted) || errors.Is(err, spi.ErrTxNotFound),
+		"%s after Commit must wrap ErrTxAlreadyCommitted or ErrTxNotFound (backends that purge committed-tx state collapse these); got: %v", op, err)
+}
+
 // testTxStateOpAfterCommit verifies that every data op against a committed
 // transaction's own context still fails — Save, CompareAndSave, Delete,
 // DeleteAll, and every GetAll-free read (GetPage, Iterate, Count,
-// CountByState) — and, unlike OpAfterRollback (which only pins the
-// umbrella ErrTxTerminated), that each one specifically wraps
-// ErrTxAlreadyCommitted.
+// CountByState) — with ErrTxAlreadyCommitted, or ErrTxNotFound on backends
+// that purge committed-tx state (see requireTxAlreadyCommittedOrPurged).
+// Unlike OpAfterRollback (which only pins the umbrella ErrTxTerminated),
+// this pins the specific already-committed/purged pair.
 func testTxStateOpAfterCommit(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	mref := spi.ModelRef{EntityName: "m-op-after-commit", ModelVersion: "1"}
@@ -357,19 +370,19 @@ func testTxStateOpAfterCommit(t *testing.T, h Harness) {
 	require.NoError(t, err)
 
 	_, err = es.Save(txCtx, newEntity(t, mref.EntityName, newID(), map[string]any{"k": "v"}))
-	require.ErrorIs(t, err, spi.ErrTxAlreadyCommitted, "Save after Commit must fail with ErrTxAlreadyCommitted")
+	requireTxAlreadyCommittedOrPurged(t, err, "Save")
 
 	_, err = es.CompareAndSave(txCtx, newEntity(t, mref.EntityName, id, map[string]any{"k": "v2"}), committed.Meta.TransactionID)
-	require.ErrorIs(t, err, spi.ErrTxAlreadyCommitted, "CompareAndSave after Commit must fail with ErrTxAlreadyCommitted")
+	requireTxAlreadyCommittedOrPurged(t, err, "CompareAndSave")
 
 	err = es.Delete(txCtx, id)
-	require.ErrorIs(t, err, spi.ErrTxAlreadyCommitted, "Delete after Commit must fail with ErrTxAlreadyCommitted")
+	requireTxAlreadyCommittedOrPurged(t, err, "Delete")
 
 	err = es.DeleteAll(txCtx, mref)
-	require.ErrorIs(t, err, spi.ErrTxAlreadyCommitted, "DeleteAll after Commit must fail with ErrTxAlreadyCommitted")
+	requireTxAlreadyCommittedOrPurged(t, err, "DeleteAll")
 
 	_, err = es.GetPage(txCtx, mref, 10, 0, nil)
-	require.ErrorIs(t, err, spi.ErrTxAlreadyCommitted, "GetPage after Commit must fail with ErrTxAlreadyCommitted")
+	requireTxAlreadyCommittedOrPurged(t, err, "GetPage")
 
 	// Iterate may surface the error from Iterate() itself or from the
 	// returned iterator's Next()/Err(); accept either, but require one of
@@ -381,14 +394,13 @@ func testTxStateOpAfterCommit(t *testing.T, h Harness) {
 		iterErr = it.Err()
 		_ = it.Close()
 	}
-	require.ErrorIs(t, iterErr, spi.ErrTxAlreadyCommitted,
-		"Iterate after Commit must fail with ErrTxAlreadyCommitted, whether surfaced from Iterate itself or from the iterator's Next/Err")
+	requireTxAlreadyCommittedOrPurged(t, iterErr, "Iterate")
 
 	_, err = es.Count(txCtx, mref)
-	require.ErrorIs(t, err, spi.ErrTxAlreadyCommitted, "Count after Commit must fail with ErrTxAlreadyCommitted")
+	requireTxAlreadyCommittedOrPurged(t, err, "Count")
 
 	_, err = es.CountByState(txCtx, mref, nil)
-	require.ErrorIs(t, err, spi.ErrTxAlreadyCommitted, "CountByState after Commit must fail with ErrTxAlreadyCommitted")
+	requireTxAlreadyCommittedOrPurged(t, err, "CountByState")
 }
 
 // testTxStateTenantMismatchOnJoin verifies that tenant B cannot Join a
@@ -705,8 +717,13 @@ func testTxDeleteThenCompareAndSave(t *testing.T, h Harness) {
 	require.ErrorIs(t, err, spi.ErrNotFound, "the delete must stand after commit")
 }
 
-// Save after a same-transaction Delete is last-write-wins: present after
-// commit with the new payload, and no DELETED version is written.
+// Save after a same-transaction Delete is last-write-wins on the COMMITTED
+// OUTCOME: present after commit with the new payload. Version history is
+// deliberately not pinned here — memory and sqlite buffer the delete and
+// write one version row at commit, while postgres applies the delete
+// in-transaction at once, so its history shows a DELETED row followed by
+// the re-create's row. Both are correct; see docs/CONSISTENCY.md §6
+// ("Accepted as a detail, not a contract").
 func testTxDeleteThenSave(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	mref := spi.ModelRef{EntityName: "m-tx-dsave", ModelVersion: "1"}
@@ -730,12 +747,6 @@ func testTxDeleteThenSave(t *testing.T, h Harness) {
 	got, err := es.Get(ctx, id)
 	require.NoError(t, err)
 	require.JSONEq(t, `{"n":2}`, string(got.Data))
-	versions, err := es.GetVersionMetadata(ctx, id, spi.VersionMetadataOptions{})
-	require.NoError(t, err)
-	require.NotEmpty(t, versions, "the entity must have version history after Delete-then-Save")
-	for _, v := range versions {
-		require.NotEqual(t, "DELETED", v.ChangeType, "no DELETED version may be written for an unstaged delete")
-	}
 }
 
 // A write compares against the transaction's own view: a same-transaction

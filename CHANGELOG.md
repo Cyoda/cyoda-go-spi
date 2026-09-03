@@ -45,10 +45,12 @@ MAINTAINING.md.
   `TenantIsolation/GetPage`, `Transaction/DeleteThenCompareAndSave` (a
   compare-and-save after a same-transaction delete MUST conflict),
   `Transaction/DeleteThenSave` (a save after a same-transaction delete
-  un-stages the delete: no DELETED version is written),
+  wins: the entity is present after commit with the new payload; version
+  history is backend-specific and not pinned),
   `Transaction/SaveThenCompareAndSave`, `TxStateErrors/OpAfterCommit`
   (every operation on a committed transaction's context, reads included,
-  fails with `ErrTxAlreadyCommitted`), `CompareAndSave/ExpectedIDIsLiteral`
+  fails with `ErrTxAlreadyCommitted`, or `ErrTxNotFound` on backends that
+  purge committed-tx state), `CompareAndSave/ExpectedIDIsLiteral`
   (the expected transaction ID is compared literally; a missing or deleted
   entity has the empty ID, so `""` means "expect no entity"),
   `Entity/Count/InTxBufferShapes`, and the gated

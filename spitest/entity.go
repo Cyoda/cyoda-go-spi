@@ -1368,10 +1368,32 @@ func testEntityCompareAndSaveConflict(t *testing.T, h Harness) {
 // ID, so only expectedTxID == "" matches it. Run both outside a transaction
 // and inside one, since the comparison is against the caller's own
 // transactional view either way.
+//
+// A version written outside any transaction may itself carry the empty
+// transaction ID on backends that stamp none for non-transactional writes
+// (see EntityVersionMeta.TransactionID's doc comment) — so the trio's
+// "existing entity" (used to check that "" no longer matches once an
+// entity exists) is seeded through a committed transaction, guaranteeing
+// a real, non-empty transaction ID for "" to conflict against.
 func testEntityCompareAndSaveExpectedIDIsLiteral(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 
-	assertLiteralTrio := func(opCtx spiCtx, es spi.EntityStore, label string) {
+	// seedExistingTransactional creates an entity via its own committed
+	// transaction — separate from, and completed before, any transaction
+	// assertLiteralTrio itself runs under — so it carries a real
+	// transaction ID regardless of whether a backend stamps one on
+	// non-transactional writes.
+	seedExistingTransactional := func() string {
+		id := newID()
+		withTx(t, h, ctx, func(txCtx spiCtx) {
+			es, _ := h.Factory.EntityStore(txCtx)
+			_, err := es.Save(txCtx, newEntity(t, "m-cas-lit", id, map[string]any{"v": 3}))
+			require.NoError(t, err)
+		})
+		return id
+	}
+
+	assertLiteralTrio := func(opCtx spiCtx, es spi.EntityStore, existingID, label string) {
 		// A non-empty expectedTxID against a missing entity conflicts —
 		// it does not create, even though there is nothing to compare
 		// against but "no entity".
@@ -1392,23 +1414,28 @@ func testEntityCompareAndSaveExpectedIDIsLiteral(t *testing.T, h Harness) {
 		require.NoError(t, err)
 		require.JSONEq(t, `{"v":2}`, string(got.Data))
 
-		// The same empty expectedTxID against the entity that now exists
-		// conflicts: "expect no entity" no longer matches the current state.
-		_, err = es.CompareAndSave(opCtx, newEntity(t, "m-cas-lit", createID, map[string]any{"v": 3}), "")
+		// The empty expectedTxID against an entity that already exists
+		// conflicts: "expect no entity" no longer matches the current
+		// state. existingID was seeded through a committed transaction, so
+		// it carries a real, non-empty transaction ID for "" to conflict
+		// against on every backend.
+		_, err = es.CompareAndSave(opCtx, newEntity(t, "m-cas-lit", existingID, map[string]any{"v": 4}), "")
 		require.ErrorIs(t, err, spi.ErrConflict,
 			"%s: empty expectedTxID against an existing entity must conflict", label)
 	}
 
+	outsideExistingID := seedExistingTransactional()
 	es, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
-	assertLiteralTrio(ctx, es, "outside tx")
+	assertLiteralTrio(ctx, es, outsideExistingID, "outside tx")
 
+	insideExistingID := seedExistingTransactional()
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 	txID, txCtx := beginGuarded(t, tm, ctx)
 	esTx, err := h.Factory.EntityStore(txCtx)
 	require.NoError(t, err)
-	assertLiteralTrio(txCtx, esTx, "inside tx")
+	assertLiteralTrio(txCtx, esTx, insideExistingID, "inside tx")
 	require.NoError(t, tm.Commit(txCtx, txID))
 }
 

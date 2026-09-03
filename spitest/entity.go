@@ -362,8 +362,18 @@ func testEntityCountInTxBufferShapes(t *testing.T, h Harness) {
 		es, _ := h.Factory.EntityStore(txCtx)
 		for i := range ids {
 			ids[i] = newID()
-			e := newEntity(t, mref.EntityName, ids[i], map[string]any{"i": i})
-			e.Meta.State = []string{"open", "closed"}[i%2]
+			state := []string{"open", "closed"}[i%2]
+			// The payload embeds _meta.state alongside Meta.State for the same
+			// reason testEntityCountByState does — see its comment: a backend
+			// whose lifecycle indexer derives the PRIOR state from the prior
+			// payload sees oldState="" without it, never emits the OUT marker,
+			// and the "update with state change" step below would not exercise
+			// the transition its expectation depends on.
+			e := newEntity(t, mref.EntityName, ids[i], map[string]any{
+				"i":     i,
+				"_meta": map[string]any{"state": state},
+			})
+			e.Meta.State = state
 			_, err := es.Save(txCtx, e)
 			require.NoError(t, err)
 		}
@@ -374,7 +384,11 @@ func testEntityCountInTxBufferShapes(t *testing.T, h Harness) {
 	_, txCtx := beginGuarded(t, tm, ctx)
 	es, _ := h.Factory.EntityStore(txCtx)
 	save := func(id, state string) {
-		e := newEntity(t, mref.EntityName, id, map[string]any{})
+		// _meta.state as above: the re-save of a committed entity below is a
+		// prior-state-derived transition on indexer-backed backends.
+		e := newEntity(t, mref.EntityName, id, map[string]any{
+			"_meta": map[string]any{"state": state},
+		})
 		e.Meta.State = state
 		_, err := es.Save(txCtx, e)
 		require.NoError(t, err)
@@ -1597,6 +1611,7 @@ func testEntityTenantIsolationGetPage(t *testing.T, h Harness) {
 
 	it, err := esB.Iterate(ctxB, mref, spi.Filter{}, spi.IterateOptions{})
 	require.NoError(t, err)
+	require.NotNil(t, it, "Iterate returned a nil Iterator with a nil error")
 	rows, err := drainIterator(t, it)
 	require.NoError(t, err)
 	require.Len(t, rows, 0, "tenant B must not iterate tenant A's writes")

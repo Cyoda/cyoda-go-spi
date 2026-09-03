@@ -62,6 +62,7 @@ func testIterableFilterPathGrammar(t *testing.T, h Harness) {
 		if err != nil {
 			return err
 		}
+		require.NotNil(t, it, "Iterate returned a nil Iterator with a nil error")
 		n := 0
 		for it.Next() {
 			n++
@@ -80,6 +81,9 @@ func testIterableFilterPathGrammar(t *testing.T, h Harness) {
 // result set, not the fine-grained Next()/Err()/Close() sequencing.
 func drainIterator(t *testing.T, it spi.Iterator) ([]*spi.Entity, error) {
 	t.Helper()
+	// A backend that returns (nil, nil) from Iterate would panic on the first
+	// Next() below; fail it as the contract violation it is instead.
+	require.NotNil(t, it, "Iterate returned a nil Iterator with a nil error")
 	var out []*spi.Entity
 	for it.Next() {
 		out = append(out, it.Entity())
@@ -233,6 +237,7 @@ func testIterableCtxCancelObserved(t *testing.T, h Harness) {
 	require.NoError(t, err)
 	it, err := store.Iterate(cancelCtx, iterableModelRef, spi.Filter{}, spi.IterateOptions{})
 	require.NoError(t, err)
+	require.NotNil(t, it, "Iterate returned a nil Iterator with a nil error")
 	defer func() { _ = it.Close() }()
 
 	require.True(t, it.Next(), "at least one entity must be available before cancellation")
@@ -259,6 +264,7 @@ func testIterableErrSticky(t *testing.T, h Harness) {
 	require.NoError(t, err)
 	it, err := store.Iterate(cancelCtx, iterableModelRef, spi.Filter{}, spi.IterateOptions{})
 	require.NoError(t, err)
+	require.NotNil(t, it, "Iterate returned a nil Iterator with a nil error")
 	defer func() { _ = it.Close() }()
 
 	require.True(t, it.Next())
@@ -286,6 +292,7 @@ func testIterableCloseIdempotent(t *testing.T, h Harness) {
 	require.NoError(t, err)
 	it, err := store.Iterate(ctx, iterableModelRef, spi.Filter{}, spi.IterateOptions{})
 	require.NoError(t, err)
+	require.NotNil(t, it, "Iterate returned a nil Iterator with a nil error")
 
 	require.True(t, it.Next(), "at least one entity must be available mid-iteration")
 

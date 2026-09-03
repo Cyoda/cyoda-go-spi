@@ -341,9 +341,9 @@ func requireTxAlreadyCommittedOrPurged(t *testing.T, err error, op string) {
 
 // testTxStateOpAfterCommit verifies that every data op against a committed
 // transaction's own context still fails — Save, CompareAndSave, Delete,
-// DeleteAll, and every GetAll-free read (GetPage, Iterate, Count,
-// CountByState) — with ErrTxAlreadyCommitted, or ErrTxNotFound on backends
-// that purge committed-tx state (see requireTxAlreadyCommittedOrPurged).
+// DeleteAll, and every read (GetPage, Iterate, Count, CountByState) — with
+// ErrTxAlreadyCommitted, or ErrTxNotFound on backends that purge
+// committed-tx state (see requireTxAlreadyCommittedOrPurged).
 // Unlike OpAfterRollback (which only pins the umbrella ErrTxTerminated),
 // this pins the specific already-committed/purged pair.
 func testTxStateOpAfterCommit(t *testing.T, h Harness) {
@@ -389,6 +389,7 @@ func testTxStateOpAfterCommit(t *testing.T, h Harness) {
 	// them to carry it.
 	it, iterErr := es.Iterate(txCtx, mref, spi.Filter{}, spi.IterateOptions{})
 	if iterErr == nil {
+		require.NotNil(t, it, "Iterate returned a nil Iterator with a nil error")
 		for it.Next() {
 		}
 		iterErr = it.Err()
@@ -722,8 +723,14 @@ func testTxDeleteThenCompareAndSave(t *testing.T, h Harness) {
 // deliberately not pinned here — memory and sqlite buffer the delete and
 // write one version row at commit, while postgres applies the delete
 // in-transaction at once, so its history shows a DELETED row followed by
-// the re-create's row. Both are correct; see docs/CONSISTENCY.md §6
-// ("Accepted as a detail, not a contract").
+// the re-create's row. Both are correct; see cyoda-go's docs/CONSISTENCY.md
+// §6 ("Accepted as a detail, not a contract").
+//
+// This case pins the committed OUTCOME only. The buffer invariant that a
+// transaction's Deletes and DeleteAttribution maps always cover the same key
+// set is a plugin-internal property, pinned by each plugin's own unit tests
+// rather than at this seam — do not read a green cross-backend run here as
+// coverage of it.
 func testTxDeleteThenSave(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	mref := spi.ModelRef{EntityName: "m-tx-dsave", ModelVersion: "1"}

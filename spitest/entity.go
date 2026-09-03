@@ -59,6 +59,8 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "TenantIsolation/Get", testEntityTenantIsolationGet)
 	runSubtest(t, h, tracker, "TenantIsolation/Delete", testEntityTenantIsolationDelete)
 	runSubtest(t, h, tracker, "TenantIsolation/GetPage", testEntityTenantIsolationGetPage)
+	runSubtest(t, h, tracker, "TenantIsolation/Search", testEntityTenantIsolationSearch)
+	runSubtest(t, h, tracker, "TenantIsolation/Count", testEntityTenantIsolationCount)
 	runSubtest(t, h, tracker, "EmptyTenant", testEntityEmptyTenant)
 
 	// Attribution group (follow-on-action attribution design)
@@ -1598,6 +1600,90 @@ func testEntityTenantIsolationGetPage(t *testing.T, h Harness) {
 	rows, err := drainIterator(t, it)
 	require.NoError(t, err)
 	require.Len(t, rows, 0, "tenant B must not iterate tenant A's writes")
+}
+
+// testEntityTenantIsolationSearch: tenant B's Search over a predicate that
+// matches tenant A's entity must return nothing.
+//
+// Search is a required EntityStore method, so every backend pushes this
+// predicate down; a pushdown whose WHERE clause forgets the tenant column
+// leaks A's rows to B on the read path the engine uses for every direct
+// search. The positive control — the identical Search from tenant A, which
+// MUST find the entity — is what makes the empty result from B evidence of
+// scoping rather than evidence that the seed or the predicate silently did
+// nothing.
+func testEntityTenantIsolationSearch(t *testing.T, h Harness) {
+	tA, tB := h.NewTenant(), h.NewTenant()
+	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
+	const model = "m-tisearch"
+	filter := spi.Filter{
+		Op:       spi.FilterEq,
+		Source:   spi.SourceData,
+		Path:     "status",
+		Value:    searcherMatchValue,
+		Declared: []spi.DataType{spi.String},
+	}
+	opts := spi.SearchOptions{ModelName: model, ModelVersion: "1", Limit: 100}
+
+	withTx(t, h, ctxA, func(txCtx context.Context) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		_, err := es.Save(txCtx, newEntity(t, model, newID(),
+			map[string]any{"status": searcherMatchValue}))
+		require.NoError(t, err)
+	})
+
+	esA, _ := h.Factory.EntityStore(ctxA)
+	ownerGot, err := esA.Search(ctxA, filter, opts)
+	require.NoError(t, err)
+	require.Len(t, ownerGot, 1,
+		"control: the owning tenant's Search must find the seeded entity, so tenant B's empty result below is evidence of tenant scoping")
+
+	esB, _ := h.Factory.EntityStore(ctxB)
+	got, err := esB.Search(ctxB, filter, opts)
+	require.NoError(t, err)
+	require.Len(t, got, 0, "cross-tenant Search must not return tenant A's entities")
+}
+
+// testEntityTenantIsolationCount: tenant B's Count and CountByState over
+// tenant A's model must report zero and an empty map.
+//
+// The counting reads are aggregate pushdowns of their own — a COUNT(*) or a
+// GROUP BY that omits the tenant column leaks A's population to B as a
+// number even though no row crosses the boundary. Tenant A's own Count and
+// CountByState are asserted first as the positive control.
+func testEntityTenantIsolationCount(t *testing.T, h Harness) {
+	tA, tB := h.NewTenant(), h.NewTenant()
+	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
+	mref := spi.ModelRef{EntityName: "m-ticount", ModelVersion: "1"}
+
+	withTx(t, h, ctxA, func(txCtx context.Context) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		for _, state := range []string{"open", "closed"} {
+			e := newEntity(t, mref.EntityName, newID(), map[string]any{})
+			e.Meta.State = state
+			_, err := es.Save(txCtx, e)
+			require.NoError(t, err)
+		}
+	})
+
+	esA, _ := h.Factory.EntityStore(ctxA)
+	ownerN, err := esA.Count(ctxA, mref)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), ownerN,
+		"control: the owning tenant must count its own entities, so tenant B's zero below is evidence of tenant scoping")
+	ownerByState, err := esA.CountByState(ctxA, mref, nil)
+	require.NoError(t, err)
+	require.Equal(t, map[string]int64{"open": 1, "closed": 1}, ownerByState,
+		"control: the owning tenant must see its own per-state counts")
+
+	esB, _ := h.Factory.EntityStore(ctxB)
+	n, err := esB.Count(ctxB, mref)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), n, "cross-tenant Count must not count tenant A's entities")
+	byState, err := esB.CountByState(ctxB, mref, nil)
+	require.NoError(t, err)
+	require.Equal(t, map[string]int64{}, byState,
+		"cross-tenant CountByState must return an empty (non-nil) map, not tenant A's per-state counts")
 }
 
 // testEntityExecutorRoundTrip verifies that the ChangeUser/ChangeUserKind/

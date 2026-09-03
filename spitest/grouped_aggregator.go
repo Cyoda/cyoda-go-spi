@@ -19,6 +19,60 @@ func runGroupedAggregatorSuite(t *testing.T, h Harness, tracker *skipTracker) {
 		t.Skip("EntityStore does not implement spi.GroupedAggregator (optional interface)")
 	}
 	runSubtest(t, h, tracker, "InTxRecordsNothing", testGroupedAggregatorInTxRecordsNothing)
+	runSubtest(t, h, tracker, "TenantIsolation", testGroupedAggregatorTenantIsolation)
+}
+
+// testGroupedAggregatorTenantIsolation: tenant B's grouped aggregation over
+// tenant A's model must aggregate none of tenant A's entities.
+//
+// A grouped aggregation is a pushdown that answers with counts rather than
+// rows, so a GROUP BY whose WHERE clause omits the tenant column leaks A's
+// population to B without any entity crossing the boundary — the one
+// tenant-scoping bug the row-returning cases cannot see. Tenant A's own
+// aggregation is asserted first as the positive control: without it, B's
+// empty result would be equally consistent with a seed that never landed.
+func testGroupedAggregatorTenantIsolation(t *testing.T, h Harness) {
+	tA, tB := h.NewTenant(), h.NewTenant()
+	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
+	mref := spi.ModelRef{EntityName: "m-ga-ti", ModelVersion: "1"}
+
+	withTx(t, h, ctxA, func(txCtx spiCtx) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		for _, state := range []string{"open", "open", "closed"} {
+			e := newEntity(t, mref.EntityName, newID(), map[string]any{})
+			e.Meta.State = state
+			_, err := es.Save(txCtx, e)
+			require.NoError(t, err)
+		}
+	})
+
+	aggregate := func(ctx spiCtx) []spi.GroupedAggregateBucket {
+		t.Helper()
+		es, err := h.Factory.EntityStore(ctx)
+		require.NoError(t, err)
+		agg, ok := es.(spi.GroupedAggregator)
+		require.True(t, ok, "EntityStore must implement spi.GroupedAggregator for every tenant when it implements it for one")
+		got, err := agg.GroupedAggregate(ctx, mref,
+			[]spi.GroupExpr{{Kind: spi.GroupExprState}}, spi.Filter{},
+			spi.GroupedAggregationsOptions{MaxBuckets: 10})
+		require.NoError(t, err)
+		return got
+	}
+
+	ownerTotal := int64(0)
+	for _, b := range aggregate(ctxA) {
+		ownerTotal += b.Count
+	}
+	require.Equal(t, int64(3), ownerTotal,
+		"control: the owning tenant must aggregate its own 3 entities, so tenant B's zero below is evidence of tenant scoping")
+
+	leaked := int64(0)
+	for _, b := range aggregate(ctxB) {
+		leaked += b.Count
+	}
+	require.Equal(t, int64(0), leaked,
+		"cross-tenant GroupedAggregate must aggregate none of tenant A's entities")
 }
 
 // testGroupedAggregatorInTxRecordsNothing has two arms:

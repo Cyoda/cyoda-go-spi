@@ -56,6 +56,7 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Concurrent/DifferentEntities", testEntityConcurrentDifferent)
 	runSubtest(t, h, tracker, "TenantIsolation/Get", testEntityTenantIsolationGet)
 	runSubtest(t, h, tracker, "TenantIsolation/Delete", testEntityTenantIsolationDelete)
+	runSubtest(t, h, tracker, "TenantIsolation/GetPage", testEntityTenantIsolationGetPage)
 	runSubtest(t, h, tracker, "EmptyTenant", testEntityEmptyTenant)
 
 	// Attribution group (follow-on-action attribution design)
@@ -1441,6 +1442,29 @@ func testEntityTenantIsolationDelete(t *testing.T, h Harness) {
 	esB, _ := h.Factory.EntityStore(txCtxB)
 	err = esB.Delete(txCtxB, id)
 	require.ErrorIs(t, err, spi.ErrNotFound, "cross-tenant Delete must return ErrNotFound")
+}
+
+func testEntityTenantIsolationGetPage(t *testing.T, h Harness) {
+	tA, tB := h.NewTenant(), h.NewTenant()
+	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
+	mref := spi.ModelRef{EntityName: "m-tigetpage", ModelVersion: "1"}
+
+	withTx(t, h, ctxA, func(txCtx context.Context) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		_, err := es.Save(txCtx, newEntity(t, "m-tigetpage", newID(), map[string]any{}))
+		require.NoError(t, err)
+	})
+
+	esB, _ := h.Factory.EntityStore(ctxB)
+	got, err := esB.GetPage(ctxB, mref, 10, 0, nil)
+	require.NoError(t, err)
+	require.Len(t, got, 0, "tenant B must not see tenant A's writes")
+
+	it, err := esB.Iterate(ctxB, mref, spi.Filter{}, spi.IterateOptions{})
+	require.NoError(t, err)
+	rows, err := drainIterator(t, it)
+	require.NoError(t, err)
+	require.Len(t, rows, 0, "tenant B must not iterate tenant A's writes")
 }
 
 // testEntityExecutorRoundTrip verifies that the ChangeUser/ChangeUserKind/

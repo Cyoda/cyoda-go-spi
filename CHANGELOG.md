@@ -927,6 +927,27 @@ it catches up.
   well-formed array index." See the `IsArrayIndex` entry under Breaking for
   what it replaces.
 
+- **`AdmitsNumeric(t DataType, v Decimal) bool`** is the single definition of
+  numeric admission: whether a field declaring `t` can hold `v`. Ingestion and
+  the search kernel used to answer "does this type hold this value" by
+  different routes, and the routes could disagree; this is the one predicate
+  both now call, so admitted implies findable. It is deliberately NOT "is `v`
+  inside `t`'s range" — for `DOUBLE` the operand bucket drops the `EQUALS`
+  branch entirely above 15 significant digits or a scale of 292, so a value
+  admitted on range alone would be stored where `EQUALS` could never find it
+  and `NOT_EQUAL` would wrongly match it, and the precision bound is that
+  53-bit mantissa argument stated as a value test rather than a label test —
+  a 10-digit value like `2147483648` is admitted despite exceeding `int32`,
+  a 16-digit one is not, regardless of which type's label it arrives under.
+  Nothing calls it yet as of this entry.
+
+- **`NewEmptyNode() *ModelNode`** returns a node that declares nothing: no
+  branch, and not nullable. It is the model a fresh derivation walks against
+  — deriving a field's description is the same traversal as admitting a
+  value, run against a model that admits nothing — and it is NOT
+  `NewLeafNode(Null)`, which records that a path HAS been observed holding
+  null and therefore already admits it.
+
 ### Changed
 
 - **The `spitest` filter-path conformance table now pins the evaluator's own
@@ -1099,6 +1120,44 @@ it catches up.
   mirroring `ErrInvalidPattern`'s existing choice to bound what a client-facing
   400 repeats back. Covered by `TestExpandLeaf_TypeMismatchError_BoundsOperandLength`
   and `TestPrepare_UnevaluableLeaf_BoundsOperandInErrorMessage`.
+
+- **A stored number is judged by what the declared type admits, not by its
+  narrowest label.** `evalCompare`/`evalBetween` derived a stored value's
+  narrowest label and asked `IsAssignableTo`, so a `[DOUBLE]` leaf never
+  matched a stored `2147483648` even when the operand had produced a
+  `DOUBLE` sub-condition — `LONG` does not widen into `DOUBLE`. Both now ask
+  `AdmitsNumeric` instead, the predicate that let the value into the field in
+  the first place; `evalCompare` tests it per sub-condition and `evalBetween`
+  scans the declared set, since the two shapes differ. `classifyStoredNumeric`
+  had no other caller and is deleted. Covered by the new end-to-end property
+  test `TestAdmitsNumeric_AdmittedValueIsFindable`: a value a type admits
+  must be findable by `EQUALS` on that type.
+
+- **The comparison operand is stripped of trailing zeros once, at
+  `expandCompare`.** Ingestion already stripped trailing zeros before
+  classifying a value, but the operand side did not, so `EQUALS 5.0` could
+  not find a stored `5` and `NOT_EQUAL 5.0` wrongly matched it. The strip
+  belongs at `expandCompare`'s `ParseDecimal` rather than inside `foldToInt`:
+  the decimal bucket computes precision on the operand too, so
+  `EQUALS 5.000000000000000000` against a stored `5` (and against a `DOUBLE`
+  leaf) had the identical defect one function away. `-0.0` falls out of the
+  same fix.
+
+- **A 13-byte operand with an enormous exponent no longer allocates a
+  ten-million-digit integer.** `foldToInt` folds a whole value by multiplying
+  the coefficient by `10^-scale`, and `ParseDecimal` bounds scale only to
+  `int32`, so `"1e10000000"` allocated for roughly a second before a single
+  row was read — reachable from an ordinary search request through condition
+  validation. `foldToInt` now refuses to normalise a scale it cannot
+  represent cheaply rather than materialising it, `StripTrailingZeros` gained
+  the matching underflow guard on the same values, and `Decimal.Cmp` compares
+  sign and magnitude first, aligning scales only on a tie (where the cost is
+  bounded by the operands' own digit counts) instead of always aligning to
+  the larger scale before comparing — the same allocation was reachable
+  through `toRange` in the decimal family before any fold ran. `foldToInt` no
+  longer normalises a whole value (scale `<= 0`) at all, since every
+  consumer now reaches the returned value only through the now-magnitude-first
+  `Cmp`.
 
 ## [0.8.3] - 2026-07-26
 

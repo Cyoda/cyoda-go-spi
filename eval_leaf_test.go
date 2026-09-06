@@ -748,3 +748,72 @@ func TestEvalLeaf_UnsatisfiableComparisonReachabilityMatrix(t *testing.T) {
 		}
 	})
 }
+
+// One literal must have one meaning. Ingestion strips trailing zeros before
+// classifying; the operand side must too, or EQUALS and NOT_EQUAL disagree
+// with what was stored.
+func TestExpandCompare_OperandTrailingZerosStripped(t *testing.T) {
+	cases := []struct {
+		name     string
+		declared []DataType
+		op       FilterOp
+		operand  string
+		stored   string
+		want     bool
+	}{
+		// The integer family — the originally reported defect.
+		{"eq 5.0 finds a stored 5", []DataType{Integer}, FilterEq, "5.0", "5", true},
+		{"ne 5.0 does not match a stored 5", []DataType{Integer}, FilterNe, "5.0", "5", false},
+		{"eq 5 still finds a stored 5", []DataType{Integer}, FilterEq, "5", "5", true},
+		{"eq 12.5 still finds nothing on an integer leaf", []DataType{Integer}, FilterEq, "12.5", "12", false},
+
+		// The decimal family — the same defect, one function away.
+		{"eq 5.000000000000000000 finds a stored 5", []DataType{Double}, FilterEq, "5.000000000000000000", "5", true},
+		{"eq 10.500000000000000000 finds a stored 10.5", []DataType{Double}, FilterEq, "10.500000000000000000", "10.5", true},
+		{"ne 10.500000000000000000 does not match a stored 10.5", []DataType{Double}, FilterNe, "10.500000000000000000", "10.5", false},
+
+		// Negative zero, which stripping also settles.
+		{"ne -0.0 does not match a stored 0", []DataType{Integer}, FilterNe, "-0.0", "0", false},
+		{"eq 0.000 finds a stored 0", []DataType{Integer}, FilterEq, "0.000", "0", true},
+
+		// A genuinely imprecise operand is still dropped.
+		{"eq on a 16-digit operand still finds nothing", []DataType{Double}, FilterEq, "1.234567890123456", "10.5", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			exp, err := ExpandLeaf(tc.op, tc.operand, nil, tc.declared)
+			if err != nil {
+				t.Fatalf("ExpandLeaf: %v", err)
+			}
+			if got := EvalLeaf(exp, gjson.Parse(tc.stored)); got != tc.want {
+				t.Errorf("EvalLeaf(%s %s vs stored %s) = %v, want %v",
+					tc.op, tc.operand, tc.stored, got, tc.want)
+			}
+		})
+	}
+}
+
+// Ordering operands must be unaffected: rounding a whole value is identity.
+func TestExpandCompare_StripDoesNotDisturbOrderingOps(t *testing.T) {
+	cases := []struct {
+		op      FilterOp
+		operand string
+		stored  string
+		want    bool
+	}{
+		{FilterGt, "12.5", "13", true},
+		{FilterGt, "12.5", "12", false},
+		{FilterGt, "5.0", "6", true},
+		{FilterLte, "5.0", "5", true},
+		{FilterLt, "3e100", "5", true},
+	}
+	for _, tc := range cases {
+		exp, err := ExpandLeaf(tc.op, tc.operand, nil, []DataType{Integer})
+		if err != nil {
+			t.Fatalf("ExpandLeaf: %v", err)
+		}
+		if got := EvalLeaf(exp, gjson.Parse(tc.stored)); got != tc.want {
+			t.Errorf("%s %s vs stored %s = %v, want %v", tc.op, tc.operand, tc.stored, got, tc.want)
+		}
+	}
+}

@@ -231,7 +231,14 @@ func expandCompare(op FilterOp, operand string, declared []DataType) (Expansion,
 	if len(numericDeclared) > 0 {
 		if dec, err := ParseDecimal(operand); err == nil {
 			engaged = true // the operand IS a number → the numeric family is applicable
-			e.numeric = ExpandNumericOperand(dec, numericDeclared, op)
+			// One literal, one meaning. Ingestion classifies by value, after
+			// stripping trailing zeros; the operand must be read the same way
+			// or "5.0" and "5" denote different things on the two sides.
+			// Stripping here rather than inside foldToInt covers both
+			// families: the decimal bucket computes precision on the operand
+			// too, so "5.000000000000000000" would otherwise be judged
+			// imprecise and have its EQUALS branch dropped.
+			e.numeric = ExpandNumericOperand(dec.StripTrailingZeros(), numericDeclared, op)
 		}
 	}
 

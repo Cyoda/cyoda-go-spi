@@ -931,7 +931,8 @@ it catches up.
   numeric admission: whether a field declaring `t` can hold `v`. Ingestion and
   the search kernel used to answer "does this type hold this value" by
   different routes, and the routes could disagree; this is the one predicate
-  both now call, so admitted implies findable. It is deliberately NOT "is `v`
+  meant to replace both, so that admitted implies findable once each side
+  calls it. It is deliberately NOT "is `v`
   inside `t`'s range" — for `DOUBLE` the operand bucket drops the `EQUALS`
   branch entirely above 15 significant digits or a scale of 292, so a value
   admitted on range alone would be stored where `EQUALS` could never find it
@@ -939,7 +940,12 @@ it catches up.
   53-bit mantissa argument stated as a value test rather than a label test —
   a 10-digit value like `2147483648` is admitted despite exceeding `int32`,
   a 16-digit one is not, regardless of which type's label it arrives under.
-  Nothing calls it yet as of this entry.
+  Its first caller is the kernel's own stored-value filter
+  (`evalCompare`/`evalBetween`, see the `### Fixed` entry below);
+  cyoda-go's write path is the predicate's other intended caller, not yet
+  wired as of this release — the point of there being one predicate is that
+  the two sides of "was this value admitted" cannot disagree once both call
+  it.
 
 - **`NewEmptyNode() *ModelNode`** returns a node that declares nothing: no
   branch, and not nullable. It is the model a fresh derivation walks against

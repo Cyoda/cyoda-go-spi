@@ -525,3 +525,28 @@ func TestFieldsMapFromSchemaModelDescriptor(t *testing.T) {
 		t.Errorf("unbound schema: got (%v, %v), want (nil, nil)", m, err)
 	}
 }
+
+// TestNewEmptyNode_DeclaresNothing pins that a fresh empty node carries no
+// branch and is not nullable — it is the model a derivation walks against
+// when admitting a field's first observed value.
+func TestNewEmptyNode_DeclaresNothing(t *testing.T) {
+	n := spi.NewEmptyNode()
+	if len(n.Kinds()) != 0 {
+		t.Errorf("Kinds() = %v, want none", n.Kinds())
+	}
+	if n.Nullable() {
+		t.Error("an empty node has not been observed as null")
+	}
+	if n.Scalar() != nil || n.Object() != nil || n.Array() != nil {
+		t.Error("an empty node carries no branch")
+	}
+}
+
+// TestNewEmptyNode_IsNotNullLeaf pins the distinction from NewLeafNode(Null),
+// which IS nullable-empty: a path observed holding null has been observed,
+// while a fresh empty node has not.
+func TestNewEmptyNode_IsNotNullLeaf(t *testing.T) {
+	if spi.NewLeafNode(spi.Null).Nullable() == spi.NewEmptyNode().Nullable() {
+		t.Error("NewLeafNode(Null) is nullable; NewEmptyNode is not")
+	}
+}

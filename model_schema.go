@@ -168,6 +168,18 @@ func NewArrayNode(element *ModelNode) *ModelNode {
 	return n
 }
 
+// NewEmptyNode returns a node that declares nothing: no branch, and not
+// nullable. Every value is a change against it, which is what makes it the
+// model a fresh derivation walks against — deriving a field's description is
+// the same traversal as admitting a value, run against a model that admits
+// nothing.
+//
+// This is NOT NewLeafNode(Null), which records that a path HAS been observed
+// holding null and therefore already admits it.
+func NewEmptyNode() *ModelNode {
+	return &ModelNode{branches: make(map[NodeKind]Branch, 1)}
+}
+
 // Scalar returns the node's scalar branch, or nil when the path was never
 // observed holding a primitive value.
 func (n *ModelNode) Scalar() *ScalarBranch {

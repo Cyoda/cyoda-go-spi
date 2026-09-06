@@ -1,9 +1,12 @@
 package spi
 
 import (
+	"math"
 	"math/big"
+	"math/rand"
 	"strings"
 	"testing"
+	"time"
 )
 
 func bigInt(s string) *big.Int {
@@ -451,5 +454,105 @@ func TestRoundToPrecision_CarryRenormalizes(t *testing.T) {
 					c.in, c.prec, got.Precision(), c.prec)
 			}
 		})
+	}
+}
+
+// Cmp must not materialise 10^|scale| to compare values whose magnitudes
+// already differ. A 13-byte literal reaches Cmp through toRange before any
+// fold, so this is a request-boundary DoS, not a corner case.
+func TestDecimalCmp_HugeScaleDifferenceIsCheap(t *testing.T) {
+	huge, _ := ParseDecimal("1e10000000")
+	small, _ := ParseDecimal("5")
+	negHuge, _ := ParseDecimal("-1e10000000")
+	tiny, _ := ParseDecimal("1e-10000000")
+
+	cases := []struct {
+		name string
+		a, b Decimal
+		want int
+	}{
+		{"huge > small", huge, small, 1},
+		{"small < huge", small, huge, -1},
+		{"negHuge < small", negHuge, small, -1},
+		{"tiny < small", tiny, small, -1},
+		{"tiny > 0", tiny, Decimal{unscaled: new(big.Int), scale: 0}, 1},
+		{"huge == huge", huge, huge, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			done := make(chan int, 1)
+			go func() { done <- tc.a.Cmp(tc.b) }()
+			select {
+			case got := <-done:
+				if got != tc.want {
+					t.Errorf("Cmp = %d, want %d", got, tc.want)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("Cmp did not return within 2s — the scale was materialised")
+			}
+		})
+	}
+}
+
+// cmpByAlignment is the previous implementation, kept as the oracle: the
+// new Cmp must agree with it on every pair it can afford to compute.
+func cmpByAlignment(d, other Decimal) int {
+	target := d.scale
+	if other.scale > target {
+		target = other.scale
+	}
+	da, _ := d.SetScale(target)
+	oa, _ := other.SetScale(target)
+	return da.unscaled.Cmp(oa.unscaled)
+}
+
+func TestDecimalCmp_AgreesWithAlignmentOracle(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+	randDec := func() Decimal {
+		// Coefficients up to 40 digits, scales in [-60, 60]: wide enough
+		// to cross every magnitude band and tie on adjusted exponent.
+		digits := rng.Intn(40) + 1
+		var sb strings.Builder
+		if rng.Intn(2) == 0 {
+			sb.WriteByte('-')
+		}
+		sb.WriteByte(byte('1' + rng.Intn(9)))
+		for i := 1; i < digits; i++ {
+			sb.WriteByte(byte('0' + rng.Intn(10)))
+		}
+		u, _ := new(big.Int).SetString(sb.String(), 10)
+		return Decimal{unscaled: u, scale: int32(rng.Intn(121) - 60)}
+	}
+	zero := Decimal{unscaled: new(big.Int), scale: 0}
+	for i := 0; i < 20000; i++ {
+		a, b := randDec(), randDec()
+		if rng.Intn(10) == 0 {
+			b = a // exercise equality
+		}
+		if rng.Intn(20) == 0 {
+			b = zero
+		}
+		if got, want := a.Cmp(b), cmpByAlignment(a, b); got != want {
+			t.Fatalf("Cmp(%s, %s) = %d, oracle says %d", a.Canonical(), b.Canonical(), got, want)
+		}
+		if got, want := b.Cmp(a), cmpByAlignment(b, a); got != want {
+			t.Fatalf("Cmp(%s, %s) = %d, oracle says %d", b.Canonical(), a.Canonical(), got, want)
+		}
+	}
+}
+
+// StripTrailingZeros must not wrap scale past the int32 floor. A value
+// already at the minimum representable scale with a trailing zero in its
+// coefficient cannot be stripped further; returning it unstripped is exact
+// — decrementing past math.MinInt32 would silently wrap to the positive
+// range and corrupt the magnitude.
+func TestDecimal_StripTrailingZeros_ScaleUnderflowGuard(t *testing.T) {
+	d := Decimal{unscaled: bigInt("100"), scale: math.MinInt32}
+	stripped := d.StripTrailingZeros()
+	if stripped.scale != math.MinInt32 {
+		t.Errorf("scale: got %d, want %d (must not wrap past the int32 floor)", stripped.scale, math.MinInt32)
+	}
+	if stripped.unscaled.Cmp(bigInt("100")) != 0 {
+		t.Errorf("unscaled: got %s, want 100 (must not strip past the scale floor)", stripped.unscaled)
 	}
 }

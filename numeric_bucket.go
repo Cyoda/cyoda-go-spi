@@ -293,8 +293,27 @@ func expandIntFamily(value Decimal, intTypes []DataType, op FilterOp) []NumericS
 // CEILING/FLOOR table, keeping the operation. A fractional value under any
 // other op (EQ) returns ok=false — the caller drops the int family entirely.
 // The returned Decimal always has scale 0.
+
+// maxFoldDigits bounds the decimal digit count foldToInt will materialise.
+// A whole value is folded by multiplying the coefficient by 10^-scale, and
+// ParseDecimal bounds scale only to int32, so an operand like "1e10000000"
+// would allocate a ten-million-digit big.Int before a single row is read —
+// from a 13-byte search condition. INT128 max has 39 decimal digits, so any
+// integer needing more than a few hundred is far outside every declared
+// type's bounds and can only ever produce a NotNull residual or nothing;
+// refusing it costs no reachable match. The same guard, with the same
+// reasoning, is in the schema validator's classifier.
+const maxFoldDigits = 1024
+
 func foldToInt(value Decimal, op FilterOp) (Decimal, FilterOp, bool) {
 	if value.Scale() <= 0 {
+		if value.Precision()+int(-int64(value.Scale())) > maxFoldDigits {
+			// Unrepresentable at any reasonable cost. Dropping the int family
+			// is the caller's existing handling for "this operand produces no
+			// int condition", and is correct here: no declared integer type
+			// has a bound anywhere near this magnitude.
+			return Decimal{}, "", false
+		}
 		// Whole number (toBigInteger). SetScale(0) is exact upward for
 		// negative scale and identity for scale 0.
 		normalized, err := value.SetScale(0)

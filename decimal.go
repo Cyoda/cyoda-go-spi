@@ -163,6 +163,12 @@ func (d Decimal) StripTrailingZeros() Decimal {
 		if r.Cmp(zero) != 0 {
 			break
 		}
+		if scale == math.MinInt32 {
+			// Refusing to wrap is the only safe answer; a value at the int32
+			// scale floor cannot be stripped further and returning it
+			// unstripped is exact.
+			break
+		}
 		u.Set(q)
 		scale--
 	}
@@ -305,17 +311,53 @@ var int128Max = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 127), big.NewIn
 // Implementation note: relies on pre-computed boundaries rather than
 // big.Int.BitLen() comparisons, because BitLen ignores sign and
 // BitLen(-2^127) == 128 — incorrectly excluding the valid minimum.
-// Cmp returns -1 if d < other, 0 if equal, 1 if d > other. Exact
-// comparison via scale alignment — no rounding modes.
+// Cmp returns -1 if d < other, 0 if equal, 1 if d > other. Exact — no
+// rounding modes.
+//
+// Magnitude first. The sign decides when the signs differ; the adjusted
+// exponent — precision − scale, the position of the most significant
+// digit — decides when they do not. Only a tie on both needs the
+// coefficients aligned to a common scale, and in a tie the scale
+// difference equals the precision difference, so the alignment cost is
+// bounded by the operands' own digit counts.
+//
+// Aligning unconditionally, as this once did, multiplied the smaller-scale
+// coefficient by 10^diff — and diff is bounded only by int32, so comparing
+// 1e10000000 against any ordinary value materialised a ten-million-digit
+// integer. That was reachable from a 13-byte search operand through
+// toRange before any other guard ran.
 func (d Decimal) Cmp(other Decimal) int {
-	// Align to the larger scale by upward SetScale (always exact).
+	ds, os := d.Sign(), other.Sign()
+	if ds != os {
+		if ds < os {
+			return -1
+		}
+		return 1
+	}
+	if ds == 0 {
+		return 0
+	}
+
+	// Same non-zero sign: compare magnitudes. For negatives the larger
+	// magnitude is the smaller value, which multiplying by the sign
+	// handles.
+	dAdj := int64(d.Precision()) - int64(d.scale)
+	oAdj := int64(other.Precision()) - int64(other.scale)
+	switch {
+	case dAdj > oAdj:
+		return ds
+	case dAdj < oAdj:
+		return -ds
+	}
+
+	// Tie on magnitude: align scales, bounded by the precision gap.
 	target := d.scale
 	if other.scale > target {
 		target = other.scale
 	}
 	dAligned, err := d.SetScale(target)
 	if err != nil {
-		// Should never happen — upward SetScale always succeeds.
+		// Unreachable: upward SetScale always succeeds.
 		panic(fmt.Sprintf("Decimal.Cmp: upward SetScale failed: %v", err))
 	}
 	oAligned, err := other.SetScale(target)

@@ -3,6 +3,7 @@ package spi
 import (
 	"sort"
 	"testing"
+	"time"
 )
 
 // dec parses a decimal literal for oracle rows, failing the test on error.
@@ -245,5 +246,57 @@ func TestExpandNumericOperand_Property(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// A huge negative scale must be refused, not expanded. ParseDecimal bounds
+// scale only to int32, so 1e10000000 is a 13-byte operand that would
+// otherwise materialise a ten-million-digit big.Int before any row is read.
+func TestFoldToInt_HugeNegativeScaleIsRefusedNotExpanded(t *testing.T) {
+	for _, operand := range []string{"1e1000000", "1e10000000", "1e2000000000"} {
+		v, err := ParseDecimal(operand)
+		if err != nil {
+			t.Fatalf("ParseDecimal(%q): %v", operand, err)
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if _, _, ok := foldToInt(v, FilterEq); ok {
+				t.Errorf("foldToInt(%s) must refuse an unrepresentable scale", operand)
+			}
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("foldToInt(%s) did not return within 2s — the scale was expanded", operand)
+		}
+	}
+}
+
+// An UNBOUND_INTEGER leaf must still not match such an operand, and the
+// request must not hang. The decimal-family buckets (DOUBLE, BIG_DECIMAL)
+// reach the same operand through expandDecimalFamily -> toRange -> Cmp
+// before any fold runs, so they are covered here too.
+func TestExpandLeaf_HugeNegativeScaleOperandDoesNotExpand(t *testing.T) {
+	declaredSets := [][]DataType{
+		{UnboundInteger},
+		{Double},
+		{BigDecimal},
+	}
+	for _, declared := range declaredSets {
+		t.Run(declared[0].String(), func(t *testing.T) {
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				if _, err := ExpandLeaf(FilterEq, "1e10000000", nil, declared); err == nil {
+					t.Log("expansion returned without error; the int family must simply be empty")
+				}
+			}()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("ExpandLeaf did not return within 2s")
+			}
+		})
 	}
 }

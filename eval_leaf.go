@@ -428,9 +428,15 @@ func (e Expansion) evalCompare(stored gjson.Result) (matched bool, hadCandidate 
 			// never rides an unreadable value into the result set.
 			return false, true
 		}
-		storedT := classifyStoredNumeric(dec)
 		for _, sc := range e.numeric {
-			if !IsAssignableTo(storedT, sc.Type) {
+			// Judge the stored value against what the declared type admits,
+			// not against the label the value happens to classify as. A
+			// [DOUBLE] leaf holds 2147483648 — the label LONG does not widen
+			// into DOUBLE, but the value is inside DOUBLE's range and well
+			// within its mantissa, so the leaf holds it and search must find
+			// it. AdmitsNumeric is the same predicate ingestion used to let
+			// the value in.
+			if !AdmitsNumeric(sc.Type, dec) {
 				continue
 			}
 			hadCandidate = true
@@ -523,15 +529,18 @@ func (e Expansion) evalBetween(stored gjson.Result) bool {
 		if err != nil {
 			return false
 		}
-		storedT := classifyStoredNumeric(dec)
-		assignable := false
+		// Same admission discipline as evalCompare, but over the whole
+		// declared numeric set rather than per sub-condition: expandBetween
+		// carries e.numTypes, not a sub-condition list. Under the collapse
+		// invariant the set has at most one member and the two coincide.
+		admitted := false
 		for _, u := range e.numTypes {
-			if IsAssignableTo(storedT, u) {
-				assignable = true
+			if AdmitsNumeric(u, dec) {
+				admitted = true
 				break
 			}
 		}
-		if !assignable {
+		if !admitted {
 			return false
 		}
 		return rangeMatch(e.numLo.Cmp(dec), dec.Cmp(e.numHi), inclusive)
@@ -665,19 +674,6 @@ func compareRune(a, b rune) int {
 	default:
 		return 0
 	}
-}
-
-// classifyStoredNumeric maps a stored numeric Decimal to its narrowest DataType,
-// so the assignability gate can pick a sub-condition (e.g. stored 5 classifies as
-// INTEGER and is assignable to a [LONG] sub-condition).
-func classifyStoredNumeric(d Decimal) DataType {
-	s := d.StripTrailingZeros()
-	if s.Scale() <= 0 {
-		if n, err := s.SetScale(0); err == nil {
-			return ClassifyInteger(n.Unscaled())
-		}
-	}
-	return ClassifyDecimal(s)
 }
 
 func fold(s string) string { return strings.ToLower(s) }

@@ -817,3 +817,46 @@ func TestExpandCompare_StripDoesNotDisturbOrderingOps(t *testing.T) {
 		}
 	}
 }
+
+// A stored value the declared type admits must be matched. Before this, the
+// kernel derived the stored value's label and asked IsAssignableTo, so a
+// whole number past 2^31 in a [DOUBLE] leaf was skipped even though the
+// operand had produced a DOUBLE sub-condition.
+func TestEvalCompare_StoredValueJudgedByAdmission(t *testing.T) {
+	cases := []struct {
+		name     string
+		declared []DataType
+		op       FilterOp
+		operand  string
+		stored   string
+		want     bool
+	}{
+		{"double leaf holds a whole past 2^31", []DataType{Double}, FilterEq, "2147483648", "2147483648", true},
+		{"double leaf, ordering op", []DataType{Double}, FilterGt, "2147483647", "2147483648", true},
+		{"big decimal leaf, high scale", []DataType{BigDecimal}, FilterEq,
+			"1.23456789012345678901234567890", "1.23456789012345678901234567890", true},
+		{"out-of-range operand NotNull residual", []DataType{Double}, FilterLt, "1e300", "2147483648", true},
+		{"a value the type does not admit is still not matched", []DataType{Integer}, FilterEq, "5", "2147483648", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			exp, err := ExpandLeaf(tc.op, tc.operand, nil, tc.declared)
+			if err != nil {
+				t.Fatalf("ExpandLeaf: %v", err)
+			}
+			if got := EvalLeaf(exp, gjson.Parse(tc.stored)); got != tc.want {
+				t.Errorf("EvalLeaf = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEvalBetween_StoredValueJudgedByAdmission(t *testing.T) {
+	exp, err := ExpandLeaf(FilterBetweenInclusive, "", []string{"2147483647", "2147483649"}, []DataType{Double})
+	if err != nil {
+		t.Fatalf("ExpandLeaf: %v", err)
+	}
+	if !EvalLeaf(exp, gjson.Parse("2147483648")) {
+		t.Error("a stored value the DOUBLE leaf admits must fall inside an inclusive between")
+	}
+}

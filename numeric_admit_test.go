@@ -3,6 +3,8 @@ package spi
 import (
 	"testing"
 	"time"
+
+	"github.com/tidwall/gjson"
 )
 
 func TestAdmitsNumeric(t *testing.T) {
@@ -94,6 +96,39 @@ func TestAdmitsNumeric_HugeScaleIsCheap(t *testing.T) {
 				}
 			case <-time.After(2 * time.Second):
 				t.Fatalf("AdmitsNumeric(%s, %s) did not return within 2s", dt, raw)
+			}
+		}
+	}
+}
+
+// The invariant the predicate exists to secure: a value a type admits is a
+// value an EQUALS on that type can find. Ranges alone do not give this, and
+// neither does the predicate alone — the kernel's stored-value filter has
+// to ask the same question, which is what this task makes it do.
+func TestAdmitsNumeric_AdmittedValueIsFindable(t *testing.T) {
+	values := []string{
+		"1000", "2147483648", "9.99999999999999e292", "9007199254740993",
+		"1.234567890123456", "1e-400", "1.23456789012345", "13.111", "1.5",
+		"1.23456789012345678901234567890", "5.0", "-0.0",
+	}
+	types := []DataType{Integer, Long, BigInteger, UnboundInteger, Double, BigDecimal, UnboundDecimal}
+
+	for _, raw := range values {
+		v, err := ParseDecimal(raw)
+		if err != nil {
+			t.Fatalf("ParseDecimal(%q): %v", raw, err)
+		}
+		for _, dt := range types {
+			if !AdmitsNumeric(dt, v) {
+				continue
+			}
+			exp, err := ExpandLeaf(FilterEq, raw, nil, []DataType{dt})
+			if err != nil {
+				t.Errorf("%s admits %s but ExpandLeaf errored: %v", dt, raw, err)
+				continue
+			}
+			if !EvalLeaf(exp, gjson.Parse(raw)) {
+				t.Errorf("%s admits %s but EQUALS cannot find it", dt, raw)
 			}
 		}
 	}

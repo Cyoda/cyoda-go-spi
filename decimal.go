@@ -305,13 +305,6 @@ func (d Decimal) roundToPrecision(maxPrec int, mode roundingMode) Decimal {
 var int128Min = new(big.Int).Neg(new(big.Int).Lsh(big.NewInt(1), 127))
 var int128Max = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 127), big.NewInt(1))
 
-// IsInt128 reports whether the unscaled value fits the signed Int128
-// range [-2^127, 2^127-1]. Scale is not considered.
-//
-// Implementation note: relies on pre-computed boundaries rather than
-// big.Int.BitLen() comparisons, because BitLen ignores sign and
-// BitLen(-2^127) == 128 — incorrectly excluding the valid minimum.
-
 // Cmp returns -1 if d < other, 0 if equal, 1 if d > other. Exact — no
 // rounding modes.
 //
@@ -368,6 +361,12 @@ func (d Decimal) Cmp(other Decimal) int {
 	return dAligned.unscaled.Cmp(oAligned.unscaled)
 }
 
+// IsInt128 reports whether the unscaled value fits the signed Int128
+// range [-2^127, 2^127-1]. Scale is not considered.
+//
+// Implementation note: relies on pre-computed boundaries rather than
+// big.Int.BitLen() comparisons, because BitLen ignores sign and
+// BitLen(-2^127) == 128 — incorrectly excluding the valid minimum.
 func (d Decimal) IsInt128() bool {
 	if d.unscaled == nil {
 		return true

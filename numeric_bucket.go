@@ -288,40 +288,24 @@ func expandIntFamily(value Decimal, intTypes []DataType, op FilterOp) []NumericS
 
 // foldToInt ports fltToIntConverter.produceInRangeCondition
 // (PolymorphicNumberConversions.kt:142-147 with the FltConverter body at
-// :119-140). A whole value (scale ≤ 0) folds exactly, keeping the operation.
-// A fractional value under a comparing op rounds to an integer via the
-// CEILING/FLOOR table, keeping the operation. A fractional value under any
-// other op (EQ) returns ok=false — the caller drops the int family entirely.
-// The returned Decimal always has scale 0.
-
-// maxFoldDigits bounds the decimal digit count foldToInt will materialise.
-// A whole value is folded by multiplying the coefficient by 10^-scale, and
-// ParseDecimal bounds scale only to int32, so an operand like "1e10000000"
-// would allocate a ten-million-digit big.Int before a single row is read —
-// from a 13-byte search condition. INT128 max has 39 decimal digits, so any
-// integer needing more than a few hundred is far outside every declared
-// type's bounds and can only ever produce a NotNull residual or nothing;
-// refusing it costs no reachable match. The same guard, with the same
-// reasoning, is in the schema validator's classifier.
-const maxFoldDigits = 1024
-
+// :119-140). A whole value (scale ≤ 0) is already an integer and is returned
+// unchanged, keeping the operation. A fractional value under a comparing op
+// rounds to an integer via the CEILING/FLOOR table, keeping the operation. A
+// fractional value under any other op (EQ) returns ok=false — the caller
+// drops the int family entirely.
+//
+// The returned Decimal has scale ≤ 0 — a whole number, but not necessarily
+// normalised to scale 0. Every consumer (toRange, evalCompare's
+// dec.Cmp(sc.Value)) reaches it only through Decimal.Cmp, which is
+// magnitude-first and compares any two scales without materialising either
+// one, so normalising here would cost real allocation to buy nothing: a
+// value like "1e2000000000" (scale −2,000,000,000) would need a
+// two-billion-digit big.Int just to reach scale 0, and every declared
+// integer type's bound is at most 39 digits, so the normalised digits are
+// never inspected directly — only compared.
 func foldToInt(value Decimal, op FilterOp) (Decimal, FilterOp, bool) {
 	if value.Scale() <= 0 {
-		if value.Precision()+int(-int64(value.Scale())) > maxFoldDigits {
-			// Unrepresentable at any reasonable cost. Dropping the int family
-			// is the caller's existing handling for "this operand produces no
-			// int condition", and is correct here: no declared integer type
-			// has a bound anywhere near this magnitude.
-			return Decimal{}, "", false
-		}
-		// Whole number (toBigInteger). SetScale(0) is exact upward for
-		// negative scale and identity for scale 0.
-		normalized, err := value.SetScale(0)
-		if err != nil {
-			// Unreachable: scale ≤ 0 is always an exact upward rescale.
-			panic("foldToInt: SetScale(0) failed on whole value: " + err.Error())
-		}
-		return normalized, op, true
+		return value, op, true
 	}
 	if isComparingOp(op) {
 		return value.roundToScale(0, roundingModeFor(op)), op, true

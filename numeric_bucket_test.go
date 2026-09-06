@@ -249,51 +249,147 @@ func TestExpandNumericOperand_Property(t *testing.T) {
 	}
 }
 
-// A huge negative scale must be refused, not expanded. ParseDecimal bounds
-// scale only to int32, so 1e10000000 is a 13-byte operand that would
-// otherwise materialise a ten-million-digit big.Int before any row is read.
-func TestFoldToInt_HugeNegativeScaleIsRefusedNotExpanded(t *testing.T) {
-	for _, operand := range []string{"1e1000000", "1e10000000", "1e2000000000"} {
-		v, err := ParseDecimal(operand)
-		if err != nil {
-			t.Fatalf("ParseDecimal(%q): %v", operand, err)
+// A huge negative scale must fold cheaply and correctly, not be refused.
+// ParseDecimal bounds scale only to int32, so 1e2000000000 is a small
+// operand string with an enormous scale; foldToInt must return it (whole
+// numbers with scale <= 0 need no normalisation — Cmp is magnitude-first)
+// rather than either materialising a two-billion-digit big.Int or dropping
+// the int family and turning a real match into a wrong-but-available "no
+// match".
+func TestFoldToInt_HugeNegativeScaleFoldsCheaplyAndCorrectly(t *testing.T) {
+	operand := "1e2000000000"
+	v, err := ParseDecimal(operand)
+	if err != nil {
+		t.Fatalf("ParseDecimal(%q): %v", operand, err)
+	}
+	type result struct {
+		val Decimal
+		op  FilterOp
+		ok  bool
+	}
+	done := make(chan result, 1)
+	go func() {
+		val, op, ok := foldToInt(v, FilterEq)
+		done <- result{val, op, ok}
+	}()
+	select {
+	case r := <-done:
+		if !r.ok {
+			t.Fatalf("foldToInt(%s) refused a whole value that needs no rounding", operand)
 		}
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			if _, _, ok := foldToInt(v, FilterEq); ok {
-				t.Errorf("foldToInt(%s) must refuse an unrepresentable scale", operand)
-			}
-		}()
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			t.Fatalf("foldToInt(%s) did not return within 2s — the scale was expanded", operand)
+		if r.op != FilterEq {
+			t.Errorf("op: got %s, want %s", r.op, FilterEq)
 		}
+		if r.val.Cmp(v) != 0 {
+			t.Errorf("foldToInt(%s) changed the value: got %s, want numerically equal to input", operand, r.val.Canonical())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("foldToInt(%s) did not return within 2s — the scale was materialised", operand)
 	}
 }
 
-// An UNBOUND_INTEGER leaf must still not match such an operand, and the
-// request must not hang. The decimal-family buckets (DOUBLE, BIG_DECIMAL)
-// reach the same operand through expandDecimalFamily -> toRange -> Cmp
-// before any fold runs, so they are covered here too.
-func TestExpandLeaf_HugeNegativeScaleOperandDoesNotExpand(t *testing.T) {
-	declaredSets := [][]DataType{
-		{UnboundInteger},
-		{Double},
-		{BigDecimal},
+// A huge negative scale must expand into the CORRECT sub-conditions, not
+// merely avoid hanging: the int family folds cheaply (no threshold drops
+// it), and the decimal family classifies the magnitude via toRange/Cmp
+// without materialising the scale. Every declared bucket below is
+// magnitude-decidable in O(1) relative to the operand's own tiny digit
+// count, so a 2s deadline anywhere here is itself a regression signal.
+func TestExpandLeaf_HugeNegativeScaleOperandExpandsCorrectly(t *testing.T) {
+	const operand = "1e2000000000" // 1 followed by two billion zeros — magnitude only, no coefficient to materialise
+	parsed, err := ParseDecimal(operand)
+	if err != nil {
+		t.Fatalf("ParseDecimal(%q): %v", operand, err)
 	}
-	for _, declared := range declaredSets {
-		t.Run(declared[0].String(), func(t *testing.T) {
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				if _, err := ExpandLeaf(FilterEq, "1e10000000", nil, declared); err == nil {
-					t.Log("expansion returned without error; the int family must simply be empty")
+
+	cases := []struct {
+		name     string
+		op       FilterOp
+		declared []DataType
+		check    func(t *testing.T, exp Expansion)
+	}{
+		{
+			// Every INTEGER is below 1e2000000000, so LT must resolve to a
+			// bare existence test, not an empty (dropped) family.
+			name: "LT on INTEGER -> NotNull residual",
+			op:   FilterLt, declared: []DataType{Integer},
+			check: func(t *testing.T, exp Expansion) {
+				if len(exp.numeric) != 1 {
+					t.Fatalf("got %d sub-conditions, want 1: %+v", len(exp.numeric), exp.numeric)
 				}
+				sc := exp.numeric[0]
+				if sc.Type != Integer || !sc.NotNull || sc.Op != FilterNotNull {
+					t.Errorf("got %+v, want {Type:INTEGER NotNull:true Op:NOT_NULL}", sc)
+				}
+			},
+		},
+		{
+			// UNBOUND_INTEGER is documented as unbounded magnitude — EQ must
+			// carry the operand through verbatim (in whatever scale), not
+			// drop it.
+			name: "EQ on UNBOUND_INTEGER -> value verbatim, Cmp-equal to the operand",
+			op:   FilterEq, declared: []DataType{UnboundInteger},
+			check: func(t *testing.T, exp Expansion) {
+				if len(exp.numeric) != 1 {
+					t.Fatalf("got %d sub-conditions, want 1: %+v", len(exp.numeric), exp.numeric)
+				}
+				sc := exp.numeric[0]
+				if sc.Type != UnboundInteger {
+					t.Errorf("Type: got %s, want %s", sc.Type, UnboundInteger)
+				}
+				if sc.Value.Cmp(parsed) != 0 {
+					t.Errorf("Value: got %s, want numerically equal to %s", sc.Value.Canonical(), operand)
+				}
+			},
+		},
+		{
+			// DOUBLE's magnitude bucket tops out at ~1e293; LT above it is
+			// the same ABOVE + less -> NotNull residual as the int case.
+			name: "LT on DOUBLE -> NotNull residual",
+			op:   FilterLt, declared: []DataType{Double},
+			check: func(t *testing.T, exp Expansion) {
+				if len(exp.numeric) != 1 {
+					t.Fatalf("got %d sub-conditions, want 1: %+v", len(exp.numeric), exp.numeric)
+				}
+				sc := exp.numeric[0]
+				if sc.Type != Double || !sc.NotNull || sc.Op != FilterNotNull {
+					t.Errorf("got %+v, want {Type:DOUBLE NotNull:true Op:NOT_NULL}", sc)
+				}
+			},
+		},
+		{
+			// BIG_DECIMAL's magnitude bucket is INT128/10^18; LT above it is
+			// the same ABOVE + less -> NotNull residual.
+			name: "LT on BIG_DECIMAL -> NotNull residual",
+			op:   FilterLt, declared: []DataType{BigDecimal},
+			check: func(t *testing.T, exp Expansion) {
+				if len(exp.numeric) != 1 {
+					t.Fatalf("got %d sub-conditions, want 1: %+v", len(exp.numeric), exp.numeric)
+				}
+				sc := exp.numeric[0]
+				if sc.Type != BigDecimal || !sc.NotNull || sc.Op != FilterNotNull {
+					t.Errorf("got %+v, want {Type:BIG_DECIMAL NotNull:true Op:NOT_NULL}", sc)
+				}
+			},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			type result struct {
+				exp Expansion
+				err error
+			}
+			done := make(chan result, 1)
+			go func() {
+				exp, err := ExpandLeaf(c.op, operand, nil, c.declared)
+				done <- result{exp, err}
 			}()
 			select {
-			case <-done:
+			case r := <-done:
+				if r.err != nil {
+					t.Fatalf("ExpandLeaf error: %v", r.err)
+				}
+				c.check(t, r.exp)
 			case <-time.After(2 * time.Second):
 				t.Fatal("ExpandLeaf did not return within 2s")
 			}

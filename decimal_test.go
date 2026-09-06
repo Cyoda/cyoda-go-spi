@@ -460,11 +460,19 @@ func TestRoundToPrecision_CarryRenormalizes(t *testing.T) {
 // Cmp must not materialise 10^|scale| to compare values whose magnitudes
 // already differ. A 13-byte literal reaches Cmp through toRange before any
 // fold, so this is a request-boundary DoS, not a corner case.
+//
+// The operand is 1e2000000000 (scale -2,000,000,000, not -10,000,000): the
+// unconditional-alignment implementation this guards against computes
+// 1e10000000 in well under a second on typical hardware — under a
+// generous deadline that alone does not discriminate a fixed Cmp from a
+// vulnerable one. 1e2000000000 (a two-billion-digit alignment) and a tight
+// 50ms budget together make this test fail hard, not narrowly, against the
+// pre-fix implementation.
 func TestDecimalCmp_HugeScaleDifferenceIsCheap(t *testing.T) {
-	huge, _ := ParseDecimal("1e10000000")
+	huge, _ := ParseDecimal("1e2000000000")
 	small, _ := ParseDecimal("5")
-	negHuge, _ := ParseDecimal("-1e10000000")
-	tiny, _ := ParseDecimal("1e-10000000")
+	negHuge, _ := ParseDecimal("-1e2000000000")
+	tiny, _ := ParseDecimal("1e-2000000000")
 
 	cases := []struct {
 		name string
@@ -487,8 +495,8 @@ func TestDecimalCmp_HugeScaleDifferenceIsCheap(t *testing.T) {
 				if got != tc.want {
 					t.Errorf("Cmp = %d, want %d", got, tc.want)
 				}
-			case <-time.After(2 * time.Second):
-				t.Fatal("Cmp did not return within 2s — the scale was materialised")
+			case <-time.After(50 * time.Millisecond):
+				t.Fatal("Cmp did not return within 50ms — the scale was materialised")
 			}
 		})
 	}

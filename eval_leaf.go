@@ -161,6 +161,17 @@ func truncateOperand(s string) string {
 // a binary/range op, or an object/array operand where a scalar is required — are
 // detected by the caller, which holds the raw JSON value, before it reaches this
 // string-typed boundary (entity-search.md §8).
+//
+// Kernel contract on declared: the caller is expected to pass AT MOST ONE
+// numeric DataType in declared — cyoda-go's TypeSet collapses the numeric
+// family down to its single narrowest bucket via CollapseNumeric before it
+// ever reaches this function, and every production caller goes through
+// that collapse. A declared set carrying more than one numeric type is
+// outside what this kernel guarantees: a stored value can then satisfy
+// several of those buckets rather than the single narrowest one an
+// uncollapsed caller might expect, because admission (AdmitsNumeric) judges
+// each declared type independently rather than picking one canonical
+// bucket for the value.
 func ExpandLeaf(op FilterOp, operand string, values []string, declared []DataType) (Expansion, error) {
 	switch op {
 	case FilterIsNull, FilterNotNull:
@@ -340,6 +351,9 @@ func resolveTemporalMillis(operand string, t DataType) (int64, bool) {
 }
 
 // EvalLeaf reports whether stored satisfies the pre-built leaf Expansion.
+// exp was built by ExpandLeaf, so it inherits that function's declared
+// contract: a multi-numeric declared set was outside the kernel's
+// guarantees when exp was built, and nothing here re-checks that.
 func EvalLeaf(exp Expansion, stored gjson.Result) bool {
 	// Unary ops decide purely on presence — handle before any classification.
 	if exp.kind == kindUnary {

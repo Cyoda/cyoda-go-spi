@@ -18,10 +18,15 @@ package spi
 // a fractional operand, and UNBOUND_INTEGER has no bound to hide behind.
 //
 // The precision bound is also the mantissa argument stated as a value test
-// rather than a label test: every integer above 2^53 needs at least 16
-// significant digits, so precision <= 15 excludes exactly the values a
-// 53-bit mantissa cannot hold — without condemning a 10-digit value like
-// 2147483648 by association with its LONG label.
+// rather than a label test: a decimal of at most 15 significant digits
+// round-trips uniquely through a binary64 double, which is exactly what the
+// DOUBLE bucket's findability and the lossless float8 pushdown need.
+// 2147483648 (10 digits) is inside that bound; 9007199254740993 (16) is
+// not — without condemning the 10-digit value by association with its LONG
+// label. This is not "precision <= 15 excludes exactly the values above
+// 2^53": the predicate works on stripped precision, so a value like 1e16
+// strips to precision 1 and is admitted despite being past 2^53 — the bound
+// is on significant digits, not on magnitude.
 //
 // A non-numeric t is never admitted; callers route by JSON kind first.
 func AdmitsNumeric(t DataType, v Decimal) bool {

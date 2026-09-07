@@ -1032,6 +1032,28 @@ it catches up.
   same closed set, so there was no operator it made tolerable. Callers that
   validate first — the engine does — see no change.
 
+- **`ExpandLeaf` (and `EvalLeaf`, which evaluates what it built) now states
+  its contract on `declared`: at most one numeric `DataType`.** Every
+  production caller already routes through `TypeSet`'s `CollapseNumeric`
+  before reaching this function, so a `declared` set carrying more than one
+  numeric type was always outside what the kernel exercises — but nothing
+  said so. A caller that skips the collapse is now told what it forfeits: a
+  stored value can satisfy several of those buckets rather than the single
+  narrowest one, since `AdmitsNumeric` judges each declared type
+  independently. Documentation only; no behavior changes.
+
+- **`AdmitsNumeric`'s doc comment states the mantissa guarantee it actually
+  gives, not a looser one.** It previously said "every integer above 2^53
+  needs at least 16 significant digits, so precision <= 15 excludes exactly
+  the values a 53-bit mantissa cannot hold" — false under the predicate's
+  own stripped-precision convention (`1e16` strips to precision 1 and is
+  admitted despite being past 2^53; the bound is on significant digits, not
+  magnitude). The exact guarantee: a decimal of at most 15 significant
+  digits round-trips uniquely through a binary64 double, which is what the
+  `DOUBLE` bucket's findability and the lossless float8 pushdown need —
+  `2147483648` (10 digits) is inside that, `9007199254740993` (16) is not.
+  Documentation only; no behavior changes.
+
 ### Fixed
 
 - **`FieldsMapFromSchema` no longer drops a declared path on a field observed as
@@ -1163,7 +1185,11 @@ it catches up.
   through `toRange` in the decimal family before any fold ran. `foldToInt` no
   longer normalises a whole value (scale `<= 0`) at all, since every
   consumer now reaches the returned value only through the now-magnitude-first
-  `Cmp`.
+  `Cmp`. `Cmp` also gains an equal-scale fast path — the common case on a
+  per-row scan loop, where every value in a column shares one scale —
+  comparing the two coefficients directly instead of computing each side's
+  adjusted exponent (two `Precision()` calls, each a string conversion)
+  first.
 
 ## [0.8.3] - 2026-07-26
 

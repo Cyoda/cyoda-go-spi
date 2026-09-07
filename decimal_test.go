@@ -540,12 +540,56 @@ func TestDecimalCmp_AgreesWithAlignmentOracle(t *testing.T) {
 		if rng.Intn(20) == 0 {
 			b = zero
 		}
+		// Final review I7 / ruling 24: Cmp's equal-scale fast path
+		// (d.scale == other.scale) compares coefficients directly, skipping
+		// the adjusted-exponent computation entirely — a distinct code path
+		// from the tie-then-align branch below it. Two independently random
+		// scales land on the SAME value only 1-in-121 of the time, which
+		// exercises the fast path but not with the density a dedicated
+		// optimization deserves, so force it explicitly on a slice of
+		// iterations: same scale as a, an independently random coefficient
+		// (not forced equal to a's, or this would only ever re-exercise the
+		// "exercise equality" branch above).
+		if rng.Intn(5) == 0 {
+			b = Decimal{unscaled: randDec().unscaled, scale: a.scale}
+		}
 		if got, want := a.Cmp(b), cmpByAlignment(a, b); got != want {
 			t.Fatalf("Cmp(%s, %s) = %d, oracle says %d", a.Canonical(), b.Canonical(), got, want)
 		}
 		if got, want := b.Cmp(a), cmpByAlignment(b, a); got != want {
 			t.Fatalf("Cmp(%s, %s) = %d, oracle says %d", b.Canonical(), a.Canonical(), got, want)
 		}
+	}
+}
+
+// A focused, non-random complement to the oracle property above: Cmp's
+// equal-scale fast path (final review I7 / ruling 24) compares coefficients
+// directly rather than computing each side's adjusted exponent — pin it
+// against hand-picked equal-scale pairs, including the tie case (equal
+// coefficient too, so Cmp must return 0 without ever reaching the alignment
+// branch).
+func TestDecimalCmp_EqualScaleFastPath(t *testing.T) {
+	cases := []struct {
+		name  string
+		a, b  Decimal
+		wantD int // want a.Cmp(b)
+	}{
+		{"equal scale, a<b, positive", Decimal{unscaled: bigInt("100"), scale: 2}, Decimal{unscaled: bigInt("200"), scale: 2}, -1},
+		{"equal scale, a>b, positive", Decimal{unscaled: bigInt("300"), scale: 2}, Decimal{unscaled: bigInt("200"), scale: 2}, 1},
+		{"equal scale, equal value", Decimal{unscaled: bigInt("500"), scale: 2}, Decimal{unscaled: bigInt("500"), scale: 2}, 0},
+		{"equal scale, both negative, a<b", Decimal{unscaled: bigInt("-300"), scale: 2}, Decimal{unscaled: bigInt("-200"), scale: 2}, -1},
+		{"equal scale, both negative, a>b", Decimal{unscaled: bigInt("-100"), scale: 2}, Decimal{unscaled: bigInt("-200"), scale: 2}, 1},
+		{"equal negative scale", Decimal{unscaled: bigInt("5"), scale: -3}, Decimal{unscaled: bigInt("4"), scale: -3}, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.a.Cmp(tc.b); got != tc.wantD {
+				t.Errorf("Cmp(%s, %s) = %d, want %d", tc.a.Canonical(), tc.b.Canonical(), got, tc.wantD)
+			}
+			if got, want := tc.b.Cmp(tc.a), -tc.wantD; got != want {
+				t.Errorf("Cmp(%s, %s) = %d, want %d (antisymmetric)", tc.b.Canonical(), tc.a.Canonical(), got, want)
+			}
+		})
 	}
 }
 

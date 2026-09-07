@@ -332,6 +332,15 @@ func (d Decimal) Cmp(other Decimal) int {
 		return 0
 	}
 
+	// Equal scale: the coefficients are already aligned, so comparing them
+	// directly is exact and skips the adjusted-exponent computation (two
+	// Precision() calls, each a string conversion) entirely. The common
+	// case on a per-row scan loop, where every value in a column shares one
+	// scale.
+	if d.scale == other.scale {
+		return d.unscaled.Cmp(other.unscaled)
+	}
+
 	// Same non-zero sign: compare magnitudes. For negatives the larger
 	// magnitude is the smaller value, which multiplying by the sign
 	// handles.

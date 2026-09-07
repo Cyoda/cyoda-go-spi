@@ -1063,6 +1063,18 @@ it catches up.
 
 ### Fixed
 
+- **`spitest`: the `AsyncSearch/ReapExpired` subtests no longer race the
+  reaper's clock.** They stamped a finish time from the harness clock, slept
+  the TTL plus one millisecond, and expected the store's own clock to agree
+  within that millisecond. A backend whose store clock is a different domain
+  from the harness clock (postgres stamps `h.Now` from the database, the
+  reaper's cutoff from the host) failed both subtests whenever the two
+  drifted apart by more than the margin — reproduced deterministically with
+  the harness clock skewed 20 ms ahead. The job is now stamped as finished an
+  hour before the harness clock and reaped with a one-minute TTL, and a new
+  `ReapExpired/FreshNotReaped` subtest pins the other half of the contract:
+  a job finished within the TTL, and a running job of any age, survive.
+
 - **Every `Decimal` path a request can reach is now bounded by the operand's
   own digits, not by its scale.** Four paths a request or an SPI consumer
   reaches cost time and memory proportional to a number the caller writes in a

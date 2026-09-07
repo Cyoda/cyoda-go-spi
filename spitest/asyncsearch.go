@@ -22,6 +22,7 @@ func runAsyncSearchSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "DeleteJob", testASDeleteJob)
 	runSubtest(t, h, tracker, "ReapExpired", testASReapExpired)
 	runSubtest(t, h, tracker, "ReapExpired/CancelledIsReapable", testASReapExpiredCancelledIsReapable)
+	runSubtest(t, h, tracker, "ReapExpired/FreshNotReaped", testASReapExpiredFreshNotReaped)
 	runSubtest(t, h, tracker, "TenantIsolation", testASTenantIsolation)
 	runSubtest(t, h, tracker, "Epoch/InitialisedToOne", testASEpochInitialisedToOne)
 	runSubtest(t, h, tracker, "Epoch/FencedWrites", testASEpochFencedWrites)
@@ -172,6 +173,19 @@ func testASDeleteJob(t *testing.T, h Harness) {
 	require.ErrorIs(t, err, spi.ErrNotFound)
 }
 
+// reapFinishTime is the finish time the ReapExpired subtests stamp: an hour
+// before the harness clock. A finish time is the CALLER's stamp (UpdateJobStatus
+// and Cancel record the time they are given) while the reaper's cutoff comes
+// from the store's own clock, and the two need not be the same clock domain:
+// the postgres harness reads h.Now from the database while the store reads
+// the host, and the two drift by tens of milliseconds under load. Stamping
+// "finished an hour ago" and reaping with a one-minute TTL leaves the
+// assertion nothing to lose to skew or scheduling — a millisecond margin
+// across two clocks was a coin toss, and it lost.
+func reapFinishTime(h Harness) time.Time { return h.Now().UTC().Add(-time.Hour) }
+
+const reapTTL = time.Minute
+
 func testASReapExpired(t *testing.T, h Harness) {
 	tid := h.NewTenant()
 	ctx := tenantContext(tid)
@@ -181,12 +195,9 @@ func testASReapExpired(t *testing.T, h Harness) {
 	// Move the job to a terminal state so ReapExpired considers it eligible.
 	// Running jobs are intentionally skipped by the reaper (they may still
 	// have live goroutines writing results).
-	finishTime := h.Now().UTC()
-	require.NoError(t, as.UpdateJobStatus(ctx, id, 1, "SUCCESSFUL", 0, "", finishTime, 0))
+	require.NoError(t, as.UpdateJobStatus(ctx, id, 1, "SUCCESSFUL", 0, "", reapFinishTime(h), 0))
 
-	ttl := 10 * time.Millisecond
-	h.AdvanceClock(ttl + 1*time.Millisecond)
-	n, err := as.ReapExpired(ctx, ttl)
+	n, err := as.ReapExpired(ctx, reapTTL)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, n, 1)
 	_, err = as.GetJob(ctx, id)
@@ -202,15 +213,35 @@ func testASReapExpiredCancelledIsReapable(t *testing.T, h Harness) {
 	as, _ := h.Factory.AsyncSearchStore(ctx)
 	id := newID()
 	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, id)))
-	require.NoError(t, as.Cancel(ctx, id, h.Now()))
+	require.NoError(t, as.Cancel(ctx, id, reapFinishTime(h)))
 
-	ttl := 10 * time.Millisecond
-	h.AdvanceClock(ttl + 1*time.Millisecond)
-	n, err := as.ReapExpired(ctx, ttl)
+	n, err := as.ReapExpired(ctx, reapTTL)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, n, 1)
 	_, err = as.GetJob(ctx, id)
 	require.ErrorIs(t, err, spi.ErrNotFound)
+}
+
+// testASReapExpiredFreshNotReaped is the other half of "deletes eligible
+// expired jobs": a job that finished just now is not expired under a
+// one-hour TTL and must survive the reap. A running job must survive
+// regardless of age, which is why the terminal job is the one stamped
+// from the harness clock.
+func testASReapExpiredFreshNotReaped(t *testing.T, h Harness) {
+	tid := h.NewTenant()
+	ctx := tenantContext(tid)
+	as, _ := h.Factory.AsyncSearchStore(ctx)
+	fresh, running := newID(), newID()
+	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, fresh)))
+	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, running)))
+	require.NoError(t, as.UpdateJobStatus(ctx, fresh, 1, "SUCCESSFUL", 0, "", h.Now().UTC(), 0))
+
+	_, err := as.ReapExpired(ctx, time.Hour)
+	require.NoError(t, err)
+	_, err = as.GetJob(ctx, fresh)
+	require.NoError(t, err, "a job finished within the TTL must not be reaped")
+	_, err = as.GetJob(ctx, running)
+	require.NoError(t, err, "a running job must never be reaped")
 }
 
 func testASTenantIsolation(t *testing.T, h Harness) {

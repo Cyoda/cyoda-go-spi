@@ -173,30 +173,62 @@ func testASDeleteJob(t *testing.T, h Harness) {
 	require.ErrorIs(t, err, spi.ErrNotFound)
 }
 
-// reapFinishTime is the finish time the ReapExpired subtests stamp: an hour
-// before the harness clock. A finish time is the CALLER's stamp (UpdateJobStatus
-// and Cancel record the time they are given) while the reaper's cutoff comes
-// from the store's own clock, and the two need not be the same clock domain:
-// the postgres harness reads h.Now from the database while the store reads
-// the host, and the two drift by tens of milliseconds under load. Stamping
-// "finished an hour ago" and reaping with a one-minute TTL leaves the
-// assertion nothing to lose to skew or scheduling — a millisecond margin
-// across two clocks was a coin toss, and it lost.
-func reapFinishTime(h Harness) time.Time { return h.Now().UTC().Add(-time.Hour) }
+// The ReapExpired subtests place every timestamp hours apart, so that no
+// clock skew or scheduling delay can move a job across the reaper's cutoff.
+// A finish time is the CALLER's stamp (UpdateJobStatus and Cancel record the
+// time they are given) while the reaper's cutoff comes from the store's own
+// clock, and the two need not be the same clock domain: the postgres harness
+// reads h.Now from the database while the store reads the host, and a DB
+// clock a millisecond ahead of the host was enough to lose the old
+// millisecond margin. The offsets bracket the TTL from both sides:
+//
+//	reapJobAge  = 1h   the reaped job finished this long before h.Now
+//	survivalTTL = 2h   > reapJobAge: the job is not yet expired, must survive
+//	reapTTL     = 1min < reapJobAge: the job is expired, must be reaped
+//	freshJobAge = 1min the fresh job finished this long before h.Now
+//	freshTTL    = 1h   > freshJobAge: not expired, must survive
+//
+// A store that drops the TTL on the floor (cutoff = now) reaps the fresh job
+// and fails; one whose cutoff is off by an hour in either direction fails one
+// of the brackets. The fresh job's age is a minute rather than zero because
+// on a virtual-clock backend h.Now IS the store's cutoff clock, and a finish
+// time equal to "now" would sit exactly on the boundary.
+const (
+	reapJobAge  = time.Hour
+	survivalTTL = 2 * time.Hour
+	reapTTL     = time.Minute
+	freshJobAge = time.Minute
+	freshTTL    = time.Hour
+)
 
-const reapTTL = time.Minute
+// backdatedJob is newSearchJob with CreateTime moved age into the past, so a
+// finish time stamped age ago never precedes the job's own creation — a shape
+// no production caller produces, and one a backend is free to reject.
+func backdatedJob(h Harness, tid spi.TenantID, id string, age time.Duration) *spi.SearchJob {
+	job := newSearchJob(h, tid, id)
+	job.CreateTime = job.CreateTime.Add(-age - time.Minute)
+	return job
+}
 
 func testASReapExpired(t *testing.T, h Harness) {
 	tid := h.NewTenant()
 	ctx := tenantContext(tid)
 	as, _ := h.Factory.AsyncSearchStore(ctx)
 	id := newID()
-	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, id)))
+	require.NoError(t, as.CreateJob(ctx, backdatedJob(h, tid, id, reapJobAge)))
 	// Move the job to a terminal state so ReapExpired considers it eligible.
 	// Running jobs are intentionally skipped by the reaper (they may still
 	// have live goroutines writing results).
-	require.NoError(t, as.UpdateJobStatus(ctx, id, 1, "SUCCESSFUL", 0, "", reapFinishTime(h), 0))
+	finishTime := h.Now().UTC().Add(-reapJobAge)
+	require.NoError(t, as.UpdateJobStatus(ctx, id, 1, "SUCCESSFUL", 0, "", finishTime, 0))
 
+	// Not expired under a TTL longer than its age: survives.
+	_, err := as.ReapExpired(ctx, survivalTTL)
+	require.NoError(t, err)
+	_, err = as.GetJob(ctx, id)
+	require.NoError(t, err, "a job finished within the TTL must not be reaped")
+
+	// Expired under a TTL shorter than its age: reaped.
 	n, err := as.ReapExpired(ctx, reapTTL)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, n, 1)
@@ -212,8 +244,8 @@ func testASReapExpiredCancelledIsReapable(t *testing.T, h Harness) {
 	ctx := tenantContext(tid)
 	as, _ := h.Factory.AsyncSearchStore(ctx)
 	id := newID()
-	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, id)))
-	require.NoError(t, as.Cancel(ctx, id, reapFinishTime(h)))
+	require.NoError(t, as.CreateJob(ctx, backdatedJob(h, tid, id, reapJobAge)))
+	require.NoError(t, as.Cancel(ctx, id, h.Now().UTC().Add(-reapJobAge)))
 
 	n, err := as.ReapExpired(ctx, reapTTL)
 	require.NoError(t, err)
@@ -223,25 +255,25 @@ func testASReapExpiredCancelledIsReapable(t *testing.T, h Harness) {
 }
 
 // testASReapExpiredFreshNotReaped is the other half of "deletes eligible
-// expired jobs": a job that finished just now is not expired under a
-// one-hour TTL and must survive the reap. A running job must survive
-// regardless of age, which is why the terminal job is the one stamped
-// from the harness clock.
+// expired jobs": a job that finished a minute ago is not expired under a
+// one-hour TTL and must survive the reap, and a running job is not eligible
+// at all, however old — this one was created an hour ago and has never
+// finished.
 func testASReapExpiredFreshNotReaped(t *testing.T, h Harness) {
 	tid := h.NewTenant()
 	ctx := tenantContext(tid)
 	as, _ := h.Factory.AsyncSearchStore(ctx)
 	fresh, running := newID(), newID()
-	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, fresh)))
-	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, running)))
-	require.NoError(t, as.UpdateJobStatus(ctx, fresh, 1, "SUCCESSFUL", 0, "", h.Now().UTC(), 0))
+	require.NoError(t, as.CreateJob(ctx, backdatedJob(h, tid, fresh, freshJobAge)))
+	require.NoError(t, as.CreateJob(ctx, backdatedJob(h, tid, running, reapJobAge)))
+	require.NoError(t, as.UpdateJobStatus(ctx, fresh, 1, "SUCCESSFUL", 0, "", h.Now().UTC().Add(-freshJobAge), 0))
 
-	_, err := as.ReapExpired(ctx, time.Hour)
+	_, err := as.ReapExpired(ctx, freshTTL)
 	require.NoError(t, err)
 	_, err = as.GetJob(ctx, fresh)
 	require.NoError(t, err, "a job finished within the TTL must not be reaped")
 	_, err = as.GetJob(ctx, running)
-	require.NoError(t, err, "a running job must never be reaped")
+	require.NoError(t, err, "a running job is never eligible, however old")
 }
 
 func testASTenantIsolation(t *testing.T, h Harness) {

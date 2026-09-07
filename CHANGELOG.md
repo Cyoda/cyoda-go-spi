@@ -1068,12 +1068,20 @@ it catches up.
   the TTL plus one millisecond, and expected the store's own clock to agree
   within that millisecond. A backend whose store clock is a different domain
   from the harness clock (postgres stamps `h.Now` from the database, the
-  reaper's cutoff from the host) failed both subtests whenever the two
-  drifted apart by more than the margin — reproduced deterministically with
-  the harness clock skewed 20 ms ahead. The job is now stamped as finished an
-  hour before the harness clock and reaped with a one-minute TTL, and a new
-  `ReapExpired/FreshNotReaped` subtest pins the other half of the contract:
-  a job finished within the TTL, and a running job of any age, survive.
+  reaper's cutoff from the host) failed both subtests whenever the database
+  clock ran more than that millisecond ahead of the host — reproduced
+  deterministically with the harness clock skewed 20 ms ahead. Every
+  timestamp is now hours apart and brackets the TTL from both sides: the
+  reaped job finished an hour before the harness clock, survives a two-hour
+  TTL and is reaped by a one-minute one; the new
+  `AsyncSearch/ReapExpired/FreshNotReaped` subtest pins that a job finished
+  a minute ago survives a one-hour TTL and that a running job created an
+  hour ago is never eligible. Jobs are created before they finish. Two
+  subtest paths are new since the last tag —
+  `AsyncSearch/ReapExpired/CancelledIsReapable` and
+  `AsyncSearch/ReapExpired/FreshNotReaped` — and `Harness.Skip` matches a
+  path exactly, so a backend that skips `AsyncSearch/ReapExpired` needs a
+  key per path it cannot pass.
 
 - **Every `Decimal` path a request can reach is now bounded by the operand's
   own digits, not by its scale.** Four paths a request or an SPI consumer

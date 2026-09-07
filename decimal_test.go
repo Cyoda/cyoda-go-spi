@@ -516,10 +516,7 @@ func cmpByAlignment(d, other Decimal) int {
 
 func TestDecimalCmp_AgreesWithAlignmentOracle(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
-	randDec := func() Decimal {
-		// Coefficients up to 40 digits, scales in [-60, 60]: wide enough
-		// to cross every magnitude band and tie on adjusted exponent.
-		digits := rng.Intn(40) + 1
+	randCoeff := func(digits int) *big.Int {
 		var sb strings.Builder
 		if rng.Intn(2) == 0 {
 			sb.WriteByte('-')
@@ -529,13 +526,43 @@ func TestDecimalCmp_AgreesWithAlignmentOracle(t *testing.T) {
 			sb.WriteByte(byte('0' + rng.Intn(10)))
 		}
 		u, _ := new(big.Int).SetString(sb.String(), 10)
-		return Decimal{unscaled: u, scale: int32(rng.Intn(121) - 60)}
+		return u
+	}
+	// Coefficient sizes span 1..2000 digits — small values, and values far
+	// past the point where a digit count is worth estimating rather than
+	// computing — with the small end kept dense because that is where the
+	// magnitude bands are narrowest.
+	randDigits := func() int {
+		if rng.Intn(4) == 0 {
+			return rng.Intn(2000) + 1
+		}
+		return rng.Intn(40) + 1
+	}
+	randDec := func() Decimal {
+		// Scales in [-60, 60]: wide enough to cross every magnitude band
+		// and tie on adjusted exponent.
+		return Decimal{unscaled: randCoeff(randDigits()), scale: int32(rng.Intn(121) - 60)}
 	}
 	zero := Decimal{unscaled: new(big.Int), scale: 0}
 	for i := 0; i < 20000; i++ {
 		a, b := randDec(), randDec()
 		if rng.Intn(10) == 0 {
 			b = a // exercise equality
+		}
+		// Cmp decides magnitude from a bit-length bracket on each
+		// coefficient's digit count and pays for the exact count only when
+		// the two brackets overlap. Two independently random scales land on
+		// that boundary too rarely to test it, so construct it: give b a
+		// scale that puts its adjusted exponent a chosen small offset from
+		// a's — 0 (a genuine tie, brackets certainly overlap), ±1 (they may
+		// overlap), ±2 (the first offset the bracket can decide alone).
+		if rng.Intn(4) == 0 {
+			bu := randCoeff(randDigits())
+			aAdj := int64(a.Precision()) - int64(a.scale)
+			bScale := int64(len(new(big.Int).Abs(bu).String())) - (aAdj + int64(rng.Intn(5)-2))
+			if bScale >= math.MinInt32 && bScale <= math.MaxInt32 {
+				b = Decimal{unscaled: bu, scale: int32(bScale)}
+			}
 		}
 		if rng.Intn(20) == 0 {
 			b = zero

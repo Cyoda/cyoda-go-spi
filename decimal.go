@@ -148,31 +148,46 @@ func (d Decimal) Unscaled() *big.Int {
 // semantics: a non-zero unscaled value with trailing zero digits has
 // those digits removed and the scale decremented accordingly. A zero
 // value collapses to unscaled=0, scale=0.
+//
+// The whole zero run is removed in one division. Peeling one digit per
+// full-width QuoRem, as this once did, costs O(zeros × digits): a
+// 1,000,002-byte operand — a "1" and a million zeros, comfortably inside
+// the request body cap — took minutes. Both the search-operand path
+// (expandCompare strips the operand before bucketing it) and the write
+// path (inferDataType) are request-boundary, so the cost has to be the
+// value's own size and nothing else.
 func (d Decimal) StripTrailingZeros() Decimal {
 	if d.unscaled == nil || d.unscaled.Sign() == 0 {
 		return Decimal{unscaled: new(big.Int), scale: 0}
 	}
-	u := new(big.Int).Set(d.unscaled)
-	scale := d.scale
-	ten := big.NewInt(10)
-	zero := big.NewInt(0)
-	q := new(big.Int)
-	r := new(big.Int)
-	for {
-		q.QuoRem(u, ten, r)
-		if r.Cmp(zero) != 0 {
-			break
-		}
-		if scale == math.MinInt32 {
-			// Refusing to wrap is the only safe answer; a value at the int32
-			// scale floor cannot be stripped further and returning it
-			// unstripped is exact.
-			break
-		}
-		u.Set(q)
-		scale--
+	// An odd coefficient ends in an odd decimal digit, so it has no
+	// trailing zero at all — the common case, settled in O(1) without
+	// rendering anything.
+	if d.unscaled.Bit(0) == 1 {
+		return Decimal{unscaled: new(big.Int).Set(d.unscaled), scale: d.scale}
 	}
-	return Decimal{unscaled: u, scale: scale}
+	// One decimal rendering — big.Int's conversion is divide-and-conquer,
+	// so this is the cheap way to learn the zero count — then one division.
+	// The rendering may carry a leading '-'; counting from the end is
+	// unaffected by it, and the run can never consume every digit because
+	// a non-zero value has a non-zero leading digit.
+	s := d.unscaled.String()
+	k := int64(0)
+	for i := len(s) - 1; i >= 0 && s[i] == '0'; i-- {
+		k++
+	}
+	// Refusing to wrap is the only safe answer; a value at the int32 scale
+	// floor cannot be stripped further and returning it unstripped is
+	// exact. Strip only as far as the floor allows — exactly where the
+	// per-digit loop stopped.
+	if headroom := int64(d.scale) - math.MinInt32; k > headroom {
+		k = headroom
+	}
+	if k == 0 {
+		return Decimal{unscaled: new(big.Int).Set(d.unscaled), scale: d.scale}
+	}
+	factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(k), nil)
+	return Decimal{unscaled: new(big.Int).Quo(d.unscaled, factor), scale: d.scale - int32(k)}
 }
 
 // Precision returns the number of significant digits in the unscaled
@@ -198,6 +213,13 @@ func (d Decimal) SetScale(newScale int32) (Decimal, error) {
 		}
 		return Decimal{unscaled: u, scale: newScale}, nil
 	}
+	// Zero rescales exactly in either direction, and answering it here keeps
+	// a scale gap bounded only by int32 from materialising a power of ten
+	// that could not have changed the result. A nil coefficient reads as
+	// zero, as it does in Sign, IsZero and Unscaled.
+	if d.unscaled == nil || d.unscaled.Sign() == 0 {
+		return Decimal{unscaled: new(big.Int), scale: newScale}, nil
+	}
 	diff := int64(newScale) - int64(d.scale)
 	if diff > 0 {
 		factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(diff), nil)
@@ -205,6 +227,15 @@ func (d Decimal) SetScale(newScale int32) (Decimal, error) {
 		return Decimal{unscaled: u, scale: newScale}, nil
 	}
 	// diff < 0: divide by 10^(-diff); require exactness.
+	//
+	// Settle the inexact case before building the divisor — the scale gap is
+	// bounded only by int32, so 10^(-diff) is a multi-hundred-megabyte
+	// integer for an operand as small as "1e-2000000000". A non-zero
+	// coefficient of p digits satisfies |unscaled| < 10^p, so as soon as
+	// -diff > p the divisor strictly exceeds it and the division is inexact.
+	if -diff > int64(d.Precision()) {
+		return Decimal{}, fmt.Errorf("SetScale: cannot reduce scale from %d to %d without precision loss", d.scale, newScale)
+	}
 	factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(-diff), nil)
 	q := new(big.Int)
 	r := new(big.Int)
@@ -247,7 +278,33 @@ func (d Decimal) roundToScale(newScale int32, mode roundingMode) Decimal {
 		}
 		return r
 	}
-	factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(d.scale)-int64(newScale)), nil)
+	// Below the operand's own precision the answer is arithmetic, not
+	// division. With d = u × 10^(-s), u ≠ 0 and p = Precision() digits,
+	// |u| < 10^p; rescaling down to n < s divides by 10^(s-n), so once
+	// s-n > p the divisor strictly exceeds |u| and the truncated quotient is
+	// 0 with the whole (non-zero) value as the dropped part. CEILING then
+	// yields +1 for a positive d and 0 for a negative one; FLOOR mirrors it.
+	// Building 10^(s-n) instead costs minutes and hundreds of megabytes for
+	// a 13-byte operand — "-1e-2000000000" reaches here through foldToInt
+	// (newScale 0) and roundDoubleImprecise (newScale 292) alike. Below the
+	// threshold the divisor is bounded by the operand's own digits, so the
+	// general path below stands.
+	diff := int64(d.scale) - int64(newScale) // > 0
+	sign := d.unscaled.Sign()
+	if sign == 0 {
+		return Decimal{unscaled: new(big.Int), scale: newScale}
+	}
+	if diff > int64(d.Precision()) {
+		u := new(big.Int)
+		switch {
+		case mode == roundCeiling && sign > 0:
+			u.SetInt64(1)
+		case mode == roundFloor && sign < 0:
+			u.SetInt64(-1)
+		}
+		return Decimal{unscaled: u, scale: newScale}
+	}
+	factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(diff), nil)
 	q := new(big.Int)
 	rem := new(big.Int)
 	q.QuoRem(d.unscaled, factor, rem)
@@ -300,6 +357,44 @@ func (d Decimal) roundToPrecision(maxPrec int, mode roundingMode) Decimal {
 	return result
 }
 
+// log10(2) · 2^32 = 1292913986.3546…, so
+//
+//	log10Of2Lo / 2^32  <  log10(2)  <  log10Of2Hi / 2^32
+//
+// strictly, in both directions. Dyadic denominators keep the arithmetic exact
+// in int64: the largest product is bitLen · log10Of2Hi, and for bitLen ≤
+// math.MaxInt32 that is under 2.78e18, well inside int64.
+const (
+	log10Of2Lo    = 1292913986
+	log10Of2Hi    = 1292913987
+	log10Of2Shift = 32
+)
+
+// digitCountBounds brackets the number of decimal digits in a non-zero
+// big.Int of bitLen bits: lo <= digits <= hi, with hi-lo <= 1.
+//
+// For a value v with bit length b, 2^(b-1) <= |v| <= 2^b − 1, so the digit
+// count D = floor(log10|v|) + 1 satisfies
+//
+//	D >= floor((b-1)·log10 2) + 1 >= floor((b-1)·log10Of2Lo/2^32) + 1 = lo
+//	D <= floor(log10(2^b − 1)) + 1 <= floor(b·log10 2) + 1
+//	                                <= floor(b·log10Of2Hi/2^32) + 1 = hi
+//
+// (x > y implies floor(x) >= floor(y), which is what carries each bound
+// across the rational approximation).
+//
+// The width is at most one digit: hi − lo <= (b·log10Of2Hi − (b−1)·log10Of2Lo)/2^32
+// + 1 = (b + log10Of2Lo)/2^32 + 1, and for every b <= math.MaxInt32 that is
+// (2147483647 + 1292913986)/2^32 + 1 = 1.801…; hi − lo is an integer, so it is
+// at most 1.
+func digitCountBounds(bitLen int) (lo, hi int64) {
+	if bitLen <= 0 {
+		return 1, 1 // zero has one digit, matching Precision()
+	}
+	b := int64(bitLen)
+	return ((b-1)*log10Of2Lo)>>log10Of2Shift + 1, (b*log10Of2Hi)>>log10Of2Shift + 1
+}
+
 // int128Min = -2^127, int128Max = 2^127 - 1.
 // Pre-computed once at package init to avoid recomputing per call.
 var int128Min = new(big.Int).Neg(new(big.Int).Lsh(big.NewInt(1), 127))
@@ -344,6 +439,23 @@ func (d Decimal) Cmp(other Decimal) int {
 	// Same non-zero sign: compare magnitudes. For negatives the larger
 	// magnitude is the smaller value, which multiplying by the sign
 	// handles.
+	//
+	// Try the bit-length bracket first. Precision() is a full big.Int → string
+	// conversion — 20 ms at 300,000 digits, and this runs per row in
+	// evalCompare/evalBetween whenever an UNBOUND-sink operand's scale differs
+	// from the stored value's. Bit length is O(1) and pins the digit count to
+	// within one, which decides the order outright unless the two adjusted
+	// exponents are genuinely close.
+	dLo, dHi := digitCountBounds(d.unscaled.BitLen())
+	oLo, oHi := digitCountBounds(other.unscaled.BitLen())
+	switch {
+	case dLo-int64(d.scale) > oHi-int64(other.scale):
+		return ds
+	case dHi-int64(d.scale) < oLo-int64(other.scale):
+		return -ds
+	}
+
+	// The brackets overlap: pay for the exact digit counts.
 	dAdj := int64(d.Precision()) - int64(d.scale)
 	oAdj := int64(other.Precision()) - int64(other.scale)
 	switch {

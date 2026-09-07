@@ -1056,6 +1056,29 @@ it catches up.
 
 ### Fixed
 
+- **Every `Decimal` path a request can reach is now bounded by the operand's
+  own digits, not by its scale.** Three request-boundary paths cost time and
+  memory proportional to a number the caller writes in a handful of bytes.
+  `StripTrailingZeros` — on the search-operand path in `expandCompare` and on
+  the write path in `inferDataType` — removed one zero digit per full-width
+  division, so a "1" followed by a million zeros took minutes; it now counts
+  the run once and divides once (1.6 s → 2.3 ms at 100,000 zeros; 68 ms at a
+  million, where the old loop did not finish). `roundToScale`, reached for
+  every comparing operand through `foldToInt` and through the DOUBLE bucket's
+  `roundDoubleImprecise`, built `10^(scale-newScale)` before dividing, so
+  `-1e-2000000000` climbed toward 900 MB and ran for minutes; below the
+  operand's own precision the quotient is 0 and the whole value is the dropped
+  part, so the rounded result is `0` or `±1` by sign and mode, with no power of
+  ten materialised (36 s → 1.7 µs at a scale gap of 10^8; the same early exit
+  makes `SetScale` report its precision-loss error without building the
+  divisor, and zero now rescales without one in either direction). `Cmp`
+  computed each side's adjusted exponent from `Precision()`, a full big.Int to
+  decimal-string conversion, twice per comparison and therefore once per row in
+  `evalCompare`/`evalBetween`; it now brackets the digit count from `BitLen`
+  and pays for the exact count only when the two brackets overlap (105 ms →
+  292 ns on a million-digit coefficient). All three are behaviour-preserving,
+  pinned by property tests against the previous implementations.
+
 - **`FieldsMapFromSchema` no longer drops a declared path on a field observed as
   more than one kind.** Both the decoder and the flattening dispatched on the
   node's single `kind` label, so the array branch of an object-and-array union

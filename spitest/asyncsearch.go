@@ -374,8 +374,9 @@ func testASTerminalWriteOnce(t *testing.T, h Harness) {
 }
 
 // The Claim subtests, and the two SaveResults sweeps that only need a stale
-// job, give a fresh heartbeat a minute of slack, not ten milliseconds. A heartbeat is stamped from the store's own clock and cannot
-// be backdated, so "this job is stale" is expressed through CreateTime
+// job, give a fresh heartbeat a minute of slack, not ten milliseconds. A
+// heartbeat is stamped from the store's own clock and cannot be backdated,
+// so "this job is stale" is expressed through CreateTime
 // instead: a job created claimJobAge ago with no heartbeat sits an hour past
 // the cutoff, and one whose heartbeat was just refreshed sits a minute
 // inside it — distances no scheduling delay between two calls closes. On

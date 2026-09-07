@@ -224,10 +224,6 @@ func TestFieldsMapFromSchema(t *testing.T) {
 				if fd.IsArray != want.isArray {
 					t.Errorf("%q: IsArray = %v, want %v", path, fd.IsArray, want.isArray)
 				}
-				if fd.MaxWidth != 0 {
-					t.Errorf("%q: MaxWidth = %d, want 0 (the wire form carries no widths)",
-						path, fd.MaxWidth)
-				}
 			}
 		})
 	}

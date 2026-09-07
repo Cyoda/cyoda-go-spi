@@ -103,8 +103,7 @@ func (b *ObjectBranch) Len() int { return len(b.children) }
 // ArrayBranch records that a path was observed holding an array, together with
 // the descriptor shared by every element.
 type ArrayBranch struct {
-	element  *ModelNode
-	maxWidth int
+	element *ModelNode
 }
 
 // Kind implements [Branch].
@@ -117,11 +116,6 @@ func (b *ArrayBranch) Kind() NodeKind { return KindArray }
 // that would declare a field with an empty type set — a leaf that matches
 // nothing — where the truth is that nothing was declared at all.
 func (b *ArrayBranch) Element() *ModelNode { return b.element }
-
-// MaxWidth returns the widest array observed at this level, or zero. It is a
-// discovery-time statistic that the wire format does not carry, so it is zero
-// on any tree decoded from persisted bytes.
-func (b *ArrayBranch) MaxWidth() int { return b.maxWidth }
 
 // ModelNode is a node in a model's schema tree — the decoded form of
 // [ModelDescriptor.Schema].
@@ -346,25 +340,6 @@ func (n *ModelNode) SetElement(element *ModelNode) {
 	n.fieldCache.Store(nil)
 }
 
-// ObserveArrayWidth records an observed array width, keeping the widest, and
-// establishes the array branch if it does not exist.
-func (n *ModelNode) ObserveArrayWidth(width int) {
-	a := n.Array()
-	if a == nil {
-		a = &ArrayBranch{}
-		n.ensureBranches()
-		n.branches[KindArray] = a
-	}
-	if width > a.maxWidth {
-		a.maxWidth = width
-	}
-	// maxWidth reaches FieldDescriptor.MaxWidth, so this drops the cached
-	// flattening like every other mutator. No current caller reads Fields()
-	// before setting the width, but the omission would be a silent-staleness
-	// trap on a type that plugins hold.
-	n.fieldCache.Store(nil)
-}
-
 func (n *ModelNode) ensureBranches() {
 	if n.branches == nil {
 		n.branches = make(map[NodeKind]Branch, 1)
@@ -567,9 +542,7 @@ func MarshalModelNode(n *ModelNode) ([]byte, error) {
 // nobody defined. Fail closed.
 //
 // The returned map is freshly built on every call and owned by the caller;
-// mutating it affects nothing else. FieldDescriptor.MaxWidth is always zero:
-// observed array widths are a discovery-time statistic that the wire format
-// does not carry.
+// mutating it affects nothing else.
 func FieldsMapFromSchema(schema []byte) (map[string]FieldDescriptor, error) {
 	if len(schema) == 0 {
 		return nil, nil
@@ -715,10 +688,9 @@ func collectFields(n *ModelNode, prefix string, inArray bool, out *[]FieldDescri
 		// The element is a scalar (or the nullable marker) and nothing else,
 		// so it IS the leaf. This is the one place IsArray is set.
 		*out = append(*out, FieldDescriptor{
-			Path:     arrayPath,
-			Types:    a.element.DeclaredTypes(),
-			IsArray:  true,
-			MaxWidth: a.maxWidth,
+			Path:    arrayPath,
+			Types:   a.element.DeclaredTypes(),
+			IsArray: true,
 		})
 		return
 	}

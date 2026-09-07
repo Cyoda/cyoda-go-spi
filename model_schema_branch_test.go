@@ -83,13 +83,6 @@ func TestMutators_EstablishOneBranchEach(t *testing.T) {
 	if m.Scalar() == nil {
 		t.Error("SetChild must not disturb the scalar branch")
 	}
-
-	w := NewArrayNode(NewLeafNode(String))
-	w.ObserveArrayWidth(4)
-	w.ObserveArrayWidth(2)
-	if got := w.Array().MaxWidth(); got != 4 {
-		t.Errorf("MaxWidth() = %d, want 4 (the widest observed)", got)
-	}
 }
 
 // The scalar branch never holds NULL: that is what lets the persisted

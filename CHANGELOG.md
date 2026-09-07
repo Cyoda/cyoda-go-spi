@@ -14,6 +14,13 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **An array's length is not part of the model.** `FieldDescriptor.MaxWidth`,
+  `ArrayBranch.MaxWidth` and `ModelNode.ObserveArrayWidth` are removed. The
+  width was a discovery-time statistic the wire form never carried, so every
+  tree decoded from persisted bytes reported zero and nothing a plugin could
+  reach ever held a real value. An array branch declares its element and
+  nothing else.
+
 - **`EntityStore` has no whole-model read; `Search` and `Iterate` are
   required.** `GetAll` and `GetAllAsAt` are removed, and the optional
   `Searcher` and `Iterable` interfaces are folded into `EntityStore` as

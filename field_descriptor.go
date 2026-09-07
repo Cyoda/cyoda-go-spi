@@ -27,10 +27,4 @@ type FieldDescriptor struct {
 
 	// IsArray marks a leaf reached directly as an array's element type.
 	IsArray bool
-
-	// MaxWidth is an observed-width statistic from model discovery. It is
-	// NOT populated on the read path: the stored schema wire format carries
-	// no width, so a descriptor obtained via [FieldsMapFromSchema] always
-	// reports 0. Only the engine's discovery-time tree populates it.
-	MaxWidth int
 }

@@ -201,9 +201,12 @@ const (
 	freshTTL    = time.Hour
 )
 
-// backdatedJob is newSearchJob with CreateTime moved age into the past, so a
-// finish time stamped age ago never precedes the job's own creation — a shape
-// no production caller produces, and one a backend is free to reject.
+// backdatedJob is newSearchJob with CreateTime moved age (plus a minute of
+// slack) into the past, so the job is unambiguously past any cutoff shorter
+// than age. The reap subtests also stamp finish times age ago, and the slack
+// keeps every such finish time after the job's own creation — a finish before
+// creation is a shape no production caller produces, and one a backend is
+// free to reject.
 func backdatedJob(h Harness, tid spi.TenantID, id string, age time.Duration) *spi.SearchJob {
 	job := newSearchJob(h, tid, id)
 	job.CreateTime = job.CreateTime.Add(-age - time.Minute)
@@ -370,8 +373,8 @@ func testASTerminalWriteOnce(t *testing.T, h Harness) {
 	require.Equal(t, 5, got.ResultCount, "rejected writes must not overwrite fields set by the original terminal transition")
 }
 
-// The Claim subtests give a fresh heartbeat a minute of slack, not ten
-// milliseconds. A heartbeat is stamped from the store's own clock and cannot
+// The Claim subtests, and the two SaveResults sweeps that only need a stale
+// job, give a fresh heartbeat a minute of slack, not ten milliseconds. A heartbeat is stamped from the store's own clock and cannot
 // be backdated, so "this job is stale" is expressed through CreateTime
 // instead: a job created claimJobAge ago with no heartbeat sits an hour past
 // the cutoff, and one whose heartbeat was just refreshed sits a minute
@@ -397,8 +400,11 @@ func testASClaimStaleClaimed(t *testing.T, h Harness) {
 
 	// The heartbeat goes stale by the clock advancing past a short window.
 	// Delay only makes it staler, so this direction cannot lose to load.
+	// This is the one sweep that keeps a fine-grained staleAfter: it pins
+	// that a heartbeat, not only a CreateTime, is what goes stale, and that
+	// staleAfter is honoured at millisecond granularity.
 	staleAfter := 10 * time.Millisecond
-	h.AdvanceClock(staleAfter + time.Millisecond)
+	h.AdvanceClock(2 * staleAfter)
 
 	claimed, err := as.ClaimStale(ctx, staleAfter, 1000)
 	require.NoError(t, err)
@@ -413,12 +419,9 @@ func testASClaimStaleClaimed(t *testing.T, h Harness) {
 	require.NotNil(t, got.HeartbeatTime)
 	require.True(t, got.HeartbeatTime.After(*before.HeartbeatTime),
 		"claiming must refresh the persisted HeartbeatTime past the one it found stale")
-
-	// Refreshed heartbeat: a re-claim with a minute of slack must not take
-	// the job back.
-	reclaimed, err := as.ClaimStale(ctx, claimStaleAfter, 1000)
-	require.NoError(t, err)
-	require.Nil(t, findClaimed(reclaimed, id), "claiming must refresh HeartbeatTime; a re-claim must not reclaim the same job")
+	// That a refreshed heartbeat keeps the job out of the next sweep is
+	// Claim/ConcurrentDisjoint's assertion, against an hour-old job where
+	// a missing refresh would show.
 }
 
 func testASClaimFreshNotClaimed(t *testing.T, h Harness) {
@@ -617,8 +620,8 @@ func testASSaveResultsEmptySequenceFences(t *testing.T, h Harness) {
 		"SaveResults against a missing job must return ErrNotFound even when the sequence is empty")
 
 	// Positive control: a live claim at the current epoch succeeds, and
-	// persists nothing. Created just now, so the sweep below — a minute of
-	// slack against an hour-old job — cannot take it.
+	// persists nothing. Its writes complete before the sweep below, so the
+	// job is still at epoch 1 when SaveResults runs against it.
 	liveID := newID()
 	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, liveID)))
 	require.NoError(t, as.SaveResults(ctx, liveID, 1, empty),

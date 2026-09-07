@@ -171,8 +171,9 @@ type AsyncSearchStore interface {
 	// ClaimStale atomically claims up to limit RUNNING jobs whose heartbeat
 	// (HeartbeatTime, or CreateTime as the baseline when HeartbeatTime is
 	// nil) is older than staleAfter. It never claims a terminal job. Claiming
-	// bumps Epoch and stamps HeartbeatTime; concurrent claimers obtain
-	// disjoint sets of jobs. The staleness stamp and the staleness comparison
+	// bumps Epoch and stamps HeartbeatTime from the store's current clock,
+	// strictly later than the stamp it found stale; concurrent claimers
+	// obtain disjoint sets of jobs. The staleness stamp and the staleness comparison
 	// use the same clock domain (store-side, where the store has one).
 	// Cross-tenant, like ReapExpired: obtain with a background/tenant-less
 	// context, as with ScheduledTaskStore.ScanDue (persistence.go:19-24).

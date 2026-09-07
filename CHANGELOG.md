@@ -1072,14 +1072,20 @@ it catches up.
   between two round trips, and a loaded runner exceeded them — reproduced
   deterministically with a fifteen-millisecond delay before each of the
   three negative claims. A heartbeat cannot be backdated, so staleness is
-  now expressed through `CreateTime` instead: the job under test is created
-  an hour before the harness clock and the sweep runs with a minute of
-  slack, which no delay between two calls closes, and a store that ignores
-  the heartbeat or fails to refresh it on claim hands the hour-old job
-  straight back. `Claim/StaleClaimed` additionally pins that the persisted
-  `HeartbeatTime` moves past the one it found stale. The positive claims
-  that still advance the clock past a short window are unchanged: delay only
-  makes those jobs staler.
+  now expressed through `CreateTime` instead: where a negative claim needs
+  it, the job under test is created an hour before the harness clock, and
+  every such sweep runs with a minute of slack, which no delay between two
+  calls closes; a store that ignores the heartbeat or fails to refresh it on
+  claim hands the hour-old job straight back. `Claim/StaleClaimed` keeps its
+  fine-grained positive path (a heartbeat goes stale by the clock advancing
+  past a ten-millisecond window, which delay only helps) and now pins that
+  the persisted `HeartbeatTime` moves past the one it found stale, in place
+  of a re-claim that could no longer tell. The two `SaveResults` sweeps that
+  only needed a stale job (`ChunkSeqContinuity`, `EmptySequenceFences`) use
+  the same hour-old creation instead of advancing the clock, so a backend
+  now sees a `CreateTime` an hour in the past from five subtests rather than
+  three. `ClaimStale`'s godoc states that the heartbeat it stamps is strictly
+  later than the one it found stale.
 
 - **`spitest`: the `AsyncSearch/ReapExpired` subtests no longer race the
   reaper's clock.** They stamped a finish time from the harness clock, slept

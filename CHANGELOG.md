@@ -1063,6 +1063,24 @@ it catches up.
 
 ### Fixed
 
+- **`spitest`: the `AsyncSearch/Claim` subtests no longer race the clock
+  between two calls.** `Claim/StaleClaimed`, `Claim/FreshNotClaimed` and
+  `Claim/ConcurrentDisjoint` each asserted that a heartbeat stamped moments
+  ago keeps a job out of a `ClaimStale` sweep with a ten-millisecond
+  `staleAfter`. On postgres the stamp and the comparison are both the
+  database's own `now()`, so the ten milliseconds were purely the time
+  between two round trips, and a loaded runner exceeded them — reproduced
+  deterministically with a fifteen-millisecond delay before each of the
+  three negative claims. A heartbeat cannot be backdated, so staleness is
+  now expressed through `CreateTime` instead: the job under test is created
+  an hour before the harness clock and the sweep runs with a minute of
+  slack, which no delay between two calls closes, and a store that ignores
+  the heartbeat or fails to refresh it on claim hands the hour-old job
+  straight back. `Claim/StaleClaimed` additionally pins that the persisted
+  `HeartbeatTime` moves past the one it found stale. The positive claims
+  that still advance the clock past a short window are unchanged: delay only
+  makes those jobs staler.
+
 - **`spitest`: the `AsyncSearch/ReapExpired` subtests no longer race the
   reaper's clock.** They stamped a finish time from the harness clock, slept
   the TTL plus one millisecond, and expected the store's own clock to agree

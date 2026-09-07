@@ -1057,8 +1057,9 @@ it catches up.
 ### Fixed
 
 - **Every `Decimal` path a request can reach is now bounded by the operand's
-  own digits, not by its scale.** Three request-boundary paths cost time and
-  memory proportional to a number the caller writes in a handful of bytes.
+  own digits, not by its scale.** Four paths a request or an SPI consumer
+  reaches cost time and memory proportional to a number the caller writes in a
+  handful of bytes.
   `StripTrailingZeros` — on the search-operand path in `expandCompare` and on
   the write path in `inferDataType` — removed one zero digit per full-width
   division, so a "1" followed by a million zeros took minutes; it now counts
@@ -1076,8 +1077,18 @@ it catches up.
   decimal-string conversion, twice per comparison and therefore once per row in
   `evalCompare`/`evalBetween`; it now brackets the digit count from `BitLen`
   and pays for the exact count only when the two brackets overlap (105 ms →
-  292 ns on a million-digit coefficient). All three are behaviour-preserving,
-  pinned by property tests against the previous implementations.
+  292 ns on a million-digit coefficient). And `ParseStringOrNull`'s whole-type
+  branch normalised a negative scale to 0 through `SetScale`'s upward path,
+  materialising `10^(-scale)` before any range check: `("1e40000000", LONG)`
+  took 8.5 s. A whole value carries `Precision() + (-Scale())` digits, and past
+  INT128's 39 it is outside `INTEGER`, `LONG` and `BIG_INTEGER` alike, so the
+  digit count settles the parse with nothing built (8.5 s → 5.7 µs);
+  `UNBOUND_INTEGER` has no range to check and now keeps the stripped
+  negative-scale form, exactly as `foldToInt` does — the value is unchanged and
+  every consumer reads it through `Cmp`, but `Scale()` and `Unscaled()` on that
+  one result are no longer normalised to 0. All four are otherwise
+  behaviour-preserving, pinned by property tests against the previous
+  implementations.
 
 - **`FieldsMapFromSchema` no longer drops a declared path on a field observed as
   more than one kind.** Both the decoder and the flattening dispatched on the

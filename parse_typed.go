@@ -46,6 +46,13 @@ func ParseStringOrNull(operand string, t DataType) (any, bool) {
 	}
 }
 
+// int128MaxDigits is the decimal digit count of INT128_MAX
+// (170141183460469231731687303715884105727) and of INT128_MIN's magnitude —
+// the widest bounded integer type there is. A whole value with more digits
+// than this is outside INTEGER, LONG and BIG_INTEGER alike, whatever its
+// sign, so its digit count alone settles the parse.
+const int128MaxDigits = 39
+
 // parseWholeType implements DataType.kt:132-137 / NumberParsing.kt:29-50:
 // parse as Decimal, strip trailing zeros, require integral (scale <= 0),
 // then range-check the integer value against the target type's width.
@@ -58,9 +65,30 @@ func parseWholeType(operand string, t DataType) (any, bool) {
 	if d.Scale() > 0 {
 		return nil, false // fractional — not a whole number
 	}
+	// The unbound sink keeps the stripped form, negative scale and all: it
+	// is already a whole number, it has no range to check, and every
+	// consumer reads it through the magnitude-first Cmp, which compares any
+	// two scales without materialising either. Normalising "1e2000000000"
+	// would buy a two-billion-digit coefficient nobody inspects — foldToInt
+	// declines the same normalisation on the same shape for the same reason.
+	if t == UnboundInteger {
+		return d, true
+	}
 	if d.Scale() < 0 {
 		// e.g. "1E2" strips to unscaled=1, scale=-2 (value 100). Normalize
-		// to scale 0 so Unscaled() reflects the true integer value.
+		// to scale 0 so Unscaled() reflects the true integer value — but
+		// only once the digit count says the value could still land in a
+		// bounded range. The whole number has Precision() + (-Scale())
+		// digits, and past int128MaxDigits it is outside INTEGER, LONG and
+		// BIG_INTEGER alike, so the answer is (nil, false) with nothing
+		// built. SetScale would otherwise materialise 10^(-Scale()) first,
+		// and that exponent is bounded only by int32: "1e40000000" spent
+		// 8.5 s here, and "1e2000000000" the same minutes and hundreds of
+		// megabytes the numeric-bucket rounding used to. Past the guard the
+		// materialisation is at most int128MaxDigits digits wide.
+		if int64(d.Precision())-int64(d.Scale()) > int128MaxDigits {
+			return nil, false
+		}
 		d, err = d.SetScale(0)
 		if err != nil {
 			return nil, false
@@ -81,8 +109,6 @@ func parseWholeType(operand string, t DataType) (any, bool) {
 		if d.IsInt128() {
 			return d, true
 		}
-	case UnboundInteger:
-		return d, true
 	}
 	return nil, false
 }

@@ -1,6 +1,12 @@
 package spi
 
-import "testing"
+import (
+	"math/rand"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
 
 // TestParseStringOrNull is seeded from oracle C.7 + Cloud's
 // DataType.parseStringOrNull rules (DataType.kt:125-166).
@@ -130,4 +136,147 @@ func TestParseStringOrNullStringValue(t *testing.T) {
 	if !ok || v != "" {
 		t.Errorf(`ParseStringOrNull("", String) = (%v, %v), want ("", true)`, v, ok)
 	}
+}
+
+// parseWholeTypeBySetScale is the previous parseWholeType body, kept as the
+// oracle: it normalises every negative scale to 0 by materialising
+// 10^(-scale), for every whole type, before any range check. Correct, and
+// unbounded in the scale — which is why it is only ever run here, on inputs
+// small enough to afford it.
+func parseWholeTypeBySetScale(operand string, t DataType) (any, bool) {
+	d, err := ParseDecimal(operand)
+	if err != nil {
+		return nil, false
+	}
+	d = d.StripTrailingZeros()
+	if d.Scale() > 0 {
+		return nil, false
+	}
+	if d.Scale() < 0 {
+		d, err = d.SetScale(0)
+		if err != nil {
+			return nil, false
+		}
+	}
+	v := d.Unscaled()
+	switch t {
+	case Integer:
+		if v.Cmp(classifyInt32Min) >= 0 && v.Cmp(classifyInt32Max) <= 0 {
+			return d, true
+		}
+	case Long:
+		if v.Cmp(classifyInt64Min) >= 0 && v.Cmp(classifyInt64Max) <= 0 {
+			return d, true
+		}
+	case BigInteger:
+		if d.IsInt128() {
+			return d, true
+		}
+	case UnboundInteger:
+		return d, true
+	}
+	return nil, false
+}
+
+// The guarded parseWholeType must decide exactly what the materialising one
+// decided — same ok, same value. The returned value is compared with Cmp
+// rather than by scale: UNBOUND_INTEGER no longer normalises its scale, and
+// numeric equality is the whole of what a whole-type parse promises.
+func TestParseWholeType_AgreesWithSetScaleOracle(t *testing.T) {
+	rng := rand.New(rand.NewSource(13))
+	types := []DataType{Integer, Long, BigInteger, UnboundInteger}
+	for i := 0; i < 20000; i++ {
+		var sb strings.Builder
+		if rng.Intn(2) == 0 {
+			sb.WriteByte('-')
+		}
+		// p significant digits, then a "e<k>" exponent: after stripping,
+		// the coefficient carries p-or-fewer digits at scale -k-or-less.
+		// p spans 1..40 and k spans 0..45, so the total digit count
+		// straddles INT128's 39 in both directions.
+		p := rng.Intn(40) + 1
+		sb.WriteByte(byte('1' + rng.Intn(9)))
+		for j := 1; j < p; j++ {
+			sb.WriteByte(byte('0' + rng.Intn(10)))
+		}
+		operand := sb.String()
+		if k := rng.Intn(46); k > 0 {
+			operand += "e" + strconv.Itoa(k)
+		}
+		for _, typ := range types {
+			gotV, gotOK := ParseStringOrNull(operand, typ)
+			wantV, wantOK := parseWholeTypeBySetScale(operand, typ)
+			if gotOK != wantOK {
+				t.Fatalf("ParseStringOrNull(%q, %v) ok = %v, oracle says %v", operand, typ, gotOK, wantOK)
+			}
+			if !gotOK {
+				continue
+			}
+			gotD, ok1 := gotV.(Decimal)
+			wantD, ok2 := wantV.(Decimal)
+			if !ok1 || !ok2 {
+				t.Fatalf("ParseStringOrNull(%q, %v) returned %T, oracle returned %T", operand, typ, gotV, wantV)
+			}
+			if gotD.Cmp(wantD) != 0 {
+				t.Fatalf("ParseStringOrNull(%q, %v) value = %s, oracle says %s",
+					operand, typ, gotD.Canonical(), wantD.Canonical())
+			}
+		}
+	}
+}
+
+// A 12-byte operand must not buy a two-billion-digit integer. A bounded type
+// can answer from the digit count alone — the value is past INT128 either
+// way — and the unbound sink has nothing to normalise for.
+func TestParseWholeType_ExtremePositiveExponentIsBounded(t *testing.T) {
+	const operand = "1e2000000000"
+	t.Run("bounded type answers from the digit count", func(t *testing.T) {
+		type result struct {
+			v  any
+			ok bool
+		}
+		done := make(chan result, 1)
+		go func() {
+			v, ok := ParseStringOrNull(operand, Long)
+			done <- result{v, ok}
+		}()
+		select {
+		case r := <-done:
+			if r.ok || r.v != nil {
+				t.Errorf("ParseStringOrNull(%q, Long) = (%v, %v), want (nil, false)", operand, r.v, r.ok)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("ParseStringOrNull did not return within 2s — the scale was materialised")
+		}
+	})
+	t.Run("unbound sink keeps the stripped form", func(t *testing.T) {
+		type result struct {
+			v  any
+			ok bool
+		}
+		done := make(chan result, 1)
+		go func() {
+			v, ok := ParseStringOrNull(operand, UnboundInteger)
+			done <- result{v, ok}
+		}()
+		select {
+		case r := <-done:
+			if !r.ok {
+				t.Fatalf("ParseStringOrNull(%q, UnboundInteger) ok = false, want true", operand)
+			}
+			d, isDecimal := r.v.(Decimal)
+			if !isDecimal {
+				t.Fatalf("returned %T, want Decimal", r.v)
+			}
+			want, err := ParseDecimal(operand)
+			if err != nil {
+				t.Fatalf("ParseDecimal: %v", err)
+			}
+			if d.Cmp(want) != 0 {
+				t.Errorf("value = %s, want %s", d.Canonical(), want.Canonical())
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("ParseStringOrNull did not return within 2s — the scale was materialised")
+		}
+	})
 }

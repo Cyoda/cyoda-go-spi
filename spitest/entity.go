@@ -1166,19 +1166,7 @@ func testEntityGetPageReadSetOutcome(t *testing.T, h Harness, conflictOnPage, wa
 	require.Len(t, page, 2)
 	require.Equal(t, onPageID, page[0].Meta.ID, "sanity: the 2-entity first page must contain onPageID")
 
-	// Tx B: a concurrent, independent transaction overwrites targetID and
-	// commits before Tx A commits.
-	tm2, err := h.Factory.TransactionManager(ctx)
-	require.NoError(t, err)
-	txID2, txCtx2, err := tm2.Begin(ctx)
-	require.NoError(t, err)
-	esB, err := h.Factory.EntityStore(txCtx2)
-	require.NoError(t, err)
-	_, err = esB.Save(txCtx2, newEntity(t, mref.EntityName, targetID, map[string]any{"conflict": true}))
-	require.NoError(t, err)
-	require.NoError(t, tm2.Commit(txCtx2, txID2))
-
-	err = tm.Commit(txCtx, txID)
+	err = commitAfterConflictingWrite(t, h, ctx, mref, targetID, trackingTx{tm: tm, id: txID, ctx: txCtx})
 	if wantCommitSucceeds {
 		require.NoError(t, err,
 			"a concurrent write to an entity NOT on the returned page must not abort the GetPage transaction — read-set recording is page-scoped, not model-wide")

@@ -700,19 +700,28 @@ it catches up.
   malformed `LIKE` operand fails conformance on its next dependency
   update.**
 
-- **Conformance: `Iterable/TrackingRead/YieldedOnly` pins the read set to the
-  rows a caller was handed, not the rows the backend walked to find them.**
-  `IterateOptions.TrackingRead` records yielded ids. A backend that records
+- **Conformance: `TrackingRead` pins the read set to the rows a caller was
+  handed, not the rows the backend walked to find them — on both filter-taking
+  read entry points.** `IterateOptions.TrackingRead` and
+  `SearchOptions.TrackingRead` record what they yield. A backend that records
   while building its snapshot — before the filter runs — puts rows the caller
   never saw into the read set, and a concurrent commit touching one of those
   then aborts a transaction that read nothing conflicting. The existing
   `Iterable/TrackingRead/Gating` case could not tell the two shapes apart: it
   iterates a single entity with a match-all filter, where "scanned" and
-  "yielded" are the same set. The new case seeds two committed entities and
-  selects exactly one, then pins both directions — a concurrent write to the
-  yielded row aborts the tracking transaction, a concurrent write to the
-  excluded row does not — so under-recording cannot pass it either. **A
-  backend that records per scanned row fails this on its next dependency
+  "yielded" are the same set. `Iterable/TrackingRead/YieldedOnly` and
+  `Searcher/TrackingRead/YieldedOnly` seed two committed entities and select
+  exactly one, then pin both directions — a concurrent write to the yielded
+  row aborts the tracking transaction, a concurrent write to the excluded row
+  does not — so under-recording cannot pass them either. Each runs under two
+  predicate shapes, an equality leaf and a negated one: a backend that
+  translates the predicate into storage never scans the excluded row and
+  satisfies the case trivially, which is correct but proves nothing about how
+  it records, so the negated shape (which no reference backend pushes down)
+  forces the excluded row to be fetched and rejected in process. Search had no
+  `TrackingRead` conformance coverage at all before this — every backend pinned
+  it in a test of its own. **A backend that records per scanned row, or that
+  does not record a returned row at all, fails these on its next dependency
   update.**
 
 ### Added

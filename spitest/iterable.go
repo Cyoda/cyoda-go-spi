@@ -442,7 +442,7 @@ func iterableTrackingReadCommitOutcome(t *testing.T, h Harness, trackingRead, wa
 	require.Len(t, got, 1)
 	require.Equal(t, id, got[0].Meta.ID)
 
-	err = commitAfterConflictingWrite(t, h, ctx, mref, id, tm, txID, txCtx)
+	err = commitAfterConflictingWrite(t, h, ctx, mref, id, trackingTx{tm: tm, id: txID, ctx: txCtx})
 	if wantCommitSucceeds {
 		require.NoError(t, err,
 			"TrackingRead=false must record nothing, so the conflicting concurrent commit must not abort this tx")
@@ -452,104 +452,9 @@ func iterableTrackingReadCommitOutcome(t *testing.T, h Harness, trackingRead, wa
 	require.ErrorIs(t, err, spi.ErrConflict)
 }
 
-// commitAfterConflictingWrite is the second half of every TrackingRead
-// outcome case: an independent transaction overwrites conflictID and commits,
-// then the tracking transaction (txID/txCtx, begun on tm) commits. The
-// returned error is that second commit's — whether it survived is the only
-// black-box read-out of what the iteration recorded.
-func commitAfterConflictingWrite(
-	t *testing.T,
-	h Harness,
-	ctx spiCtx,
-	mref spi.ModelRef,
-	conflictID string,
-	tm spi.TransactionManager,
-	txID string,
-	txCtx spiCtx,
-) error {
-	t.Helper()
-	tm2, err := h.Factory.TransactionManager(ctx)
-	require.NoError(t, err)
-	txID2, txCtx2, err := tm2.Begin(ctx)
-	require.NoError(t, err)
-	esB, err := h.Factory.EntityStore(txCtx2)
-	require.NoError(t, err)
-	_, err = esB.Save(txCtx2, newEntity(t, mref.EntityName, conflictID, map[string]any{"v": "conflict"}))
-	require.NoError(t, err)
-	require.NoError(t, tm2.Commit(txCtx2, txID2))
-	return tm.Commit(txCtx, txID)
-}
-
-// testIterableTrackingReadYieldedOnly pins WHICH ids TrackingRead records: the
-// ones the caller was handed, not the ones the backend walked to find them. A
-// backend that records while building its snapshot — before the filter runs —
-// puts rows the caller never saw into the read set, and a concurrent commit
-// touching one of those aborts a transaction that read nothing conflicting.
-//
-// Gating/Enabled cannot tell the two apart: it iterates one entity with a
-// match-all filter, where "scanned" and "yielded" are the same set. Here they
-// differ by construction — two committed entities, a predicate that selects
-// exactly one — and the pair of cases pins both directions, so a backend that
-// records nothing at all cannot pass by under-recording either.
-//
-// A backend that pushes the predicate down to storage satisfies this
-// trivially: the excluded row is never scanned, so it cannot be recorded.
-// That is the contract, not a loophole — what the caller never saw must not
-// constrain its commit, whichever layer did the excluding.
+// testIterableTrackingReadYieldedOnly runs the shared read-set contract
+// (trackingread.go) through Iterate: the read set holds the rows the caller
+// was handed, not the rows the backend walked to find them.
 func testIterableTrackingReadYieldedOnly(t *testing.T, h Harness) {
-	t.Run("ExcludedRowIsNotRecorded", func(t *testing.T) {
-		iterableTrackingReadYieldedOnlyOutcome(t, h, false)
-	})
-	t.Run("YieldedRowIsRecorded", func(t *testing.T) {
-		iterableTrackingReadYieldedOnlyOutcome(t, h, true)
-	})
-}
-
-func iterableTrackingReadYieldedOnlyOutcome(t *testing.T, h Harness, conflictOnYielded bool) {
-	t.Helper()
-	ctx := tenantContext(h.NewTenant())
-	mref := spi.ModelRef{EntityName: "iterable-tracking-filtered", ModelVersion: "1"}
-	yieldedID, excludedID := newID(), newID()
-
-	withTx(t, h, ctx, func(txCtx spiCtx) {
-		es, err := h.Factory.EntityStore(txCtx)
-		require.NoError(t, err)
-		_, err = es.Save(txCtx, newEntity(t, mref.EntityName, yieldedID, map[string]any{"status": searcherMatchValue}))
-		require.NoError(t, err)
-		_, err = es.Save(txCtx, newEntity(t, mref.EntityName, excludedID, map[string]any{"status": searcherDecoyValue}))
-		require.NoError(t, err)
-	})
-
-	tm, err := h.Factory.TransactionManager(ctx)
-	require.NoError(t, err)
-	txID, txCtx := beginGuarded(t, tm, ctx)
-
-	esA, err := h.Factory.EntityStore(txCtx)
-	require.NoError(t, err)
-	filter := spi.Filter{
-		Op:       spi.FilterEq,
-		Source:   spi.SourceData,
-		Path:     "status",
-		Value:    searcherMatchValue,
-		Declared: []spi.DataType{spi.String},
-	}
-	it, err := esA.Iterate(txCtx, mref, filter, spi.IterateOptions{TrackingRead: true})
-	require.NoError(t, err)
-	got, err := drainIterator(t, it)
-	require.NoError(t, err)
-	require.Len(t, got, 1, "the predicate selects exactly one of the two seeded entities")
-	require.Equal(t, yieldedID, got[0].Meta.ID)
-
-	conflictID := excludedID
-	if conflictOnYielded {
-		conflictID = yieldedID
-	}
-	err = commitAfterConflictingWrite(t, h, ctx, mref, conflictID, tm, txID, txCtx)
-	if !conflictOnYielded {
-		require.NoError(t, err,
-			"the excluded entity was scanned but never yielded, so it must not be in the read set: a concurrent commit touching it must not abort this tx")
-		return
-	}
-	require.Error(t, err, "the yielded entity must be in the read set, so the conflicting concurrent commit aborts this tx")
-	require.ErrorIs(t, err, spi.ErrConflict)
+	runTrackingReadYieldedOnly(t, h, trackingReadViaIterate)
 }

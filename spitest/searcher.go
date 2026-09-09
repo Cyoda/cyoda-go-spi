@@ -71,10 +71,22 @@ func runSearcherSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "BoundedOrFail", testSearcherBoundedOrFail)
 	runSubtest(t, h, tracker, "BoundedOrFail/InTx", testSearcherBoundedOrFailInTx)
 	runSubtest(t, h, tracker, "PIT/CommittedOnlyInTx", testSearcherPITCommittedOnlyInTx)
+	runSubtest(t, h, tracker, "TrackingRead/YieldedOnly", testSearcherTrackingReadYieldedOnly)
 	runSubtest(t, h, tracker, "FilterPath/Grammar", testSearcherFilterPathGrammar)
 	runSubtest(t, h, tracker, "FilterNot", testSearcherFilterNot)
 	runSubtest(t, h, tracker, "Pattern/LikeGrammar", testPatternLikeGrammar)
 	runSubtest(t, h, tracker, "Pattern/MalformedLike", testPatternMalformedLike)
+}
+
+// testSearcherTrackingReadYieldedOnly runs the shared read-set contract
+// (trackingread.go) through Search. Search carries the same opt-in flag as
+// Iterate and is the more exposed of the two — it collects its matched set
+// before returning, which is exactly the shape that invites recording a row
+// before the filter has decided about it. Every backend pinned this in a test
+// of its own before the suite required it, which is four derivations of one
+// contract and no cross-backend guarantee.
+func testSearcherTrackingReadYieldedOnly(t *testing.T, h Harness) {
+	runTrackingReadYieldedOnly(t, h, trackingReadViaSearch)
 }
 
 // testSearcherPITCommittedOnlyInTx pins EntityStore.Search's committed-only

@@ -46,8 +46,8 @@ type IterateOptions struct {
 	//
 	// Yielded, not scanned: a row the filter excludes is never handed to the
 	// caller and MUST NOT be recorded, whichever layer excluded it — a
-	// storage predicate or the residual re-check inside Next(). Recording a
-	// scanned-but-excluded row aborts the transaction on a concurrent commit
-	// it never had a reason to conflict with.
+	// storage predicate or the residual re-check inside Next(). See
+	// SearchOptions.TrackingRead, which states the same rule for the matched
+	// set it returns.
 	TrackingRead bool
 }

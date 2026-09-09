@@ -700,6 +700,39 @@ it catches up.
   malformed `LIKE` operand fails conformance on its next dependency
   update.**
 
+- **Conformance: the whole `TrackingRead` contract, on both filter-taking read
+  entry points.** `IterateOptions.TrackingRead` and
+  `SearchOptions.TrackingRead` are the same flag on the same contract, and
+  both now run one shared set of cases: set, the read records the rows it
+  handed back and only those; unset, it records nothing; and a point-in-time
+  read records nothing either way, being committed-only and historical.
+  Search had no `TrackingRead` coverage at all before this — every backend
+  pinned it in a test of its own.
+
+  What the old `Iterable/TrackingRead/Gating` case could not see, and why it
+  is retired: it iterated a single entity with a match-all filter, where
+  "scanned" and "yielded" are the same set, so a backend that records every
+  row it walks — putting rows the caller never saw into the read set, where a
+  concurrent commit touching one of them aborts a transaction that read
+  nothing conflicting — passed it identically. `TrackingRead/YieldedOnly`
+  seeds two committed entities and selects exactly one, then pins both
+  directions: a concurrent write to the yielded row aborts the tracking
+  transaction, a concurrent write to the excluded row does not.
+  `TrackingRead/Disabled` and `TrackingRead/PointInTime` pin the two cases
+  that must record nothing, and `Disabled` carries the match-all filter shape
+  `Gating` was the only case running. **A backend carrying a `Harness.Skip`
+  entry for the retired key must drop it** — `StoreFactoryConformance` reports
+  a skip key that never matched as an error.
+
+  Each `YieldedOnly` direction runs under two predicate shapes, an equality
+  leaf and a negated one. A backend that translates the predicate into
+  storage never scans the excluded row and satisfies the case trivially,
+  which is correct but proves nothing about how it records; the negated shape
+  is the one no reference backend translates, so the excluded row is fetched
+  and rejected in process. **A backend that records per scanned row, that
+  ignores the flag, that records a point-in-time read, or that does not
+  record a returned row at all, fails these on its next dependency update.**
+
 ### Added
 
 - **`MergeOrdered` helper.** A pure pull-stream merge of an already-ordered

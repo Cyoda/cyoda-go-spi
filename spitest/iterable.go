@@ -31,7 +31,9 @@ func runIterableSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "PIT/SnapshotVariant", testIterablePITSnapshotVariant)
 	runSubtest(t, h, tracker, "PIT/CommittedOnlyInTx", testIterablePITCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "Overlay/SnapshotAtOpen", testIterableOverlaySnapshotAtOpen)
-	runSubtest(t, h, tracker, "TrackingRead/Gating", testIterableTrackingReadGating)
+	runSubtest(t, h, tracker, "TrackingRead/YieldedOnly", testIterableTrackingReadYieldedOnly)
+	runSubtest(t, h, tracker, "TrackingRead/Disabled", testIterableTrackingReadDisabled)
+	runSubtest(t, h, tracker, "TrackingRead/PointInTime", testIterableTrackingReadPointInTime)
 	runSubtest(t, h, tracker, "FilterPath/Grammar", testIterableFilterPathGrammar)
 	runSubtest(t, h, tracker, "FilterNot", testIterableFilterNot)
 }
@@ -400,65 +402,17 @@ func testIterableOverlaySnapshotAtOpen(t *testing.T, h Harness) {
 	require.Equal(t, 1, count, "the buffered entity must be visible exactly once")
 }
 
-// testIterableTrackingReadGating verifies IterateOptions.TrackingRead gates
-// read-set recording exactly like SearchOptions.TrackingRead: observed
-// black-box (never via internal state) by having a second transaction commit
-// a conflicting write to the yielded entity, then checking whether the
-// first transaction's own commit is aborted by first-committer-wins — the
-// same technique the plugin-level Search/TrackingRead tests use.
-func testIterableTrackingReadGating(t *testing.T, h Harness) {
-	t.Run("Enabled", func(t *testing.T) {
-		iterableTrackingReadCommitOutcome(t, h, true, false)
-	})
-	t.Run("Disabled", func(t *testing.T) {
-		iterableTrackingReadCommitOutcome(t, h, false, true)
-	})
+// The TrackingRead read-set contract, run through Iterate. The cases live in
+// trackingread.go, shared with Search — the two entry points carry the same
+// flag, and one driver is what keeps them from drifting apart.
+func testIterableTrackingReadYieldedOnly(t *testing.T, h Harness) {
+	runTrackingReadYieldedOnly(t, h, trackingReadViaIterate)
 }
 
-func iterableTrackingReadCommitOutcome(t *testing.T, h Harness, trackingRead, wantCommitSucceeds bool) {
-	t.Helper()
-	ctx := tenantContext(h.NewTenant())
-	mref := spi.ModelRef{EntityName: "iterable-tracking", ModelVersion: "1"}
-	id := newID()
+func testIterableTrackingReadDisabled(t *testing.T, h Harness) {
+	runTrackingReadDisabled(t, h, trackingReadViaIterate)
+}
 
-	withTx(t, h, ctx, func(txCtx spiCtx) {
-		es, err := h.Factory.EntityStore(txCtx)
-		require.NoError(t, err)
-		_, err = es.Save(txCtx, newEntity(t, mref.EntityName, id, map[string]any{}))
-		require.NoError(t, err)
-	})
-
-	tm, err := h.Factory.TransactionManager(ctx)
-	require.NoError(t, err)
-	txID, txCtx := beginGuarded(t, tm, ctx)
-
-	esA, err := h.Factory.EntityStore(txCtx)
-	require.NoError(t, err)
-	it, err := esA.Iterate(txCtx, mref, spi.Filter{}, spi.IterateOptions{TrackingRead: trackingRead})
-	require.NoError(t, err)
-	got, err := drainIterator(t, it)
-	require.NoError(t, err)
-	require.Len(t, got, 1)
-	require.Equal(t, id, got[0].Meta.ID)
-
-	// Tx B: a concurrent, independent transaction overwrites the same
-	// entity and commits before Tx A commits.
-	tm2, err := h.Factory.TransactionManager(ctx)
-	require.NoError(t, err)
-	txID2, txCtx2, err := tm2.Begin(ctx)
-	require.NoError(t, err)
-	esB, err := h.Factory.EntityStore(txCtx2)
-	require.NoError(t, err)
-	_, err = esB.Save(txCtx2, newEntity(t, mref.EntityName, id, map[string]any{"v": "conflict"}))
-	require.NoError(t, err)
-	require.NoError(t, tm2.Commit(txCtx2, txID2))
-
-	err = tm.Commit(txCtx, txID)
-	if wantCommitSucceeds {
-		require.NoError(t, err,
-			"TrackingRead=false must record nothing, so the conflicting concurrent commit must not abort this tx")
-		return
-	}
-	require.Error(t, err, "TrackingRead=true must record the yielded id, so the conflicting concurrent commit aborts this tx")
-	require.ErrorIs(t, err, spi.ErrConflict)
+func testIterableTrackingReadPointInTime(t *testing.T, h Harness) {
+	runTrackingReadPointInTime(t, h, trackingReadViaIterate)
 }

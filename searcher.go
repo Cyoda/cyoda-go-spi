@@ -26,6 +26,13 @@ type SearchOptions struct {
 	// predicate read that records nothing. No-op when no transaction is
 	// active. In-transaction search never prevents phantoms regardless of
 	// this flag (see cyoda-go's docs/CONSISTENCY.md).
+	//
+	// Returned, not scanned: a row the filter excludes is never handed to the
+	// caller and MUST NOT be recorded, whichever layer excluded it — a
+	// storage predicate or an in-process re-check. Recording a
+	// scanned-but-excluded row aborts the transaction on a concurrent commit
+	// it never had a reason to conflict with. IterateOptions.TrackingRead
+	// carries the identical rule, per yielded row.
 	TrackingRead bool
 }
 

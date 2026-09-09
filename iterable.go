@@ -43,5 +43,11 @@ type IterateOptions struct {
 	// commit-time first-committer-wins validates them. Default false: a
 	// plain snapshot read that records nothing. No-op when no transaction
 	// is active. Same rule as SearchOptions.TrackingRead.
+	//
+	// Yielded, not scanned: a row the filter excludes is never handed to the
+	// caller and MUST NOT be recorded, whichever layer excluded it — a
+	// storage predicate or the residual re-check inside Next(). Recording a
+	// scanned-but-excluded row aborts the transaction on a concurrent commit
+	// it never had a reason to conflict with.
 	TrackingRead bool
 }

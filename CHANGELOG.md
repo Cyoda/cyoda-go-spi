@@ -700,6 +700,21 @@ it catches up.
   malformed `LIKE` operand fails conformance on its next dependency
   update.**
 
+- **Conformance: `Iterable/TrackingRead/YieldedOnly` pins the read set to the
+  rows a caller was handed, not the rows the backend walked to find them.**
+  `IterateOptions.TrackingRead` records yielded ids. A backend that records
+  while building its snapshot — before the filter runs — puts rows the caller
+  never saw into the read set, and a concurrent commit touching one of those
+  then aborts a transaction that read nothing conflicting. The existing
+  `Iterable/TrackingRead/Gating` case could not tell the two shapes apart: it
+  iterates a single entity with a match-all filter, where "scanned" and
+  "yielded" are the same set. The new case seeds two committed entities and
+  selects exactly one, then pins both directions — a concurrent write to the
+  yielded row aborts the tracking transaction, a concurrent write to the
+  excluded row does not — so under-recording cannot pass it either. **A
+  backend that records per scanned row fails this on its next dependency
+  update.**
+
 ### Added
 
 - **`MergeOrdered` helper.** A pure pull-stream merge of an already-ordered

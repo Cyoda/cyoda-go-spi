@@ -54,6 +54,15 @@ type SearchJob struct {
 	// successful claim. Callers fence writes (UpdateJobStatus, SaveResults,
 	// Heartbeat) against the Epoch they were claimed with.
 	Epoch int64
+
+	// StaleClaims counts how many times ClaimStale took this job because
+	// its heartbeat went stale — an executor lost without releasing. A
+	// claim of a released job (see Release) does NOT count. CreateJob
+	// persists 0 regardless of the value on the input job; ClaimStale
+	// increments it, atomically with the claim, only for a staleness claim.
+	// The engine's attempt cap bounds this counter, not Epoch, so a graceful
+	// handoff (Release then claim) never advances a job toward being failed.
+	StaleClaims int64
 }
 
 // SelfExecutingSearchStore is implemented by AsyncSearchStore variants whose
@@ -69,7 +78,7 @@ type SearchJob struct {
 //
 // Self-executing stores may reject SaveResults (they persist results as a
 // side effect of CreateJob's own dispatch, not via a caller-driven stream)
-// and no-op Heartbeat, ClaimStale, and ClearResults — liveness and reclaim
+// and no-op Heartbeat, ClaimStale, ClearResults, and Release — liveness and reclaim
 // are meaningless for a store that owns execution outright.
 //
 // # Predicate obligation
@@ -106,7 +115,7 @@ type SelfExecutingSearchStore interface {
 // job returns nil and leaves it unchanged. ClaimStale never claims a terminal
 // job.
 //
-// Epoch fencing: UpdateJobStatus, SaveResults, and Heartbeat each take the
+// Epoch fencing: UpdateJobStatus, SaveResults, Heartbeat, and Release each take the
 // epoch the caller was claimed under and MUST refuse a call whose epoch does
 // not match the job's current Epoch with ErrStaleClaim — this is how a
 // reclaimed job fences off writes from the executor it was taken from.
@@ -176,10 +185,28 @@ type AsyncSearchStore interface {
 	// obtain disjoint sets of jobs. The staleness stamp and the staleness
 	// comparison use the same clock domain (store-side, where the store has
 	// one).
+	// A released job (see Release) is eligible regardless of staleAfter;
+	// claiming it clears the released mark and does NOT increment
+	// StaleClaims. A job claimed because its heartbeat went stale has
+	// StaleClaims incremented, atomically with the claim.
 	// Cross-tenant, like ReapExpired: obtain with a background/tenant-less
 	// context, as with ScheduledTaskStore.ScanDue (persistence.go:19-24).
 	ClaimStale(ctx context.Context, staleAfter time.Duration, limit int) ([]*SearchJob, error)
 
 	// ClearResults deletes the job's persisted result IDs. Idempotent.
 	ClearResults(ctx context.Context, jobID string) error
+
+	// Release relinquishes the caller's claim on a RUNNING job without
+	// finishing it: the job stays RUNNING and becomes eligible for
+	// ClaimStale immediately, regardless of staleAfter, so a live node can
+	// take it over without waiting for the heartbeat to age out. Fenced by
+	// epoch like every executor-side write: ErrStaleClaim if epoch is not
+	// the job's current Epoch, ErrAlreadyTerminal if the job is terminal,
+	// ErrNotFound if it does not exist. Idempotent at the same epoch.
+	// Release does NOT bump Epoch and does NOT increment StaleClaims — a
+	// release is a graceful handoff, not an attempt. The released mark
+	// survives a later Heartbeat at the same epoch (a stray stamp from a
+	// node that is going away cannot resurrect the job) and is cleared by
+	// the ClaimStale that takes the job. Tenant-scoped, like Heartbeat.
+	Release(ctx context.Context, jobID string, epoch int64) error
 }

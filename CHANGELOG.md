@@ -14,6 +14,24 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **`AsyncSearchStore` gains `Release`; `SearchJob` gains `StaleClaims`.**
+  `Release(ctx, jobID, epoch) error` relinquishes a claim without finishing
+  the job: it stays RUNNING and is immediately claimable by ClaimStale,
+  regardless of staleAfter, so a node departing gracefully hands its
+  in-flight jobs off within one claim sweep instead of leaving them to age
+  out. Fenced like the other executor-side writes (ErrStaleClaim /
+  ErrAlreadyTerminal / ErrNotFound), idempotent at the same epoch, and it
+  neither bumps Epoch nor counts as an attempt. `SearchJob.StaleClaims int64`
+  is the new attempt counter: ClaimStale increments it only for a staleness
+  claim (never for a released job), CreateJob persists 0. This retires the
+  "no SPI change" note on the deferred re-execution follow-up: the engine's
+  attempt cap now bounds StaleClaims, so a rolling restart of any length is
+  free.
+
+  Migration: implement `Release` on every `AsyncSearchStore` (a
+  `SelfExecutingSearchStore` MAY no-op it); populate `StaleClaims` from the
+  claim path (a self-executing store may leave it 0).
+
 - **An array's length is not part of the model.** `FieldDescriptor.MaxWidth`,
   `ArrayBranch.MaxWidth` and `ModelNode.ObserveArrayWidth` are removed. The
   width was a discovery-time statistic the wire form never carried, so every

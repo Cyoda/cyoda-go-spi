@@ -850,9 +850,14 @@ func testASReleaseClaimNotCounted(t *testing.T, h Harness) {
 	require.NotNil(t, job)
 	require.Equal(t, int64(0), job.StaleClaims, "a release-then-claim must not count")
 
-	// Now let it go stale as-of the store clock and claim by staleness.
-	h.AdvanceClock(2 * claimStaleAfter)
-	staled, err := as.ClaimStale(ctx, claimStaleAfter, 1000)
+	// Now let it go stale as-of the store clock and claim by staleness. Use a
+	// small window (like Claim/StaleClaimed): the heartbeat the prior claim
+	// stamped is the store's live clock and cannot be backdated, so postgres
+	// (no virtual clock, AdvanceClock sleeps) must actually let it elapse —
+	// keep that sub-second.
+	const reStale = 40 * time.Millisecond
+	h.AdvanceClock(2 * reStale)
+	staled, err := as.ClaimStale(ctx, reStale, 1000)
 	require.NoError(t, err)
 	after := findClaimed(staled, id)
 	require.NotNil(t, after, "the job (epoch 2, heartbeated by the prior claim then aged) must go stale")
@@ -875,9 +880,12 @@ func testASClaimStaleClaimCounted(t *testing.T, h Harness) {
 	require.NoError(t, err)
 	require.Equal(t, int64(1), got.StaleClaims, "the increment is persisted")
 
-	// Age it again (the claim refreshed the heartbeat) and re-claim.
-	h.AdvanceClock(2 * claimStaleAfter)
-	again, err := as.ClaimStale(ctx, claimStaleAfter, 1000)
+	// Age it again (the claim refreshed the heartbeat) and re-claim. Small
+	// window (see Claim/StaleClaimed): the refreshed heartbeat is the store's
+	// live clock, not backdatable, so keep the elapse sub-second for postgres.
+	const reStale = 40 * time.Millisecond
+	h.AdvanceClock(2 * reStale)
+	again, err := as.ClaimStale(ctx, reStale, 1000)
 	require.NoError(t, err)
 	job2 := findClaimed(again, id)
 	require.NotNil(t, job2)

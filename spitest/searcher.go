@@ -72,6 +72,8 @@ func runSearcherSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "BoundedOrFail/InTx", testSearcherBoundedOrFailInTx)
 	runSubtest(t, h, tracker, "PIT/CommittedOnlyInTx", testSearcherPITCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "TrackingRead/YieldedOnly", testSearcherTrackingReadYieldedOnly)
+	runSubtest(t, h, tracker, "TrackingRead/Disabled", testSearcherTrackingReadDisabled)
+	runSubtest(t, h, tracker, "TrackingRead/PointInTime", testSearcherTrackingReadPointInTime)
 	runSubtest(t, h, tracker, "FilterPath/Grammar", testSearcherFilterPathGrammar)
 	runSubtest(t, h, tracker, "FilterNot", testSearcherFilterNot)
 	runSubtest(t, h, tracker, "Pattern/LikeGrammar", testPatternLikeGrammar)
@@ -87,6 +89,14 @@ func runSearcherSuite(t *testing.T, h Harness, tracker *skipTracker) {
 // contract and no cross-backend guarantee.
 func testSearcherTrackingReadYieldedOnly(t *testing.T, h Harness) {
 	runTrackingReadYieldedOnly(t, h, trackingReadViaSearch)
+}
+
+func testSearcherTrackingReadDisabled(t *testing.T, h Harness) {
+	runTrackingReadDisabled(t, h, trackingReadViaSearch)
+}
+
+func testSearcherTrackingReadPointInTime(t *testing.T, h Harness) {
+	runTrackingReadPointInTime(t, h, trackingReadViaSearch)
 }
 
 // testSearcherPITCommittedOnlyInTx pins EntityStore.Search's committed-only

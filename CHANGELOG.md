@@ -700,29 +700,35 @@ it catches up.
   malformed `LIKE` operand fails conformance on its next dependency
   update.**
 
-- **Conformance: `TrackingRead` pins the read set to the rows a caller was
-  handed, not the rows the backend walked to find them — on both filter-taking
-  read entry points.** `IterateOptions.TrackingRead` and
-  `SearchOptions.TrackingRead` record what they yield. A backend that records
-  while building its snapshot — before the filter runs — puts rows the caller
-  never saw into the read set, and a concurrent commit touching one of those
-  then aborts a transaction that read nothing conflicting. The existing
-  `Iterable/TrackingRead/Gating` case could not tell the two shapes apart: it
-  iterates a single entity with a match-all filter, where "scanned" and
-  "yielded" are the same set. `Iterable/TrackingRead/YieldedOnly` and
-  `Searcher/TrackingRead/YieldedOnly` seed two committed entities and select
-  exactly one, then pin both directions — a concurrent write to the yielded
-  row aborts the tracking transaction, a concurrent write to the excluded row
-  does not — so under-recording cannot pass them either. Each runs under two
-  predicate shapes, an equality leaf and a negated one: a backend that
-  translates the predicate into storage never scans the excluded row and
-  satisfies the case trivially, which is correct but proves nothing about how
-  it records, so the negated shape (which no reference backend pushes down)
-  forces the excluded row to be fetched and rejected in process. Search had no
-  `TrackingRead` conformance coverage at all before this — every backend pinned
-  it in a test of its own. **A backend that records per scanned row, or that
-  does not record a returned row at all, fails these on its next dependency
-  update.**
+- **Conformance: the whole `TrackingRead` contract, on both filter-taking read
+  entry points.** `IterateOptions.TrackingRead` and
+  `SearchOptions.TrackingRead` are the same flag on the same contract, and
+  both now run one shared set of cases: set, the read records the rows it
+  handed back and only those; unset, it records nothing; and a point-in-time
+  read records nothing either way, being committed-only and historical.
+  Search had no `TrackingRead` coverage at all before this — every backend
+  pinned it in a test of its own.
+
+  What the old `Iterable/TrackingRead/Gating` case could not see, and why it
+  is retired: it iterated a single entity with a match-all filter, where
+  "scanned" and "yielded" are the same set, so a backend that records every
+  row it walks — putting rows the caller never saw into the read set, where a
+  concurrent commit touching one of them aborts a transaction that read
+  nothing conflicting — passed it identically. `TrackingRead/YieldedOnly`
+  seeds two committed entities and selects exactly one, then pins both
+  directions: a concurrent write to the yielded row aborts the tracking
+  transaction, a concurrent write to the excluded row does not.
+  `TrackingRead/Disabled` and `TrackingRead/PointInTime` pin the two cases
+  that must record nothing.
+
+  Each `YieldedOnly` direction runs under two predicate shapes, an equality
+  leaf and a negated one. A backend that translates the predicate into
+  storage never scans the excluded row and satisfies the case trivially,
+  which is correct but proves nothing about how it records; the negated shape
+  is the one no reference backend translates, so the excluded row is fetched
+  and rejected in process. **A backend that records per scanned row, that
+  ignores the flag, that records a point-in-time read, or that does not
+  record a returned row at all, fails these on its next dependency update.**
 
 ### Added
 

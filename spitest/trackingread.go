@@ -94,18 +94,23 @@ type trackingReadPredicate struct {
 	filter spi.Filter
 }
 
+// trackingReadEqualityFilter selects the match row with a plain equality
+// leaf. Named rather than indexed out of trackingReadPredicates, so extending
+// or reordering that table cannot silently re-point the cases that run one
+// shape.
+func trackingReadEqualityFilter() spi.Filter {
+	return spi.Filter{
+		Op:       spi.FilterEq,
+		Source:   spi.SourceData,
+		Path:     "status",
+		Value:    searcherMatchValue,
+		Declared: []spi.DataType{spi.String},
+	}
+}
+
 func trackingReadPredicates() []trackingReadPredicate {
 	return []trackingReadPredicate{
-		{
-			name: "Equality",
-			filter: spi.Filter{
-				Op:       spi.FilterEq,
-				Source:   spi.SourceData,
-				Path:     "status",
-				Value:    searcherMatchValue,
-				Declared: []spi.DataType{spi.String},
-			},
-		},
+		{name: "Equality", filter: trackingReadEqualityFilter()},
 		{
 			name: "Negated",
 			filter: spi.Filter{
@@ -135,15 +140,15 @@ func runTrackingReadYieldedOnly(t *testing.T, h Harness, read trackingReader) {
 					opts:               trackingReadOptions{trackingRead: true},
 					filter:             p.filter,
 					wantCommitSucceeds: true,
-					because:            "the excluded entity was never handed to the caller, so it must not be in the read set: a concurrent commit touching it must not abort this tx",
+					because:            "the excluded entity was never handed to the caller, so it must not be in the read set: a concurrent commit touching it must not abort this tx. If TrackingRead/Disabled is red too, that case names the defect — a backend that ignores the flag records during this case's own visibility guard, and this failure is downstream of it",
 				})
 			})
 			t.Run("YieldedRowIsRecorded", func(t *testing.T) {
 				trackingReadOutcome(t, h, read, trackingReadCase{
-					opts:              trackingReadOptions{trackingRead: true},
-					filter:            p.filter,
-					conflictOnYielded: true,
-					because:           "the yielded entity must be in the read set, so the conflicting concurrent commit aborts this tx",
+					opts:            trackingReadOptions{trackingRead: true},
+					filter:          p.filter,
+					conflictOnMatch: true,
+					because:         "the yielded entity must be in the read set, so the conflicting concurrent commit aborts this tx",
 				})
 			})
 		})
@@ -153,14 +158,20 @@ func runTrackingReadYieldedOnly(t *testing.T, h Harness, read trackingReader) {
 // runTrackingReadDisabled pins the flag's default: a read with TrackingRead
 // unset records nothing, not even the row it returned. Without this a backend
 // that ignores the flag and always records passes every YieldedOnly case.
+//
+// This is the one case that reads with a zero-value (match-all) filter, the
+// shape the retired Gating case carried: a backend's no-filter path is not
+// the path a pushed-down predicate takes, so a recording regression confined
+// to it would otherwise have no case at all.
 func runTrackingReadDisabled(t *testing.T, h Harness, read trackingReader) {
 	t.Helper()
 	trackingReadOutcome(t, h, read, trackingReadCase{
 		opts:               trackingReadOptions{trackingRead: false},
-		filter:             trackingReadPredicates()[0].filter,
-		conflictOnYielded:  true,
+		filter:             spi.Filter{},
+		yieldsBoth:         true,
+		conflictOnMatch:    true,
 		wantCommitSucceeds: true,
-		because:            "TrackingRead unset must record nothing, so a concurrent commit touching even the returned entity must not abort this tx",
+		because:            "TrackingRead unset must record nothing, so a concurrent commit touching even a returned entity must not abort this tx",
 	})
 }
 
@@ -175,24 +186,28 @@ func runTrackingReadPointInTime(t *testing.T, h Harness, read trackingReader) {
 	trackingReadOutcome(t, h, read, trackingReadCase{
 		opts:               trackingReadOptions{trackingRead: true},
 		asAtFuture:         true,
-		filter:             trackingReadPredicates()[0].filter,
-		conflictOnYielded:  true,
+		filter:             trackingReadEqualityFilter(),
+		conflictOnMatch:    true,
 		wantCommitSucceeds: true,
 		because:            "a point-in-time read records nothing even with TrackingRead set, so a concurrent commit touching the returned entity must not abort this tx",
 	})
 }
 
 // trackingReadCase is one read-set outcome: how the read was configured, and
-// whether the tracking transaction survives a concurrent commit to the row it
-// yielded (conflictOnYielded) or to the row the filter excluded.
+// whether the tracking transaction survives a concurrent commit to the match
+// row (conflictOnMatch) or to the decoy row — which the predicate cases
+// exclude and the match-all case returns.
 type trackingReadCase struct {
 	opts   trackingReadOptions
 	filter spi.Filter
 	// asAtFuture resolves opts.pointInTime after the fixture is committed —
 	// it cannot be a literal on the case, because the instant must be past
 	// the seed's own submit time.
-	asAtFuture         bool
-	conflictOnYielded  bool
+	asAtFuture bool
+	// yieldsBoth is set by the match-all case, whose filter selects the decoy
+	// row as well: there is no excluded row for it to leave unrecorded.
+	yieldsBoth         bool
+	conflictOnMatch    bool
 	wantCommitSucceeds bool
 	because            string
 }
@@ -201,14 +216,14 @@ func trackingReadOutcome(t *testing.T, h Harness, read trackingReader, c trackin
 	t.Helper()
 	ctx := tenantContext(h.NewTenant())
 	mref := spi.ModelRef{EntityName: trackingReadModel, ModelVersion: "1"}
-	yieldedID, excludedID := newID(), newID()
+	matchID, decoyID := newID(), newID()
 
 	withTx(t, h, ctx, func(txCtx spiCtx) {
 		es, err := h.Factory.EntityStore(txCtx)
 		require.NoError(t, err)
-		_, err = es.Save(txCtx, newEntity(t, mref.EntityName, yieldedID, map[string]any{"status": searcherMatchValue}))
+		_, err = es.Save(txCtx, newEntity(t, mref.EntityName, matchID, map[string]any{"status": searcherMatchValue}))
 		require.NoError(t, err)
-		_, err = es.Save(txCtx, newEntity(t, mref.EntityName, excludedID, map[string]any{"status": searcherDecoyValue}))
+		_, err = es.Save(txCtx, newEntity(t, mref.EntityName, decoyID, map[string]any{"status": searcherDecoyValue}))
 		require.NoError(t, err)
 	})
 
@@ -235,15 +250,19 @@ func trackingReadOutcome(t *testing.T, h Harness, read trackingReader, c trackin
 	require.NoError(t, err)
 	visible, err := drainIterator(t, all)
 	require.NoError(t, err)
-	require.ElementsMatch(t, []string{yieldedID, excludedID}, entityIDs(visible),
+	require.ElementsMatch(t, []string{matchID, decoyID}, entityIDs(visible),
 		"both seeded entities must be visible to the transaction before the predicate runs (read here through Iterate with TrackingRead unset — a failure here is an Iterate defect, not a read-set one)")
 
-	require.ElementsMatch(t, []string{yieldedID}, read(t, tx.ctx, es, mref, c.filter, opts),
-		"the predicate selects exactly one of the two seeded entities")
+	wantYielded := []string{matchID}
+	if c.yieldsBoth {
+		wantYielded = append(wantYielded, decoyID)
+	}
+	require.ElementsMatch(t, wantYielded, read(t, tx.ctx, es, mref, c.filter, opts),
+		"the read must hand back exactly the rows its filter selects")
 
-	conflictID := excludedID
-	if c.conflictOnYielded {
-		conflictID = yieldedID
+	conflictID := decoyID
+	if c.conflictOnMatch {
+		conflictID = matchID
 	}
 	err = commitAfterConflictingWrite(t, h, ctx, mref, conflictID, tx)
 	if c.wantCommitSucceeds {

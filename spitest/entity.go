@@ -1104,10 +1104,10 @@ func testEntityGetPageInTxWithStagedDeletes(t *testing.T, h Harness) {
 // the deliberate narrowing of first-committer-wins from model-wide to
 // page-wide the GetPage doc comment calls out.
 //
-// Observed black-box (never via internal state), the same technique
-// testIterableTrackingReadGating uses: read a page in tx A, have a second,
-// independent tx B modify an entity and commit, then check whether tx A's
-// own commit is aborted by first-committer-wins.
+// Observed black-box (never via internal state), the same technique the
+// TrackingRead read-set cases use (trackingread.go): read a page in tx A,
+// have a second, independent tx B modify an entity and commit, then check
+// whether tx A's own commit is aborted by first-committer-wins.
 //
 //   - EntityOnPage: B modifies an entity A's page actually returned — A's
 //     commit must be rejected (ErrConflict). A backend that implements

@@ -719,7 +719,10 @@ it catches up.
   directions: a concurrent write to the yielded row aborts the tracking
   transaction, a concurrent write to the excluded row does not.
   `TrackingRead/Disabled` and `TrackingRead/PointInTime` pin the two cases
-  that must record nothing.
+  that must record nothing, and `Disabled` carries the match-all filter shape
+  `Gating` was the only case running. **A backend carrying a `Harness.Skip`
+  entry for the retired key must drop it** — `StoreFactoryConformance` reports
+  a skip key that never matched as an error.
 
   Each `YieldedOnly` direction runs under two predicate shapes, an equality
   leaf and a negated one. A backend that translates the predicate into

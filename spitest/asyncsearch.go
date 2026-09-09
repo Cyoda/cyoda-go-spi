@@ -41,6 +41,14 @@ func runAsyncSearchSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "UpdateStatus/MissingIsNotFound", testASUpdateStatusMissingIsNotFound)
 	runSubtest(t, h, tracker, "UpdateStatus/ZeroFinishTimeAbsent", testASUpdateStatusZeroFinishTimeAbsent)
 	runSubtest(t, h, tracker, "Heartbeat/Semantics", testASHeartbeatSemantics)
+	runSubtest(t, h, tracker, "Release/ImmediatelyClaimable", testASReleaseImmediatelyClaimable)
+	runSubtest(t, h, tracker, "Release/Semantics", testASReleaseSemantics)
+	runSubtest(t, h, tracker, "Release/Idempotent", testASReleaseIdempotent)
+	runSubtest(t, h, tracker, "Release/HeartbeatDoesNotResurrect", testASReleaseHeartbeatNoResurrect)
+	runSubtest(t, h, tracker, "Release/ClaimClearsMark", testASReleaseClaimClearsMark)
+	runSubtest(t, h, tracker, "Release/ClaimNotCounted", testASReleaseClaimNotCounted)
+	runSubtest(t, h, tracker, "Claim/StaleClaimCounted", testASClaimStaleClaimCounted)
+	runSubtest(t, h, tracker, "Claim/ReleasedNotTerminal", testASClaimReleasedNotTerminal)
 }
 
 // newSearchJob stamps CreateTime from the harness clock (h.Now), not real
@@ -731,4 +739,170 @@ func testASHeartbeatSemantics(t *testing.T, h Harness) {
 	require.NoError(t, as.UpdateJobStatus(ctx, id, 1, "SUCCESSFUL", 0, "", h.Now(), 0))
 	err = as.Heartbeat(ctx, id, 1)
 	require.ErrorIs(t, err, spi.ErrAlreadyTerminal, "heartbeat against a terminal job")
+}
+
+func testASReleaseImmediatelyClaimable(t *testing.T, h Harness) {
+	tid := h.NewTenant()
+	ctx := tenantContext(tid)
+	as, _ := h.Factory.AsyncSearchStore(ctx)
+	id := newID()
+	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, id)))
+	require.NoError(t, as.Release(ctx, id, 1))
+
+	// staleAfter of an hour: only the released mark, not age, can make this
+	// claimable (its CreateTime is "now" from h.Now). limit 1000 + findClaimed
+	// because the suite is cross-tenant and earlier subtests leave stale rows.
+	claimed, err := as.ClaimStale(ctx, time.Hour, 1000)
+	require.NoError(t, err)
+	job := findClaimed(claimed, id)
+	require.NotNil(t, job, "a released job must be claimable regardless of staleAfter")
+	require.Equal(t, int64(2), job.Epoch, "claiming a released job still bumps Epoch")
+	require.Equal(t, int64(0), job.StaleClaims, "claiming a RELEASED job must not count as a stale claim")
+	require.Equal(t, "RUNNING", job.Status)
+
+	got, err := as.GetJob(ctx, id)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), got.Epoch)
+	require.Equal(t, int64(0), got.StaleClaims)
+}
+
+func testASReleaseSemantics(t *testing.T, h Harness) {
+	tid := h.NewTenant()
+	ctx := tenantContext(tid)
+	as, _ := h.Factory.AsyncSearchStore(ctx)
+
+	require.ErrorIs(t, as.Release(ctx, newID(), 1), spi.ErrNotFound, "release of a missing job")
+
+	id := newID()
+	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, id)))
+	require.ErrorIs(t, as.Release(ctx, id, 2), spi.ErrStaleClaim, "release with the wrong epoch")
+	// A failed release must not mark the job: an hour-later stale sweep with a
+	// long staleAfter still claims nothing off THIS fresh job.
+	claimed, err := as.ClaimStale(ctx, time.Hour, 1000)
+	require.NoError(t, err)
+	require.Nil(t, findClaimed(claimed, id), "a rejected release must not leave the job marked released")
+
+	require.NoError(t, as.UpdateJobStatus(ctx, id, 1, "SUCCESSFUL", 0, "", h.Now(), 0))
+	require.ErrorIs(t, as.Release(ctx, id, 1), spi.ErrAlreadyTerminal, "release of a terminal job")
+}
+
+func testASReleaseIdempotent(t *testing.T, h Harness) {
+	tid := h.NewTenant()
+	ctx := tenantContext(tid)
+	as, _ := h.Factory.AsyncSearchStore(ctx)
+	id := newID()
+	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, id)))
+	require.NoError(t, as.Release(ctx, id, 1))
+	require.NoError(t, as.Release(ctx, id, 1), "release is idempotent at the same epoch")
+
+	claimed, err := as.ClaimStale(ctx, time.Hour, 1000)
+	require.NoError(t, err)
+	require.NotNil(t, findClaimed(claimed, id), "two releases still yield exactly one claimable job")
+	// The job was claimed once (epoch 2); a second claim finds nothing new.
+	again, err := as.ClaimStale(ctx, time.Hour, 1000)
+	require.NoError(t, err)
+	require.Nil(t, findClaimed(again, id), "a claimed job is no longer released")
+}
+
+func testASReleaseHeartbeatNoResurrect(t *testing.T, h Harness) {
+	tid := h.NewTenant()
+	ctx := tenantContext(tid)
+	as, _ := h.Factory.AsyncSearchStore(ctx)
+	id := newID()
+	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, id)))
+	require.NoError(t, as.Release(ctx, id, 1))
+	// A stray heartbeat from the departing executor at the same epoch must
+	// not clear the released mark.
+	require.NoError(t, as.Heartbeat(ctx, id, 1))
+	claimed, err := as.ClaimStale(ctx, time.Hour, 1000)
+	require.NoError(t, err)
+	require.NotNil(t, findClaimed(claimed, id), "a heartbeat must not resurrect a released job")
+}
+
+func testASReleaseClaimClearsMark(t *testing.T, h Harness) {
+	tid := h.NewTenant()
+	ctx := tenantContext(tid)
+	as, _ := h.Factory.AsyncSearchStore(ctx)
+	id := newID()
+	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, id)))
+	require.NoError(t, as.Release(ctx, id, 1))
+	claimed, err := as.ClaimStale(ctx, time.Hour, 1000)
+	require.NoError(t, err)
+	require.NotNil(t, findClaimed(claimed, id))
+	// The new claimant heartbeats at epoch 2; the released mark is gone, so a
+	// fresh long-staleAfter sweep no longer takes it.
+	require.NoError(t, as.Heartbeat(ctx, id, 2))
+	again, err := as.ClaimStale(ctx, time.Hour, 1000)
+	require.NoError(t, err)
+	require.Nil(t, findClaimed(again, id), "claiming must clear the released mark")
+}
+
+func testASReleaseClaimNotCounted(t *testing.T, h Harness) {
+	tid := h.NewTenant()
+	ctx := tenantContext(tid)
+	as, _ := h.Factory.AsyncSearchStore(ctx)
+	id := newID()
+	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, id)))
+	require.NoError(t, as.Release(ctx, id, 1))
+	claimed, err := as.ClaimStale(ctx, time.Hour, 1000)
+	require.NoError(t, err)
+	job := findClaimed(claimed, id)
+	require.NotNil(t, job)
+	require.Equal(t, int64(0), job.StaleClaims, "a release-then-claim must not count")
+
+	// Now let it go stale as-of the store clock and claim by staleness.
+	h.AdvanceClock(2 * claimStaleAfter)
+	staled, err := as.ClaimStale(ctx, claimStaleAfter, 1000)
+	require.NoError(t, err)
+	after := findClaimed(staled, id)
+	require.NotNil(t, after, "the job (epoch 2, heartbeated by the prior claim then aged) must go stale")
+	require.Equal(t, int64(1), after.StaleClaims, "a staleness claim increments StaleClaims")
+}
+
+func testASClaimStaleClaimCounted(t *testing.T, h Harness) {
+	tid := h.NewTenant()
+	ctx := tenantContext(tid)
+	as, _ := h.Factory.AsyncSearchStore(ctx)
+	id := newID()
+	require.NoError(t, as.CreateJob(ctx, backdatedJob(h, tid, id, claimJobAge)))
+
+	claimed, err := as.ClaimStale(ctx, claimStaleAfter, 1000)
+	require.NoError(t, err)
+	job := findClaimed(claimed, id)
+	require.NotNil(t, job)
+	require.Equal(t, int64(1), job.StaleClaims, "first staleness claim sets StaleClaims to 1")
+	got, err := as.GetJob(ctx, id)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), got.StaleClaims, "the increment is persisted")
+
+	// Age it again (the claim refreshed the heartbeat) and re-claim.
+	h.AdvanceClock(2 * claimStaleAfter)
+	again, err := as.ClaimStale(ctx, claimStaleAfter, 1000)
+	require.NoError(t, err)
+	job2 := findClaimed(again, id)
+	require.NotNil(t, job2)
+	require.Equal(t, int64(2), job2.StaleClaims, "a second staleness claim makes it 2")
+
+	// CreateJob ignores an input StaleClaims.
+	id2 := newID()
+	seed := newSearchJob(h, tid, id2)
+	seed.StaleClaims = 7
+	require.NoError(t, as.CreateJob(ctx, seed))
+	got2, err := as.GetJob(ctx, id2)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), got2.StaleClaims, "CreateJob persists StaleClaims as 0")
+}
+
+func testASClaimReleasedNotTerminal(t *testing.T, h Harness) {
+	tid := h.NewTenant()
+	ctx := tenantContext(tid)
+	as, _ := h.Factory.AsyncSearchStore(ctx)
+	id := newID()
+	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, id)))
+	require.NoError(t, as.Release(ctx, id, 1))
+	// Cancel wins over the released mark: a terminal job is never claimed.
+	require.NoError(t, as.Cancel(ctx, id, h.Now()))
+	claimed, err := as.ClaimStale(ctx, time.Hour, 1000)
+	require.NoError(t, err)
+	require.Nil(t, findClaimed(claimed, id), "a released-then-cancelled job must never be claimed")
 }

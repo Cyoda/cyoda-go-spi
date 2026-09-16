@@ -12,6 +12,13 @@ var ErrConflict = errors.New("conflict: entity has been modified")
 // the cluster view. Retry after refreshing.
 var ErrEpochMismatch = errors.New("shard epoch mismatch")
 
+// ErrEntityModelMismatch is returned by Save when the entity's model
+// reference differs from the stored entity's. An entity's model is fixed at
+// creation: its model name and version never change. A write that would
+// change them is rejected rather than silently rewriting which model the
+// entity's history belongs to.
+var ErrEntityModelMismatch = errors.New("entity model mismatch")
+
 // ErrRetryExhausted indicates the plugin's retry budget for a
 // transparently-retried operation was consumed without success.
 // Returned by ExtendSchema when CYODA_SCHEMA_EXTEND_MAX_RETRIES

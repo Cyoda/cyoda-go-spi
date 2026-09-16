@@ -63,6 +63,9 @@ type TransactionManager interface {
 	// manager-mutex region.
 	Join(ctx context.Context, txID string) (txCtx context.Context, err error)
 
+	// GetSubmitTime returns the instant the transaction committed. It is the
+	// same instant stamped on every row that transaction wrote, and it must
+	// be answerable by any node, not only the one that committed.
 	GetSubmitTime(ctx context.Context, txID string) (time.Time, error)
 
 	// Savepoint creates a named savepoint within the given transaction by

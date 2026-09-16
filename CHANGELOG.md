@@ -10,6 +10,26 @@ For the rationale behind the absence of CHANGELOG entries before v0.7.1,
 see the [Fixing forward](MAINTAINING.md#fixing-forward) section of
 MAINTAINING.md.
 
+## [Unreleased]
+
+### Added
+
+- **`ErrEntityModelMismatch`.** An entity's model reference (`EntityMeta.ModelRef`)
+  is fixed at creation and must never change for the life of the entity ID,
+  including across delete/recreate. `Save` now returns `ErrEntityModelMismatch`
+  when the incoming entity's model differs from the stored one, instead of
+  silently rewriting it. A backend that let the model change stranded the
+  entity's earlier-model version history from every point-in-time read issued
+  under that earlier model. Documented on `EntityMeta.ModelRef`; the new
+  `spitest` conformance case `Save/ModelReferenceIsImmutable` (and its
+  in-transaction sibling) pins the rejection on every backend.
+
+  Migration: a backend's `Save` (and `CompareAndSave`, where it does not
+  already delegate to `Save`) must compare the incoming `ModelRef` against
+  the entity's already-stored one and return `ErrEntityModelMismatch`
+  (wrapped) on a mismatch, before applying the write — buffered backends at
+  the point the write is buffered, not deferred to flush/commit.
+
 ## [0.8.4] - 2026-09-09
 
 ### Breaking

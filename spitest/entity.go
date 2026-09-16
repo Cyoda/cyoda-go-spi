@@ -17,6 +17,8 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	// CRUD group (Task 4)
 	runSubtest(t, h, tracker, "CreateAndGet", testEntityCreateAndGet)
 	runSubtest(t, h, tracker, "Update", testEntityUpdate)
+	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutable", testEntityModelImmutable)
+	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutableWithinTx", testEntityModelImmutableWithinTx)
 	runSubtest(t, h, tracker, "SaveAll/Ordering", testEntitySaveAllOrdering)
 	runSubtest(t, h, tracker, "SaveAll/PartialFailureAtomicity", testEntitySaveAllAtomicity)
 	runSubtest(t, h, tracker, "Get/NotFound", testEntityGetNotFound)
@@ -115,6 +117,61 @@ func testEntityUpdate(t *testing.T, h Harness) {
 	require.NoError(t, err)
 	require.Equal(t, id, got.Meta.ID)
 	require.Contains(t, string(got.Data), `"v":2`)
+}
+
+// testEntityModelImmutable asserts an entity's model reference cannot
+// change. Backends that overwrite it silently rewrite which model the
+// entity's history belongs to, and a point-in-time read of the former model
+// then loses the entity entirely. The second Save runs outside a
+// transaction (the same shape a compare-and-save or a direct client write
+// takes), so this pins the check against COMMITTED state.
+func testEntityModelImmutable(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	id := newID()
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		_, err := es.Save(txCtx, newEntity(t, "immutable-model", id, map[string]any{"n": 1}))
+		require.NoError(t, err)
+	})
+
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	second := newEntity(t, "immutable-model", id, map[string]any{"n": 2})
+	second.Meta.ModelRef.ModelVersion = "2"
+	_, err = es.Save(ctx, second)
+	require.Error(t, err, "saving an existing entity under a different model must be rejected")
+	require.True(t, errors.Is(err, spi.ErrEntityModelMismatch),
+		"must wrap ErrEntityModelMismatch; got: %v", err)
+}
+
+// testEntityModelImmutableWithinTx pins the same rejection at the moment a
+// buffered backend BUFFERS the conflicting write, not only when it later
+// flushes at commit. memory and sqlite hold in-transaction writes in a
+// per-transaction buffer rather than applying them to committed state
+// immediately, so a naive implementation could defer the model check to
+// flush time — silently accepting the mismatched Save call and only failing
+// (or worse, not failing) at Commit, after the caller already believes the
+// write succeeded. Save must reject it at the call that makes it.
+func testEntityModelImmutableWithinTx(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	id := newID()
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	txID, txCtx, err := tm.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tm.Rollback(txCtx, txID) }()
+
+	es, err := h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+	_, err = es.Save(txCtx, newEntity(t, "immutable-model-tx", id, map[string]any{"n": 1}))
+	require.NoError(t, err)
+
+	second := newEntity(t, "immutable-model-tx", id, map[string]any{"n": 2})
+	second.Meta.ModelRef.ModelVersion = "2"
+	_, err = es.Save(txCtx, second)
+	require.Error(t, err, "a same-transaction Save under a different model must be rejected at buffer time")
+	require.True(t, errors.Is(err, spi.ErrEntityModelMismatch),
+		"must wrap ErrEntityModelMismatch; got: %v", err)
 }
 
 func testEntityGetNotFound(t *testing.T, h Harness) {

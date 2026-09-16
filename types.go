@@ -16,11 +16,18 @@ func (r ModelRef) String() string {
 }
 
 type EntityMeta struct {
-	ID                      string
-	TenantID                TenantID
-	ModelRef                ModelRef
-	State                   string
-	Version                 int64
+	ID       string
+	TenantID TenantID
+	// ModelRef is fixed at creation and never changes for the life of the
+	// entity ID, including across delete/recreate. Save rejects a write that
+	// would change it — see ErrEntityModelMismatch.
+	ModelRef ModelRef
+	State    string
+	Version  int64
+	// CreationDate is the instant the transaction that created this entity
+	// committed. LastModifiedDate is the instant the transaction that wrote
+	// this revision committed. Both are assigned by the store, never by the
+	// caller; a value supplied on Save is ignored.
 	CreationDate            time.Time
 	LastModifiedDate        time.Time
 	TransactionID           string

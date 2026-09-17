@@ -23,6 +23,7 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "CompareAndSave/ModelReferenceIsImmutable", testEntityCompareAndSaveModelImmutable)
 	runSubtest(t, h, tracker, "CompareAndSave/ModelReferenceIsImmutableWithinTx", testEntityCompareAndSaveModelImmutableWithinTx)
 	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutableAfterSameTxCreateDeleteAll", testEntityModelImmutableAfterSameTxCreateDeleteAll)
+	runSubtest(t, h, tracker, "Save/CallerCreationDateIgnored", testEntitySaveIgnoresCallerCreationDate)
 	runSubtest(t, h, tracker, "SaveAll/Ordering", testEntitySaveAllOrdering)
 	runSubtest(t, h, tracker, "SaveAll/PartialFailureAtomicity", testEntitySaveAllAtomicity)
 	runSubtest(t, h, tracker, "Get/NotFound", testEntityGetNotFound)
@@ -122,6 +123,65 @@ func testEntityUpdate(t *testing.T, h Harness) {
 	require.NoError(t, err)
 	require.Equal(t, id, got.Meta.ID)
 	require.Contains(t, string(got.Data), `"v":2`)
+}
+
+// testEntitySaveIgnoresCallerCreationDate pins that an entity's creation
+// date belongs to the STORE, not the caller: a value set on the entity
+// before Save is ignored and the store assigns the committing transaction's
+// instant instead.
+//
+// This is not hygiene. An engine typically populates Meta.CreationDate from
+// its own clock when it builds the entity — before it opens the transaction
+// — so a backend that honours the incoming value dates the entity at the
+// moment the write STARTED rather than at the moment it committed. The gap
+// is the whole transaction lifetime, processor callouts included, and it
+// reintroduces exactly the defect commit-instant stamping removes: two
+// entities written by one transaction can report different creation dates,
+// and a point-in-time read at an instant between the two values disagrees
+// with itself.
+//
+// Both write paths are covered, because a backend can easily fix one and
+// leave the other: the transactional path and the direct, non-transactional
+// one.
+func testEntitySaveIgnoresCallerCreationDate(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	planted := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+
+	txEntityID := newID()
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		e := newEntity(t, "caller-creation-date", txEntityID, map[string]any{"n": 1})
+		e.Meta.CreationDate = planted
+		e.Meta.LastModifiedDate = planted
+		_, err := es.Save(txCtx, e)
+		require.NoError(t, err)
+	})
+
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+
+	got, err := es.Get(ctx, txEntityID)
+	require.NoError(t, err)
+	require.False(t, got.Meta.CreationDate.IsZero(), "CreationDate must be populated")
+	require.False(t, got.Meta.CreationDate.Equal(planted),
+		"a caller-supplied CreationDate must be ignored and replaced by the commit instant; got the planted value %v", planted)
+	require.False(t, got.Meta.LastModifiedDate.Equal(planted),
+		"a caller-supplied LastModifiedDate must be ignored and replaced by the commit instant")
+
+	directID := newID()
+	direct := newEntity(t, "caller-creation-date", directID, map[string]any{"n": 2})
+	direct.Meta.CreationDate = planted
+	direct.Meta.LastModifiedDate = planted
+	_, err = es.Save(ctx, direct)
+	require.NoError(t, err)
+
+	gotDirect, err := es.Get(ctx, directID)
+	require.NoError(t, err)
+	require.False(t, gotDirect.Meta.CreationDate.IsZero(), "CreationDate must be populated")
+	require.False(t, gotDirect.Meta.CreationDate.Equal(planted),
+		"a caller-supplied CreationDate must be ignored on a non-transactional Save too")
+	require.False(t, gotDirect.Meta.LastModifiedDate.Equal(planted),
+		"a caller-supplied LastModifiedDate must be ignored on a non-transactional Save too")
 }
 
 // testEntityModelImmutable asserts an entity's model reference cannot

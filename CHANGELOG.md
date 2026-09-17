@@ -51,6 +51,24 @@ MAINTAINING.md.
   timestamps must add a deterministic final tiebreak, or it fails this case
   whenever a plan or storage-order change flips the winner.
 
+- **`Save/CallerCreationDateIgnored`.** A new `spitest` case: an entity's
+  creation date belongs to the store, so a value set on `Meta.CreationDate`
+  before `Save` must be ignored and replaced with the committing
+  transaction's instant. The case covers the transactional and the
+  non-transactional write path separately, because a backend can fix one
+  and leave the other. This is not hygiene: an engine typically stamps that
+  field from its own clock *before* it opens a transaction, so a backend
+  honouring the incoming value dates a created entity at the moment the
+  write started rather than at its commit — a gap as long as the
+  transaction, processor callouts included. cyoda-go's memory backend
+  failed this case when it was written (it kept a non-zero caller value and
+  substituted its own clock only for a zero one); sqlite and postgres
+  passed it unchanged.
+
+  Migration: when a write creates the entity, stamp `CreationDate` from the
+  commit instant unconditionally; when it does not, carry the stored value
+  forward. Never fall back to the caller's value.
+
 ### Changed
 
 - **The instants behind `CreationDate`, `LastModifiedDate` and

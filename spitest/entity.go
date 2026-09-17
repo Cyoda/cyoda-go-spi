@@ -21,6 +21,8 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutableWithinTx", testEntityModelImmutableWithinTx)
 	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutableAfterSameTxCreateDelete", testEntityModelImmutableAfterSameTxCreateDelete)
 	runSubtest(t, h, tracker, "CompareAndSave/ModelReferenceIsImmutable", testEntityCompareAndSaveModelImmutable)
+	runSubtest(t, h, tracker, "CompareAndSave/ModelReferenceIsImmutableWithinTx", testEntityCompareAndSaveModelImmutableWithinTx)
+	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutableAfterSameTxCreateDeleteAll", testEntityModelImmutableAfterSameTxCreateDeleteAll)
 	runSubtest(t, h, tracker, "SaveAll/Ordering", testEntitySaveAllOrdering)
 	runSubtest(t, h, tracker, "SaveAll/PartialFailureAtomicity", testEntitySaveAllAtomicity)
 	runSubtest(t, h, tracker, "Get/NotFound", testEntityGetNotFound)
@@ -237,6 +239,83 @@ func testEntityCompareAndSaveModelImmutable(t *testing.T, h Harness) {
 	second.Meta.ModelRef.ModelVersion = "2"
 	_, err = es.CompareAndSave(ctx, second, got.Meta.TransactionID)
 	require.Error(t, err, "CompareAndSave against a matching transaction ID must still be rejected under a different model")
+	require.True(t, errors.Is(err, spi.ErrEntityModelMismatch),
+		"must wrap ErrEntityModelMismatch; got: %v", err)
+}
+
+// testEntityCompareAndSaveModelImmutableWithinTx pins the same rejection as
+// testEntityCompareAndSaveModelImmutable, but through the IN-TRANSACTION
+// branch of CompareAndSave, not the non-transactional one. memory and sqlite
+// implement a separate check on that branch (see checkModelImmutable /
+// checkModelImmutableInTx in their entity_store.go, called before either the
+// buffer or committed-store comparison runs) — a naive implementation could
+// enforce the non-tx path and still let this one drop the check. The initial
+// Save commits via withTx (not a rollback-only helper) so got.Meta.TransactionID
+// names a REAL committed transaction; the CompareAndSave under test then runs
+// inside a second, still-open transaction, isolating the model check as the
+// only thing that can fail — the CAS's own transaction-identity comparison
+// still passes because expectedTxID is that real committed value.
+func testEntityCompareAndSaveModelImmutableWithinTx(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	id := newID()
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = es.Save(txCtx, newEntity(t, "immutable-model-cas-tx", id, map[string]any{"n": 1}))
+		require.NoError(t, err)
+	})
+
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	got, err := es.Get(ctx, id)
+	require.NoError(t, err)
+	require.NotEmpty(t, got.Meta.TransactionID, "TransactionID meta must be populated")
+
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	txID, txCtx, err := tm.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tm.Rollback(txCtx, txID) }()
+
+	txEs, err := h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+	second := newEntity(t, "immutable-model-cas-tx", id, map[string]any{"n": 2})
+	second.Meta.ModelRef.ModelVersion = "2"
+	_, err = txEs.CompareAndSave(txCtx, second, got.Meta.TransactionID)
+	require.Error(t, err, "an in-transaction CompareAndSave against the entity's real committed transaction ID must still be rejected under a different model")
+	require.True(t, errors.Is(err, spi.ErrEntityModelMismatch),
+		"must wrap ErrEntityModelMismatch; got: %v", err)
+}
+
+// testEntityModelImmutableAfterSameTxCreateDeleteAll pins the same rejection
+// as testEntityModelImmutableAfterSameTxCreateDelete, but through DeleteAll's
+// staging call site rather than Delete's. memory and sqlite evict
+// same-transaction-buffered entities from DeleteAll through separately
+// hand-written code (structurally parallel to, but not shared with, Delete's
+// eviction) — a regression there would go uncaught by Delete's case because
+// nothing else invokes DeleteAll against a same-transaction-buffered entity.
+// Create and DeleteAll the same id inside ONE transaction, commit, then try
+// to recreate it under a different model: the tombstone DeleteAll's flush
+// appends is the only committed version for this id, and it still marks the
+// id as belonging to its original model.
+func testEntityModelImmutableAfterSameTxCreateDeleteAll(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	id := newID()
+	mref := spi.ModelRef{EntityName: "immutable-model-cda", ModelVersion: "1"}
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = es.Save(txCtx, newEntity(t, "immutable-model-cda", id, map[string]any{"n": 1}))
+		require.NoError(t, err)
+		require.NoError(t, es.DeleteAll(txCtx, mref))
+	})
+
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	second := newEntity(t, "immutable-model-cda", id, map[string]any{"n": 2})
+	second.Meta.ModelRef.ModelVersion = "2"
+	_, err = es.Save(ctx, second)
+	require.Error(t, err, "recreating an id whose create+DeleteAll committed in one transaction must still be rejected under a different model")
 	require.True(t, errors.Is(err, spi.ErrEntityModelMismatch),
 		"must wrap ErrEntityModelMismatch; got: %v", err)
 }

@@ -24,6 +24,7 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "CompareAndSave/ModelReferenceIsImmutableWithinTx", testEntityCompareAndSaveModelImmutableWithinTx)
 	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutableAfterSameTxCreateDeleteAll", testEntityModelImmutableAfterSameTxCreateDeleteAll)
 	runSubtest(t, h, tracker, "Save/CallerCreationDateIgnored", testEntitySaveIgnoresCallerCreationDate)
+	runSubtest(t, h, tracker, "Save/UpdateDoesNotRestampCreationDate", testEntityUpdateDoesNotRestampCreationDate)
 	runSubtest(t, h, tracker, "SaveAll/Ordering", testEntitySaveAllOrdering)
 	runSubtest(t, h, tracker, "SaveAll/PartialFailureAtomicity", testEntitySaveAllAtomicity)
 	runSubtest(t, h, tracker, "Get/NotFound", testEntityGetNotFound)
@@ -182,6 +183,104 @@ func testEntitySaveIgnoresCallerCreationDate(t *testing.T, h Harness) {
 		"a caller-supplied CreationDate must be ignored on a non-transactional Save too")
 	require.False(t, gotDirect.Meta.LastModifiedDate.Equal(planted),
 		"a caller-supplied LastModifiedDate must be ignored on a non-transactional Save too")
+}
+
+// testEntityUpdateDoesNotRestampCreationDate pins the other half of the rule
+// testEntitySaveIgnoresCallerCreationDate begins: a create takes the
+// committing transaction's instant, and every LATER write must carry that
+// date forward rather than take its own — whatever the caller supplies.
+//
+// Two history shapes, because they reach different code on any backend that
+// derives the carried-forward date from the entity's version list:
+//
+//   - the ordinary one, whose history begins with the create; and
+//   - one whose history begins with a TOMBSTONE, left by a create and a
+//     delete committed in the same transaction — the shape
+//     Save/ModelReferenceIsImmutableAfterSameTxCreateDelete and
+//     PointInTime/DeleteRecreateSameTxVersionTiebreak also exercise. A
+//     backend that asks for "the first version" instead of "the first
+//     version that still carries an entity" finds no entity there, and
+//     silently restamps the creation date on every subsequent update.
+//
+// The second shape asserts STABILITY rather than a particular instant:
+// which instant a recreate establishes after a tombstone is a documented
+// per-backend difference, but no backend may move it afterwards.
+func testEntityUpdateDoesNotRestampCreationDate(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	planted := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+
+	// Shape one — ordinary history.
+	plainID := newID()
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		txEs, _ := h.Factory.EntityStore(txCtx)
+		_, err := txEs.Save(txCtx, newEntity(t, "update-creation-date", plainID, map[string]any{"n": 1}))
+		require.NoError(t, err)
+	})
+
+	created, err := es.Get(ctx, plainID)
+	require.NoError(t, err)
+	createdAt := created.Meta.CreationDate
+	require.False(t, createdAt.IsZero(), "CreationDate must be populated")
+
+	h.AdvanceClock(1 * time.Millisecond)
+
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		txEs, _ := h.Factory.EntityStore(txCtx)
+		upd := newEntity(t, "update-creation-date", plainID, map[string]any{"n": 2})
+		upd.Meta.CreationDate = planted
+		_, err := txEs.Save(txCtx, upd)
+		require.NoError(t, err)
+	})
+
+	updated, err := es.Get(ctx, plainID)
+	require.NoError(t, err)
+	require.True(t, updated.Meta.CreationDate.Equal(createdAt),
+		"an update must carry the entity's creation date forward: was %v, now %v", createdAt, updated.Meta.CreationDate)
+	require.False(t, updated.Meta.CreationDate.Equal(planted),
+		"an update must not adopt a caller-supplied CreationDate")
+
+	// Shape two — history that begins with a tombstone.
+	tombID := newID()
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		txEs, _ := h.Factory.EntityStore(txCtx)
+		_, err := txEs.Save(txCtx, newEntity(t, "update-creation-date", tombID, map[string]any{"n": 1}))
+		require.NoError(t, err)
+		require.NoError(t, txEs.Delete(txCtx, tombID))
+	})
+
+	h.AdvanceClock(1 * time.Millisecond)
+
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		txEs, _ := h.Factory.EntityStore(txCtx)
+		_, err := txEs.Save(txCtx, newEntity(t, "update-creation-date", tombID, map[string]any{"n": 2}))
+		require.NoError(t, err)
+	})
+
+	recreated, err := es.Get(ctx, tombID)
+	require.NoError(t, err)
+	recreatedAt := recreated.Meta.CreationDate
+	require.False(t, recreatedAt.IsZero(), "CreationDate must be populated after a recreate")
+
+	h.AdvanceClock(1 * time.Millisecond)
+
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		txEs, _ := h.Factory.EntityStore(txCtx)
+		upd := newEntity(t, "update-creation-date", tombID, map[string]any{"n": 3})
+		upd.Meta.CreationDate = planted
+		_, err := txEs.Save(txCtx, upd)
+		require.NoError(t, err)
+	})
+
+	afterUpdate, err := es.Get(ctx, tombID)
+	require.NoError(t, err)
+	require.True(t, afterUpdate.Meta.CreationDate.Equal(recreatedAt),
+		"an update must not restamp the creation date of an entity whose history begins with a tombstone: was %v, now %v",
+		recreatedAt, afterUpdate.Meta.CreationDate)
+	require.False(t, afterUpdate.Meta.CreationDate.Equal(planted),
+		"an update must not adopt a caller-supplied CreationDate")
 }
 
 // testEntityModelImmutable asserts an entity's model reference cannot

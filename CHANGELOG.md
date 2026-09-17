@@ -69,6 +69,23 @@ MAINTAINING.md.
   commit instant unconditionally; when it does not, carry the stored value
   forward. Never fall back to the caller's value.
 
+- **`Save/UpdateDoesNotRestampCreationDate`.** The other half of that rule,
+  which nothing pinned cross-backend: a write that does *not* create the
+  entity must carry the stored creation date forward rather than take its
+  own instant. The case covers two history shapes, because they reach
+  different code on any backend that derives the carried-forward date from
+  the entity's version list — the ordinary one, and one whose history
+  begins with a **tombstone** left by a create and a delete committed in
+  the same transaction. A backend that asks for "the first version" rather
+  than "the first version that still carries an entity" finds no entity
+  there and restamps the creation date on every later update. The
+  tombstone shape asserts *stability* rather than a particular instant:
+  which instant a recreate establishes after a tombstone is a documented
+  per-backend difference, but no backend may move it afterwards.
+
+  Migration: derive the carried-forward creation date from the entity's
+  earliest still-recoverable snapshot, not from its first version row.
+
 ### Changed
 
 - **The instants behind `CreationDate`, `LastModifiedDate` and

@@ -20,15 +20,54 @@ MAINTAINING.md.
   when the incoming entity's model differs from the stored one, instead of
   silently rewriting it. A backend that let the model change stranded the
   entity's earlier-model version history from every point-in-time read issued
-  under that earlier model. Documented on `EntityMeta.ModelRef`; the new
-  `spitest` conformance case `Save/ModelReferenceIsImmutable` (and its
-  in-transaction sibling) pins the rejection on every backend.
+  under that earlier model. Documented on `EntityMeta.ModelRef`; six new
+  `spitest` conformance cases pin the rejection on every backend, at every
+  entry point that can reach an existing entity —
+  `Save/ModelReferenceIsImmutable`,
+  `Save/ModelReferenceIsImmutableWithinTx`,
+  `Save/ModelReferenceIsImmutableAfterSameTxCreateDelete`,
+  `Save/ModelReferenceIsImmutableAfterSameTxCreateDeleteAll`,
+  `CompareAndSave/ModelReferenceIsImmutable` and
+  `CompareAndSave/ModelReferenceIsImmutableWithinTx`. The two
+  same-transaction cases are the ones a naive implementation fails: a
+  create-then-delete inside one transaction can leave no committed row to
+  compare a later recreate against, and the model change is then accepted.
 
   Migration: a backend's `Save` (and `CompareAndSave`, where it does not
   already delegate to `Save`) must compare the incoming `ModelRef` against
   the entity's already-stored one and return `ErrEntityModelMismatch`
   (wrapped) on a mismatch, before applying the write — buffered backends at
   the point the write is buffered, not deferred to flush/commit.
+
+- **`PointInTime/DeleteRecreateSameTxVersionTiebreak`.** A new `spitest`
+  case: an entity deleted and recreated within one transaction leaves two
+  versions that share the transaction's single instant, so a point-in-time
+  read at or after that instant must resolve the tie deterministically and
+  return the recreate, not the tombstone. Ordering by timestamp alone is
+  ambiguous here; a backend needs a total order (cyoda-go's SQL backends
+  break the tie on version, descending).
+
+  Migration: a backend whose point-in-time read orders only by its stored
+  timestamps must add a deterministic final tiebreak, or it fails this case
+  whenever a plan or storage-order change flips the winner.
+
+### Changed
+
+- **The instants behind `CreationDate`, `LastModifiedDate` and
+  `GetSubmitTime` are now documented.** No interface changes and no
+  behaviour change in this module — these were previously unstated, which
+  left each backend to decide, and one of them decided differently. The
+  contract, now written on the declarations: `CreationDate` is the instant
+  the transaction that *created* the entity committed and
+  `LastModifiedDate` the instant the transaction that wrote *this revision*
+  committed; both are assigned by the store and a caller-supplied value on
+  `Save` is ignored; `GetSubmitTime` returns that same committing instant,
+  it is the one stamped on every row the transaction wrote, and it must be
+  answerable by **any** node rather than only the node that committed.
+
+  Migration: a backend that dates a write when its transaction *starts*, or
+  that answers `GetSubmitTime` only from node-local state, does not meet
+  this contract. Both are fixable without an interface change.
 
 ## [0.8.4] - 2026-09-09
 

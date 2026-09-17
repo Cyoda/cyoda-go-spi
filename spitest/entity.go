@@ -51,6 +51,7 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "GetPage/AsAtCommittedOnlyInTx", testEntityGetPageAsAtCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "GetPage/InTxWithStagedDeletes", testEntityGetPageInTxWithStagedDeletes)
 	runSubtest(t, h, tracker, "GetPage/InTxRecordsReadSet", testEntityGetPageInTxRecordsReadSet)
+	runSubtest(t, h, tracker, "PointInTime/DeleteRecreateSameTxVersionTiebreak", testEntityPITDeleteRecreateSameTxVersionTiebreak)
 	runSubtest(t, h, tracker, "GetVersionByTransaction/EarliestWins", testEntityGetVersionByTransactionEarliestWins)
 	runSubtest(t, h, tracker, "GetVersionByTransaction/DeletedNeverMatches", testEntityGetVersionByTransactionDeletedNeverMatches)
 	runSubtest(t, h, tracker, "GetVersionByTransaction/EmptyTxID", testEntityGetVersionByTransactionEmptyTxID)
@@ -1377,6 +1378,66 @@ func testEntityGetPageReadSetOutcome(t *testing.T, h Harness, conflictOnPage, wa
 	}
 	require.Error(t, err, "a concurrent write to an entity ON the returned page must abort the GetPage transaction under first-committer-wins")
 	require.ErrorIs(t, err, spi.ErrConflict)
+}
+
+// testEntityPITDeleteRecreateSameTxVersionTiebreak pins the point-in-time
+// version tiebreak for a delete-then-recreate committed together in ONE
+// transaction, under the SAME model: Save, Delete, and Save again all happen
+// inside a single transaction that commits once. On a backend that stamps
+// every write of one transaction from a single reading of the clock (e.g.
+// postgres's CURRENT_TIMESTAMP), the tombstone and the recreate share the
+// transaction's one commit instant — a timestamp comparison alone cannot
+// order them, and only a version-level tiebreak can: the LATER write within
+// the transaction (the recreate) must win, never the tombstone.
+//
+// This is deliberately NOT the model-immutability shape covered by
+// testEntityModelImmutableAfterSameTxCreateDelete: that family recreates
+// under a DIFFERENT model and asserts rejection. Recreating under the SAME
+// model is a legitimate write; this test's whole point is the ordering of
+// the two committed rows it produces, not whether the write is allowed.
+//
+// Both instant-resolving read paths are exercised because they are separate
+// queries on at least one backend and must agree: GetAsAt (single-entity)
+// and GetPage(asAt) (the model-scoped list/page read).
+func testEntityPITDeleteRecreateSameTxVersionTiebreak(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	const modelName = "m-pit-recreate-tiebreak"
+	mref := spi.ModelRef{EntityName: modelName, ModelVersion: "1"}
+	id := newID()
+
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = es.Save(txCtx, newEntity(t, modelName, id, map[string]any{"gen": 1}))
+		require.NoError(t, err)
+		require.NoError(t, es.Delete(txCtx, id))
+		_, err = es.Save(txCtx, newEntity(t, modelName, id, map[string]any{"gen": 2}))
+		require.NoError(t, err)
+	})
+
+	// asAt sits strictly after the transaction's commit instant, on the same
+	// clock domain the backend stamps versions from — see pit_time.go's
+	// parity-layer rationale for why this must be the harness clock rather
+	// than time.Now().
+	h.AdvanceClock(1 * time.Millisecond)
+	asAt := h.Now().UTC()
+
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+
+	gotAsAt, err := es.GetAsAt(ctx, id, asAt)
+	require.NoError(t, err,
+		"GetAsAt after a same-tx delete+recreate must resolve to the recreated entity, not ErrNotFound for a tombstone")
+	require.Contains(t, string(gotAsAt.Data), `"gen":2`,
+		"GetAsAt must resolve to the recreate (gen=2) — the later write in the transaction — not the tombstone or the original create (gen=1)")
+
+	page, err := es.GetPage(ctx, mref, 10, 0, &asAt)
+	require.NoError(t, err)
+	require.Len(t, page, 1,
+		"GetPage(asAt) after a same-tx delete+recreate must list exactly the recreated entity, not zero (tombstone) or two")
+	require.Equal(t, id, page[0].Meta.ID)
+	require.Contains(t, string(page[0].Data), `"gen":2`,
+		"GetPage(asAt) must resolve to the recreate (gen=2), not the tombstone")
 }
 
 // testEntityGetVersionByTransactionEarliestWins verifies that when one

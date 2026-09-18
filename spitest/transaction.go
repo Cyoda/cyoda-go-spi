@@ -51,6 +51,7 @@ func runTransactionSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "TxStateErrors/TenantMismatchOnCommit", testTxStateTenantMismatchOnCommit)
 	runSubtest(t, h, tracker, "TxStateErrors/TenantMismatchOnGetSubmitTime", testTxStateTenantMismatchOnGetSubmitTime)
 	runSubtest(t, h, tracker, "TxStateErrors/NotFoundOnGetSubmitTime", testTxStateNotFoundOnGetSubmitTime)
+	runSubtest(t, h, tracker, "TxStateErrors/NotCommittedOnGetSubmitTime", testTxStateNotCommittedOnGetSubmitTime)
 	runSubtest(t, h, tracker, "TxStateErrors/SavepointNotFound", testTxStateSavepointNotFound)
 	runSubtest(t, h, tracker, "Attribution/OriginCaptureAndJoin", testTxOriginCaptureAndJoin)
 	runSubtest(t, h, tracker, "Attribution/OriginAmbientRoot", testTxOriginAmbientRoot)
@@ -492,6 +493,32 @@ func testTxStateNotFoundOnGetSubmitTime(t *testing.T, h Harness) {
 	require.Error(t, err, "GetSubmitTime with unknown txID must fail")
 	require.True(t, errors.Is(err, spi.ErrTxNotFound),
 		"unknown txID must wrap ErrTxNotFound; got: %v", err)
+}
+
+// testTxStateNotCommittedOnGetSubmitTime verifies that the owning tenant's
+// lookup of its own in-flight transaction wraps ErrTxNotCommitted — and, in
+// particular, that it is NOT reported as ErrTxNotFound. The transaction is
+// known, so "not found" would be a wrong definitive answer; and a caller that
+// cannot tell a live transaction from a storage fault has to classify both
+// the same way, which is how raw storage errors reached an HTTP response body.
+func testTxStateNotCommittedOnGetSubmitTime(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
+
+	_, err = tm.GetSubmitTime(ctx, txID)
+	require.Error(t, err, "GetSubmitTime on an in-flight tx must fail")
+	require.True(t, errors.Is(err, spi.ErrTxNotCommitted),
+		"in-flight tx must wrap ErrTxNotCommitted; got: %v", err)
+	require.False(t, errors.Is(err, spi.ErrTxNotFound),
+		"an in-flight tx exists — reporting it as ErrTxNotFound is a wrong definitive answer; got: %v", err)
+
+	// Sanity: the same lookup resolves once the transaction commits, so the
+	// case above is about the phase, not a broken transaction.
+	require.NoError(t, tm.Commit(txCtx, txID))
+	_, err = tm.GetSubmitTime(ctx, txID)
+	require.NoError(t, err, "GetSubmitTime must resolve after commit")
 }
 
 // testTxStateSavepointNotFound verifies that RollbackToSavepoint with an

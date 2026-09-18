@@ -98,6 +98,22 @@ var ErrTxAlreadyCommitted = &sentinelErr{msg: "transaction already committed", p
 // exercise this in their internal concurrency suites.
 var ErrTxCommitInProgress = errors.New("transaction commit in progress")
 
+// ErrTxNotCommitted indicates that GetSubmitTime was called on a
+// transaction that exists and is still in flight. Distinct from
+// ErrTxNotFound: the transaction is known, so answering "not found"
+// would be a wrong definitive answer; and distinct from ErrTxTerminated,
+// because it has not reached a terminal state.
+//
+// It exists so a caller can tell this apart from an unexpected failure.
+// Every backend reported it as an unsentinelled error, which left an
+// HTTP door unable to distinguish a live transaction from a storage
+// fault and classifying both as caller error.
+//
+// Tenant isolation: a caller whose tenant does not own the transaction
+// gets ErrTxTenantMismatch instead — this sentinel must never be the
+// answer to a cross-tenant lookup, or it becomes an existence oracle.
+var ErrTxNotCommitted = errors.New("transaction not yet committed")
+
 // ErrTxTenantMismatch indicates a transaction-lifecycle operation
 // (Join, Commit, Rollback, Savepoint, etc.) was attempted with a
 // UserContext whose tenant does not match the transaction's tenant.

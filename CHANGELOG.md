@@ -14,6 +14,21 @@ MAINTAINING.md.
 
 ### Added
 
+- **`ErrTxNotCommitted`.** `GetSubmitTime` on a transaction that exists and is
+  still in flight now returns `ErrTxNotCommitted` (wrapped), instead of an
+  unsentinelled `fmt.Errorf` every backend spelled the same way by
+  coincidence. Without a sentinel a caller cannot tell "this transaction is
+  live" from "the store failed", so an HTTP door classified both as caller
+  error and rendered the raw storage error into the response body. Pinned by
+  the `TxStateErrors/NotCommittedOnGetSubmitTime` conformance case.
+
+  Migration: return `fmt.Errorf("%w (txID=%s)", spi.ErrTxNotCommitted, txID)`
+  from `GetSubmitTime` for a known, uncommitted transaction. The sentinel's
+  message is unchanged from the string backends already used, so assertions
+  on `"not yet committed"` keep matching. A cross-tenant caller must still
+  receive `ErrTxTenantMismatch` and never this sentinel — reporting a live
+  transaction to a non-owner is an existence oracle.
+
 - **`ErrEntityModelMismatch`.** An entity's model reference (`EntityMeta.ModelRef`)
   is fixed at creation and must never change for the life of the entity ID,
   including across delete/recreate. `Save` now returns `ErrEntityModelMismatch`

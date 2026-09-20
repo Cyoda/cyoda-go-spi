@@ -241,7 +241,15 @@ type ProcessorConfig struct {
 	CalculationNodesTags string `json:"calculationNodesTags,omitempty"`
 	ResponseTimeoutMs    int64  `json:"responseTimeoutMs,omitempty"`
 	RetryPolicy          string `json:"retryPolicy,omitempty"`
-	Context              string `json:"context,omitempty"`
+	// Idempotent is the workflow author's declaration that running this
+	// processor again is safe — for the engine's own data and for every
+	// system the processor touches. When true, a consuming engine may give
+	// the work to another compute member after a member that received it
+	// went silent or dropped its connection. When false (the default) it
+	// must not: the first member may have acted. The engine takes the
+	// declaration on trust and cannot verify it.
+	Idempotent bool   `json:"idempotent,omitempty"`
+	Context    string `json:"context,omitempty"`
 	// StartNewTxOnDispatch, when true and ExecutionMode is COMMIT_BEFORE_DISPATCH,
 	// causes the cascade engine to open a fresh transaction before dispatching
 	// the processor (so the processor may perform transactional work via that
@@ -331,6 +339,11 @@ type ScheduleFunction struct {
 	AttachEntity         bool   `json:"attachEntity"`
 	Context              string `json:"context,omitempty"`
 	ResponseTimeoutMs    int64  `json:"responseTimeoutMs,omitempty"`
+	// RetryPolicy selects the server-resolved retry strategy for this
+	// callout: "NONE" (one try), "FIXED" or empty (the server-configured
+	// number of tries). Same vocabulary as ProcessorConfig.RetryPolicy. A
+	// plain string keeps the struct comparable.
+	RetryPolicy string `json:"retryPolicy,omitempty"`
 }
 
 // ScheduledTaskType discriminates ScheduledTask variants. Only

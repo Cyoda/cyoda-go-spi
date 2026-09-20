@@ -14,6 +14,15 @@ MAINTAINING.md.
 
 ### Added
 
+- **`ProcessorConfig.Idempotent` and `ScheduleFunction.RetryPolicy`.** Two
+  optional workflow-configuration fields. `idempotent` (bool, default false,
+  omitted when false) is the author's declaration that a processor may be run
+  again on another compute member after one that received the work went
+  silent. `retryPolicy` on a scheduled-transition function takes the same
+  `NONE` / `FIXED` vocabulary a processor's already does. Additive: both are
+  `omitempty`, so stored workflows round-trip byte-identically, no interface
+  changes, and `ScheduleFunction` stays comparable. Storage plugins persist the
+  workflow as one document and need no change.
 - **`ErrTxNotCommitted`.** `GetSubmitTime` on a transaction that exists and is
   still in flight now returns `ErrTxNotCommitted` (wrapped), instead of an
   unsentinelled `fmt.Errorf` every backend spelled the same way by

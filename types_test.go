@@ -360,3 +360,55 @@ func TestScheduledTransitionEventTypes(t *testing.T) {
 		}
 	}
 }
+
+func TestProcessorConfig_Idempotent_RoundTrips(t *testing.T) {
+	bs, err := json.Marshal(ProcessorConfig{Idempotent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bs), `"idempotent":true`) {
+		t.Errorf("missing field in marshalled JSON: %s", bs)
+	}
+	var back ProcessorConfig
+	if err := json.Unmarshal(bs, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !back.Idempotent {
+		t.Errorf("round-trip dropped the field: %+v", back)
+	}
+
+	// The default (false) is omitted, so a workflow that never mentions the
+	// field exports byte-identically to one stored before the field existed.
+	bs2, _ := json.Marshal(ProcessorConfig{})
+	if strings.Contains(string(bs2), "idempotent") {
+		t.Errorf("false must be omitted, got %s", bs2)
+	}
+}
+
+func TestScheduleFunction_RetryPolicy_RoundTrips(t *testing.T) {
+	fn := ScheduleFunction{
+		Name: "computeFire", ResultKind: "Schedule",
+		CalculationNodesTags: "scheduler", RetryPolicy: "NONE",
+	}
+	bs, err := json.Marshal(fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bs), `"retryPolicy":"NONE"`) {
+		t.Errorf("missing field in marshalled JSON: %s", bs)
+	}
+	var back ScheduleFunction
+	if err := json.Unmarshal(bs, &back); err != nil {
+		t.Fatal(err)
+	}
+	// == on the struct is part of the contract: consumers compare
+	// ScheduleFunction values directly, so every field must stay comparable.
+	if back != fn {
+		t.Errorf("round-trip mismatch: got %+v, want %+v", back, fn)
+	}
+
+	bs2, _ := json.Marshal(ScheduleFunction{Name: "f", ResultKind: "Schedule", CalculationNodesTags: "t"})
+	if strings.Contains(string(bs2), "retryPolicy") {
+		t.Errorf("unset retryPolicy must be omitted, got %s", bs2)
+	}
+}

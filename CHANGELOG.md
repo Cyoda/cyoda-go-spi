@@ -14,6 +14,15 @@ MAINTAINING.md.
 
 ### Added
 
+- **`ProcessorConfig.Idempotent` and `ScheduleFunction.RetryPolicy`.** Two
+  optional workflow-configuration fields. `idempotent` (bool, default false,
+  omitted when false) is the author's declaration that a processor may be run
+  again on another compute member after one that received the work went
+  silent. `retryPolicy` on a scheduled-transition function takes the same
+  `NONE` / `FIXED` vocabulary a processor's already does. Additive: both are
+  `omitempty`, so stored workflows round-trip byte-identically, no interface
+  changes, and `ScheduleFunction` stays comparable. Storage plugins persist the
+  workflow as one document and need no change.
 - **`ErrTxNotCommitted`.** `GetSubmitTime` on a transaction that exists and is
   still in flight now returns `ErrTxNotCommitted` (wrapped), instead of an
   unsentinelled `fmt.Errorf` every backend spelled the same way by
@@ -118,6 +127,16 @@ MAINTAINING.md.
   Migration: a backend that dates a write when its transaction *starts*, or
   that answers `GetSubmitTime` only from node-local state, does not meet
   this contract. Both are fixable without an interface change.
+
+### Fixed
+
+- **A function-driven `TransitionSchedule` serialised `"delayMs": 0`.**
+  `delayMs` and `function` are mutually exclusive, and the published workflow
+  schema gives `delayMs` a minimum of 1, so a consumer that marshals the type
+  for export produced a document its own schema rejects. `DelayMs` is now
+  `omitempty`: a fixed delay is written as before, an absent one is left out.
+  Reading is unchanged — an absent key and `0` decode alike — so stored
+  workflows need no migration.
 
 ## [0.8.4] - 2026-09-09
 

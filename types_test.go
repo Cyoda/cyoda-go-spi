@@ -360,3 +360,84 @@ func TestScheduledTransitionEventTypes(t *testing.T) {
 		}
 	}
 }
+
+func TestProcessorConfig_Idempotent_RoundTrips(t *testing.T) {
+	bs, err := json.Marshal(ProcessorConfig{Idempotent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bs), `"idempotent":true`) {
+		t.Errorf("missing field in marshalled JSON: %s", bs)
+	}
+	var back ProcessorConfig
+	if err := json.Unmarshal(bs, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !back.Idempotent {
+		t.Errorf("round-trip dropped the field: %+v", back)
+	}
+
+	// The default (false) is omitted, so a workflow that never mentions the
+	// field exports byte-identically to one stored before the field existed.
+	bs2, _ := json.Marshal(ProcessorConfig{})
+	if strings.Contains(string(bs2), "idempotent") {
+		t.Errorf("false must be omitted, got %s", bs2)
+	}
+}
+
+func TestScheduleFunction_RetryPolicy_RoundTrips(t *testing.T) {
+	fn := ScheduleFunction{
+		Name: "computeFire", ResultKind: "Schedule",
+		CalculationNodesTags: "scheduler", RetryPolicy: "NONE",
+	}
+	bs, err := json.Marshal(fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bs), `"retryPolicy":"NONE"`) {
+		t.Errorf("missing field in marshalled JSON: %s", bs)
+	}
+	var back ScheduleFunction
+	if err := json.Unmarshal(bs, &back); err != nil {
+		t.Fatal(err)
+	}
+	// == on the struct is part of the contract: consumers compare
+	// ScheduleFunction values directly, so every field must stay comparable.
+	if back != fn {
+		t.Errorf("round-trip mismatch: got %+v, want %+v", back, fn)
+	}
+
+	bs2, _ := json.Marshal(ScheduleFunction{Name: "f", ResultKind: "Schedule", CalculationNodesTags: "t"})
+	if strings.Contains(string(bs2), "retryPolicy") {
+		t.Errorf("unset retryPolicy must be omitted, got %s", bs2)
+	}
+}
+
+// A schedule driven by a function has no fixed delay. The delay is then
+// absent from the document, not present as 0: the published schema gives
+// delayMs a minimum of 1, and delayMs and function are mutually exclusive.
+func TestTransitionSchedule_FunctionDriven_OmitsDelay(t *testing.T) {
+	sched := TransitionSchedule{Function: &ScheduleFunction{
+		Name: "computeFire", ResultKind: "Schedule", CalculationNodesTags: "scheduler",
+	}}
+	bs, err := json.Marshal(sched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(bs), "delayMs") {
+		t.Errorf("a function-driven schedule must omit delayMs, got %s", bs)
+	}
+	var back TransitionSchedule
+	if err := json.Unmarshal(bs, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.DelayMs != 0 || back.Function == nil || *back.Function != *sched.Function {
+		t.Errorf("round-trip mismatch: got %+v", back)
+	}
+
+	// A fixed delay is still written.
+	bs2, _ := json.Marshal(TransitionSchedule{DelayMs: 1500})
+	if !strings.Contains(string(bs2), `"delayMs":1500`) {
+		t.Errorf("a fixed delay must be written, got %s", bs2)
+	}
+}

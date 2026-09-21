@@ -128,6 +128,16 @@ MAINTAINING.md.
   that answers `GetSubmitTime` only from node-local state, does not meet
   this contract. Both are fixable without an interface change.
 
+### Fixed
+
+- **A function-driven `TransitionSchedule` serialised `"delayMs": 0`.**
+  `delayMs` and `function` are mutually exclusive, and the published workflow
+  schema gives `delayMs` a minimum of 1, so a consumer that marshals the type
+  for export produced a document its own schema rejects. `DelayMs` is now
+  `omitempty`: a fixed delay is written as before, an absent one is left out.
+  Reading is unchanged — an absent key and `0` decode alike — so stored
+  workflows need no migration.
+
 ## [0.8.4] - 2026-09-09
 
 ### Breaking

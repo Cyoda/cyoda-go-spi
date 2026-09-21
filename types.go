@@ -311,8 +311,10 @@ type ProcessorConfig struct {
 // fires by name with a transition-not-found error.
 type TransitionSchedule struct {
 	// DelayMs is the delay between source-state entry and the
-	// scheduled execution time, in milliseconds. Must be > 0.
-	DelayMs int64 `json:"delayMs"`
+	// scheduled execution time, in milliseconds. Must be > 0 for a
+	// fixed-delay schedule. A schedule driven by Function has none, and
+	// the field is then omitted from the document.
+	DelayMs int64 `json:"delayMs,omitempty"`
 
 	// TimeoutMs is the late-tolerance window past the scheduled
 	// execution time, in milliseconds. Nil means no timeout — the

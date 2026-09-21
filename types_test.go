@@ -412,3 +412,32 @@ func TestScheduleFunction_RetryPolicy_RoundTrips(t *testing.T) {
 		t.Errorf("unset retryPolicy must be omitted, got %s", bs2)
 	}
 }
+
+// A schedule driven by a function has no fixed delay. The delay is then
+// absent from the document, not present as 0: the published schema gives
+// delayMs a minimum of 1, and delayMs and function are mutually exclusive.
+func TestTransitionSchedule_FunctionDriven_OmitsDelay(t *testing.T) {
+	sched := TransitionSchedule{Function: &ScheduleFunction{
+		Name: "computeFire", ResultKind: "Schedule", CalculationNodesTags: "scheduler",
+	}}
+	bs, err := json.Marshal(sched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(bs), "delayMs") {
+		t.Errorf("a function-driven schedule must omit delayMs, got %s", bs)
+	}
+	var back TransitionSchedule
+	if err := json.Unmarshal(bs, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.DelayMs != 0 || back.Function == nil || *back.Function != *sched.Function {
+		t.Errorf("round-trip mismatch: got %+v", back)
+	}
+
+	// A fixed delay is still written.
+	bs2, _ := json.Marshal(TransitionSchedule{DelayMs: 1500})
+	if !strings.Contains(string(bs2), `"delayMs":1500`) {
+		t.Errorf("a fixed delay must be written, got %s", bs2)
+	}
+}

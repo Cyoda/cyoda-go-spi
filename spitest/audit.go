@@ -42,8 +42,9 @@ func testAuditRecordAndGet(t *testing.T, h Harness) {
 }
 
 // testAuditEventID pins that the event id is the store's: every recorded
-// event comes back with a non-empty, distinct UUID, a caller's value is
-// ignored, and the ids are the same on every read and through both reads.
+// event comes back with a non-empty, distinct, version-1 UUID, a caller's
+// value is ignored, and the ids are the same on every read and through
+// both reads.
 func testAuditEventID(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	as, err := h.Factory.StateMachineAuditStore(ctx)
@@ -63,8 +64,9 @@ func testAuditEventID(t *testing.T, h Harness) {
 	byState := map[string]string{}
 	for _, ev := range first {
 		require.NotEmpty(t, ev.TimeUUID, "event %q has no id", ev.State)
-		_, perr := uuid.Parse(ev.TimeUUID)
+		id, perr := uuid.Parse(ev.TimeUUID)
 		require.NoError(t, perr, "event %q id %q is not a UUID", ev.State, ev.TimeUUID)
+		require.Equal(t, uuid.Version(1), id.Version(), "event %q id %q is not version 1", ev.State, ev.TimeUUID)
 		require.NotEqual(t, callerID, ev.TimeUUID, "the caller's id must be ignored")
 		require.False(t, seen[ev.TimeUUID], "id %q returned twice", ev.TimeUUID)
 		seen[ev.TimeUUID] = true

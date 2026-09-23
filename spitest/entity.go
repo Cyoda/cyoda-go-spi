@@ -43,6 +43,7 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "GetAsAt/BeforeAnyWrite", testEntityGetAsAtBefore)
 	runSubtest(t, h, tracker, "GetAsAt/CommittedOnlyInTx", testEntityGetAsAtCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "GetVersionMetadata/Ordering", testEntityVersionMetadataOrdering)
+	runSubtest(t, h, tracker, "GetVersionMetadata/RecreateAfterDelete", testEntityVersionMetadataRecreateAfterDelete)
 	runSubtest(t, h, tracker, "GetVersionMetadata/EmptyWindowIsNotAnError", testEntityGetVersionMetadataEmptyWindowIsNotAnError)
 	runSubtest(t, h, tracker, "GetVersionMetadata/LimitCaps", testEntityGetVersionMetadataLimitCaps)
 	runSubtest(t, h, tracker, "GetVersionMetadata/UntilBound", testEntityGetVersionMetadataUntilBound)
@@ -1083,6 +1084,40 @@ func testEntityVersionMetadataOrdering(t *testing.T, h Harness) {
 	for i, m := range metas {
 		require.NotZero(t, m.Version, "meta %d must have Version populated", i)
 	}
+}
+
+// testEntityVersionMetadataRecreateAfterDelete pins that a version number is
+// never reused: a save after a committed delete takes the next number after
+// the tombstone's, so (entity id, version) names exactly one history row.
+func testEntityVersionMetadataRecreateAfterDelete(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	id := newID()
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		_, err := es.Save(txCtx, newEntity(t, "m-recreate", id, map[string]any{"v": 1}))
+		require.NoError(t, err)
+	})
+	h.AdvanceClock(1 * time.Millisecond)
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		require.NoError(t, es.Delete(txCtx, id))
+	})
+	h.AdvanceClock(1 * time.Millisecond)
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		_, err := es.Save(txCtx, newEntity(t, "m-recreate", id, map[string]any{"v": 2}))
+		require.NoError(t, err)
+	})
+
+	es, _ := h.Factory.EntityStore(ctx)
+	metas, err := es.GetVersionMetadata(ctx, id, spi.VersionMetadataOptions{})
+	require.NoError(t, err)
+	require.Len(t, metas, 3, "create + tombstone + recreate")
+	for i := 1; i < len(metas); i++ {
+		require.Greater(t, metas[i-1].Version, metas[i].Version,
+			"versions must strictly decrease newest first; got %d then %d", metas[i-1].Version, metas[i].Version)
+	}
+	require.True(t, metas[1].Deleted, "the middle row must be the tombstone")
 }
 
 // testEntityGetVersionMetadataEmptyWindowIsNotAnError pins the intended

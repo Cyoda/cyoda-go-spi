@@ -424,14 +424,17 @@ const (
 
 // StateMachineEvent represents a single event in a state machine execution.
 type StateMachineEvent struct {
-	EventType     StateMachineEventType `json:"eventType"`
-	EntityID      string                `json:"entityId"`
-	TimeUUID      string                `json:"timeUuid"`
-	State         string                `json:"state,omitempty"`
-	TransactionID string                `json:"transactionId,omitempty"`
-	Details       string                `json:"details"`
-	Data          map[string]any        `json:"data,omitempty"`
-	Timestamp     time.Time             `json:"timestamp"`
+	EventType StateMachineEventType `json:"eventType"`
+	EntityID  string                `json:"entityId"`
+	// TimeUUID is the event's identity, assigned by the store on Record (a
+	// caller's value is ignored) and returned on every read. See
+	// StateMachineAuditStore.
+	TimeUUID      string         `json:"timeUuid"`
+	State         string         `json:"state,omitempty"`
+	TransactionID string         `json:"transactionId,omitempty"`
+	Details       string         `json:"details"`
+	Data          map[string]any `json:"data,omitempty"`
+	Timestamp     time.Time      `json:"timestamp"`
 }
 
 // ExecutionResult holds the outcome of a workflow engine execution.

@@ -315,6 +315,13 @@ type WorkflowStore interface {
 	Delete(ctx context.Context, modelRef ModelRef) error
 }
 
+// StateMachineAuditStore records and reads an entity's state machine events.
+//
+// The event id is the store's: Record assigns a new time-based UUID
+// (version 1) to every event and ignores any TimeUUID the caller set.
+// GetEvents and GetEventsByTransaction return that id in TimeUUID on every
+// event, and the same value on every read. A store that cannot assign an id
+// fails Record with an error rather than recording the event without one.
 type StateMachineAuditStore interface {
 	Record(ctx context.Context, entityID string, event StateMachineEvent) error
 	GetEvents(ctx context.Context, entityID string) ([]StateMachineEvent, error)

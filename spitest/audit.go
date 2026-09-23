@@ -129,4 +129,8 @@ func testAuditTenantIsolation(t *testing.T, h Harness) {
 	events, err := asB.GetEvents(tenantContext(tB), "e1")
 	require.NoError(t, err)
 	require.Len(t, events, 0)
+
+	byTx, err := asB.GetEventsByTransaction(tenantContext(tB), "e1", "tx")
+	require.NoError(t, err)
+	require.Len(t, byTx, 0)
 }

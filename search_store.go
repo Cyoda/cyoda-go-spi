@@ -160,8 +160,7 @@ type AsyncSearchStore interface {
 	DeleteJob(ctx context.Context, jobID string) error
 
 	// ReapExpired deletes eligible expired jobs. Cross-tenant: obtain with a
-	// background/tenant-less context, as with ScheduledTaskStore.ScanDue
-	// (persistence.go:19-24).
+	// background/tenant-less context, as with ScheduledTaskStore.ClaimDue.
 	ReapExpired(ctx context.Context, ttl time.Duration) (int, error)
 
 	// Cancel marks the job CANCELLED and stamps the given finishTime on the
@@ -190,7 +189,7 @@ type AsyncSearchStore interface {
 	// StaleClaims. A job claimed because its heartbeat went stale has
 	// StaleClaims incremented, atomically with the claim.
 	// Cross-tenant, like ReapExpired: obtain with a background/tenant-less
-	// context, as with ScheduledTaskStore.ScanDue (persistence.go:19-24).
+	// context, as with ScheduledTaskStore.ClaimDue.
 	ClaimStale(ctx context.Context, staleAfter time.Duration, limit int) ([]*SearchJob, error)
 
 	// ClearResults deletes the job's persisted result IDs. Idempotent.

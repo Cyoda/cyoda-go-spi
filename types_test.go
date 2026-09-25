@@ -314,21 +314,18 @@ func TestProcessorConfig_AsyncResultAndCrossover_RoundTrips(t *testing.T) {
 
 func TestScheduledTask_RoundTrips(t *testing.T) {
 	to := int64(5000)
-	rd := int64(1_700_000_030_000)
 	task := ScheduledTask{
-		ID:              "e1:S:T",
-		TenantID:        "t1",
-		Type:            ScheduledTaskFireTransition,
-		ScheduledTime:   1_700_000_000_000,
-		TimeoutMs:       &to,
-		RedispatchAfter: &rd,
-		EntityID:        "e1",
-		ModelName:       "order",
-		ModelVersion:    2,
-		Transition:      "AutoClose",
-		SourceState:     "OPEN",
-		ArmedAt:         1_699_999_999_000,
-		AttemptCount:    1,
+		ID:            "e1:S:T",
+		TenantID:      "t1",
+		Type:          ScheduledTaskFireTransition,
+		ScheduledTime: 1_700_000_000_000,
+		TimeoutMs:     &to,
+		EntityID:      "e1",
+		ModelName:     "order",
+		ModelVersion:  2,
+		Transition:    "AutoClose",
+		SourceState:   "OPEN",
+		ArmedAt:       1_699_999_999_000,
 	}
 	b, err := json.Marshal(task)
 	if err != nil {
@@ -341,6 +338,19 @@ func TestScheduledTask_RoundTrips(t *testing.T) {
 	if back.Type != ScheduledTaskFireTransition || back.ScheduledTime != task.ScheduledTime ||
 		back.TimeoutMs == nil || *back.TimeoutMs != 5000 || back.SourceState != "OPEN" {
 		t.Fatalf("round-trip lost fields: %+v", back)
+	}
+	// The throttle and its counter are gone: a claim replaces the first, and
+	// Attempts and LostOwners replace the second. A document that still
+	// carries them does not bring them back.
+	var old ScheduledTask
+	if err := json.Unmarshal([]byte(`{"id":"x","redispatchAfter":5,"attemptCount":2}`), &old); err != nil {
+		t.Fatal(err)
+	}
+	b3, _ := json.Marshal(old)
+	for _, gone := range []string{"redispatchAfter", "attemptCount"} {
+		if strings.Contains(string(b3), gone) {
+			t.Errorf("%s must not be a field of ScheduledTask: %s", gone, b3)
+		}
 	}
 	// nil TimeoutMs (no timeout) must round-trip as absent.
 	task.TimeoutMs = nil

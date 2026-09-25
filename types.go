@@ -389,17 +389,21 @@ const ScheduledTaskFireTransition ScheduledTaskType = "fire-transition"
 
 // ScheduledTask is a durable "do something at ScheduledTime, with
 // TimeoutMs lateness tolerance" record. For fire-transition, the
-// payload fields identify the entity+transition to fire. See the
-// cyoda-go scheduled-transition-runtime design for semantics.
+// payload fields identify the entity+transition to fire.
+//
+// A task has lives. Every arm (ScheduledTaskStore.ReconcileForEntity)
+// starts a new life with a new ArmToken, whatever the status it replaces.
+// The fields from Status on are the store's: the store sets them on arm
+// and on each state change, and ignores whatever a caller puts in them.
 type ScheduledTask struct {
 	// ID is deterministic and engine-defined: the same
 	// (tenant, entity, source state, transition) always derives the same
-	// ID, so re-arming a still-scheduled transition upserts the existing
-	// row in place instead of creating a duplicate. Tenant and entity are
-	// incorporated so IDs can never collide across tenants or entities.
-	// The exact derivation (hash inputs, encoding) is an engine-internal
-	// detail, not part of this SPI's contract — stores must treat ID as
-	// an opaque, stable key.
+	// ID, so re-arming a still-scheduled transition replaces the existing
+	// row, as a new life, instead of creating a duplicate. Tenant and
+	// entity are incorporated so IDs can never collide across tenants or
+	// entities. The exact derivation (hash inputs, encoding) is an
+	// engine-internal detail, not part of this SPI's contract — stores
+	// must treat ID as an opaque, stable key.
 	ID       string            `json:"id"`
 	TenantID TenantID          `json:"tenantId"`
 	Type     ScheduledTaskType `json:"type"`
@@ -407,9 +411,6 @@ type ScheduledTask struct {
 	ScheduledTime int64 `json:"scheduledTime"`
 	// TimeoutMs is the lateness tolerance in ms; nil = never expires.
 	TimeoutMs *int64 `json:"timeoutMs,omitempty"`
-	// RedispatchAfter is a unix-millis best-effort throttle; the scan
-	// excludes rows still inside it. Not a lease, not conditional.
-	RedispatchAfter *int64 `json:"redispatchAfter,omitempty"`
 
 	// --- fire-transition payload ---
 	EntityID     string `json:"entityId,omitempty"`
@@ -418,8 +419,7 @@ type ScheduledTask struct {
 	Transition   string `json:"transition,omitempty"`
 	SourceState  string `json:"sourceState,omitempty"`
 
-	ArmedAt      int64 `json:"armedAt,omitempty"`
-	AttemptCount int   `json:"attemptCount,omitempty"`
+	ArmedAt int64 `json:"armedAt,omitempty"`
 
 	// ArmedBy is the arming principal (chain origin at arm time, per the
 	// follow-on-action attribution design); zero on legacy rows — fire

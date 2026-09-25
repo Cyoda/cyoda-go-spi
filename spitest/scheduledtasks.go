@@ -103,6 +103,28 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Claim/PerTenantLimitPartialQuota", testSTClaimPerTenantLimitPartialQuota)
 	runSubtest(t, h, tracker, "Claim/EntityKeyIsPerTenant", testSTClaimEntityKeyIsPerTenant)
 	runSubtest(t, h, tracker, "GiveBack/KeepsCounters", testSTGiveBackKeepsCounters)
+
+	// Fenced writes, marks, recorded outcomes, error text (S-6).
+	runSubtest(t, h, tracker, "Fence/StaleTokensRefused", testSTFenceStaleTokensRefused)
+	runSubtest(t, h, tracker, "Fence/WaitingRefused", testSTFenceWaitingRefused)
+	runSubtest(t, h, tracker, "Fence/OldLifeRefused", testSTFenceOldLifeRefused)
+	runSubtest(t, h, tracker, "Fence/ABA", testSTFenceABA)
+	runSubtest(t, h, tracker, "Fence/ReplacedOwnerStampRefused", testSTFenceReplacedOwnerStampRefused)
+	runSubtest(t, h, tracker, "Stamp/PartialCommit", testSTStampPartialCommit)
+	runSubtest(t, h, tracker, "Mark/AcceptedAndIdempotent", testSTMarkAcceptedAndIdempotent)
+	runSubtest(t, h, tracker, "Mark/MarkedByAnotherClaim", testSTMarkMarkedByAnotherClaim)
+	runSubtest(t, h, tracker, "Mark/SurvivesRollback", testSTMarkSurvivesRollback)
+	runSubtest(t, h, tracker, "Record/Counted", testSTRecordCounted)
+	runSubtest(t, h, tracker, "Record/NotCounted", testSTRecordNotCounted)
+	runSubtest(t, h, tracker, "Record/ClearOwnMark", testSTRecordClearOwnMark)
+	runSubtest(t, h, tracker, "Record/OtherClaimsMarkKept", testSTRecordOtherClaimsMarkKept)
+	runSubtest(t, h, tracker, "Record/RepeatRefused", testSTRecordRepeatRefused)
+	runSubtest(t, h, tracker, "Fail/Fields", testSTFailFields)
+	runSubtest(t, h, tracker, "Fail/OverwritesLastError", testSTFailOverwritesLastError)
+	runSubtest(t, h, tracker, "Fail/JoinsTransaction", testSTFailJoinsTransaction)
+	runSubtest(t, h, tracker, "ErrorText/RoundTrip", testSTErrorTextRoundTrip)
+	runSubtest(t, h, tracker, "ErrorText/StoreRejected", testSTErrorTextStoreRejected)
+	runSubtest(t, h, tracker, "SweepMarks/KeepsCurrentLife", testSTSweepMarksKeepsCurrentLife)
 }
 
 // stFixture is one subtest's tenant, store, transaction manager and model.

@@ -217,6 +217,13 @@ MAINTAINING.md.
   Reading is unchanged — an absent key and `0` decode alike — so stored
   workflows need no migration.
 
+- **`spitest.StoreFactoryConformance` failed a `-run`-filtered invocation
+  over `Harness.Skip` keys in groups the filter excluded.** The
+  unused-key check now reports a key only when some subtest that shares
+  its parent path actually ran and still didn't match it; a key whose
+  group never ran because of `-run` filtering is no longer reported. A
+  real typo or stale entry in a group that ran is still caught.
+
 ## [0.8.4] - 2026-09-09
 
 ### Breaking

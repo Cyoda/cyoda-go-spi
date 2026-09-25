@@ -61,37 +61,95 @@ type Harness struct {
 	// Backends with known structural incompatibilities populate this to
 	// prevent false failures while documenting the open issues.
 	//
-	// StoreFactoryConformance fails the test if any key in Skip was never
-	// matched — this catches typos in key names.
+	// StoreFactoryConformance fails the test if a key in Skip goes unmatched
+	// while the subtree it names actually ran. A key's subtree is
+	// considered to have run when some executed subtest shares the key's
+	// parent path (the key's segments up to but not including the last
+	// one — the top-level group for a two-segment key). This catches
+	// typos and stale entries in a group that ran, without failing a
+	// `-run`-filtered invocation over keys whose group never got a chance
+	// to match. See the check in StoreFactoryConformance and
+	// skipTracker.unusedKeys for the exact rule.
 	Skip map[string]string
 }
 
-// skipTracker is a run-scoped set of which Skip keys were actually hit.
-// It is populated by runSubtest / skipIfRegistered and validated at the
-// end of StoreFactoryConformance.
+// skipTracker is a run-scoped record of every subtest that actually ran
+// (recordRan) and which of those matched a Skip key (recordMatch). It is
+// populated by skipIfRegistered and validated at the end of
+// StoreFactoryConformance.
 type skipTracker struct {
-	mu   sync.Mutex
-	used map[string]bool
+	mu      sync.Mutex
+	ran     map[string]bool
+	matched map[string]bool
 }
 
-func newSkipTracker() *skipTracker { return &skipTracker{used: make(map[string]bool)} }
+func newSkipTracker() *skipTracker {
+	return &skipTracker{ran: make(map[string]bool), matched: make(map[string]bool)}
+}
 
-func (st *skipTracker) record(key string) {
+// recordRan marks that the subtest at path name actually executed —
+// skipIfRegistered was reached for it, so it was not excluded by `-run`
+// filtering (whether or not it matched a Skip key).
+func (st *skipTracker) recordRan(name string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	st.used[key] = true
+	st.ran[name] = true
 }
 
+// recordMatch marks that the subtest at path name matched a Skip key and
+// was skipped by it.
+func (st *skipTracker) recordMatch(name string) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.matched[name] = true
+}
+
+// unusedKeys returns the Skip keys that went unmatched despite their
+// subtree having run. A key is reported when it was not matched AND some
+// recorded ran path shares the key's parent path — see the Skip field's
+// doc comment for the exact rule. Keys whose group (or a filtered-out
+// intermediate group) never ran are not reported, since the run gave them
+// no chance to match.
 func (st *skipTracker) unusedKeys(skip map[string]string) []string {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	var out []string
 	for k := range skip {
-		if !st.used[k] {
+		if st.matched[k] {
+			continue
+		}
+		if st.parentRanLocked(k) {
 			out = append(out, k)
 		}
 	}
 	return out
+}
+
+// parentRanLocked reports whether some recorded ran path shares key's
+// parent path (key's segments minus the last one; for a single-segment
+// key, the key's own single segment). Callers must hold st.mu.
+func (st *skipTracker) parentRanLocked(key string) bool {
+	parent := strings.Split(key, "/")
+	if len(parent) > 1 {
+		parent = parent[:len(parent)-1]
+	}
+	for ran := range st.ran {
+		segs := strings.Split(ran, "/")
+		if len(segs) < len(parent) {
+			continue
+		}
+		match := true
+		for i, p := range parent {
+			if segs[i] != p {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }
 
 // skipIfRegistered calls t.Skipf if the current subtest's path suffix
@@ -103,8 +161,9 @@ func skipIfRegistered(t *testing.T, h Harness, tracker *skipTracker) {
 	if idx := strings.Index(name, "/"); idx >= 0 {
 		name = name[idx+1:]
 	}
+	tracker.recordRan(name)
 	if reason, ok := h.Skip[name]; ok {
-		tracker.record(name)
+		tracker.recordMatch(name)
 		t.Skipf("skipped by plugin: %s", reason)
 	}
 }
@@ -138,8 +197,13 @@ func StoreFactoryConformance(t *testing.T, h Harness) {
 
 	tracker := newSkipTracker()
 
-	// Validate that every registered Skip key was actually hit during the run.
-	// Unmatched keys indicate typos or stale entries.
+	// Validate that every registered Skip key was actually hit, but only
+	// among keys whose subtree ran: a `-run`-filtered invocation (e.g.
+	// `go test -run 'TestConformance/AsyncSearch'`) never executes other
+	// groups' subtests, so their Skip keys get no chance to match and must
+	// not fail the run. unusedKeys reports a key only when some subtest
+	// that shares its parent path did run and still didn't match it —
+	// that's a real typo or stale entry, not filtering. See skipTracker.
 	t.Cleanup(func() {
 		for _, key := range tracker.unusedKeys(h.Skip) {
 			t.Errorf("Harness.Skip key %q was never matched — possible typo or stale entry", key)

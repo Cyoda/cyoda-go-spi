@@ -11,8 +11,10 @@ hand them a constructor that produces a fresh instance of your backend.
 See `cyoda-platform/cyoda-go/plugins/memory` for an idiomatic example.
 
 The harness covers the full SPI surface: entity persistence, audit,
-async search, transactions, workflow plugin contracts, and key/value
-extension hooks.
+async search, scheduled tasks, transactions, workflow plugin contracts,
+and key/value extension hooks. A backend without a scheduled-task store
+returns an error satisfying `errors.Is(err, errors.ErrUnsupported)` from
+`StoreFactory.ScheduledTaskStore`; the ScheduledTasks group then skips.
 
 Groups that cover an *optional* interface — `GroupedAggregator`, for
 example — skip themselves when your store does not implement it, by type

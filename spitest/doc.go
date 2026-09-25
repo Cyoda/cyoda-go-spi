@@ -4,13 +4,19 @@
 // invariants across every store interface exposed by the factory.
 //
 // Every subtest runs under a fresh tenant produced by Harness.NewTenant.
-// No subtest reuses another's tenant, so no database truncation, Reset
-// hook, or explicit teardown is needed.
+// No subtest reuses another's tenant, so no database truncation or Reset
+// hook is needed. The ScheduledTasks group is the one exception to "no
+// teardown": ClaimDue is cross-tenant, so each of its subtests removes the
+// tasks it armed when it ends.
 //
 // Temporal subtests use Harness.AdvanceClock to move the plugin's virtual
 // clock forward deterministically. The contract: after AdvanceClock(d)
 // returns, every subsequent timestamp the plugin assigns strictly
 // dominates every timestamp assigned before the call. d > 0.
+//
+// A backend whose StoreFactory.ScheduledTaskStore returns an error
+// satisfying errors.Is(err, errors.ErrUnsupported) skips the ScheduledTasks
+// group.
 //
 // A few SPI interfaces are optional (spi.GroupedAggregator, for example).
 // The harness detects an absent optional interface by type assertion and

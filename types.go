@@ -512,6 +512,10 @@ type Attempt struct {
 
 // Failure is the input of ScheduledTaskStore.Fail.
 type Failure struct {
+	// Reason must be one of the ScheduledTaskFailureReason constants. An
+	// unknown or empty Reason is rejected on every backend, with an error
+	// that satisfies errors.Is(err, ErrStoreRejected), and changes nothing.
+	// See ValidateFailureReason (scheduled_task_helpers.go).
 	Reason ScheduledTaskFailureReason
 	// Error follows the same rules as Attempt.Error. It always replaces
 	// LastError, even when it is empty.

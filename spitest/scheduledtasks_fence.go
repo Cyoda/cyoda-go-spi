@@ -46,6 +46,8 @@ func testSTFenceWaitingRefused(t *testing.T, h Harness) {
 	got := f.mustGet(task.ID)
 	require.Equal(t, spi.ScheduledTaskWaiting, got.Status)
 	require.False(t, got.UnsafeMarked)
+	require.False(t, got.PartialCommit)
+	require.Empty(t, got.LastError)
 }
 
 // After a re-arm, every fenced write of the old life is refused (spec §13).
@@ -91,7 +93,43 @@ func testSTFenceReplacedOwnerStampRefused(t *testing.T, h Harness) {
 	txID, txCtx := f.begin()
 	require.ErrorIs(t, f.sts.StampSegment(txCtx, stRef(a), false), spi.ErrStaleClaim)
 	_ = f.tm.Rollback(txCtx, txID)
+	requireAllFencedRefused(t, f.ctx, f.sts, stRef(a), "a replaced owner's claim")
 	requireUnchangedClaim(t, b, f.mustGet(task.ID))
+}
+
+// A give-back releases the claim: the old ref is refused by every fenced
+// method (spec §13; GiveBackIdle's doc, "returns every task RUNNING under
+// owner ... to WAITING").
+func testSTFenceGiveBackRefused(t *testing.T, h Harness) {
+	f := newSTFixture(t, h)
+	task := f.armDue()
+	owner := uuid.New()
+	c := f.claimTask(owner, task.ID)
+
+	n, err := f.sts.GiveBackIdle(context.Background(), owner, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	requireAllFencedRefused(t, f.ctx, f.sts, stRef(c), "a claim given back")
+	got := f.mustGet(task.ID)
+	require.Equal(t, spi.ScheduledTaskWaiting, got.Status)
+	require.Nil(t, got.Claim)
+}
+
+// RemoveLife then a re-arm of the same id starts a new life; the
+// pre-removal ref is refused by every fenced method (spec §13).
+func testSTFenceRemoveLifeThenRearmRefused(t *testing.T, h Harness) {
+	f := newSTFixture(t, h)
+	task := f.armDue()
+	c := f.claimTask(uuid.New(), task.ID)
+
+	require.NoError(t, f.sts.RemoveLife(f.ctx, f.tenant, task.ID, c.ArmToken))
+	f.requireGone(task.ID)
+
+	s := f.spec(task.EntityID, "S", "T", stFuture)
+	f.reconcile(f.ctx, task.EntityID, "S", s)
+	requireAllFencedRefused(t, f.ctx, f.sts, stRef(c), "a claim of a life RemoveLife removed and a re-arm replaced")
+	requireFreshLife(t, s, f.mustGet(task.ID))
 }
 
 // StampSegment sets PartialCommit and the next claim of the life carries it
@@ -124,6 +162,14 @@ func testSTStampPartialCommit(t *testing.T, h Harness) {
 	require.NoError(t, f.sts.StampSegment(txCtx, stRef(oc), true))
 	require.NoError(t, f.tm.Rollback(txCtx, txID))
 	require.False(t, f.mustGet(other.ID).PartialCommit)
+
+	// StampSegment joins: a committed segment keeps the flag.
+	other2 := f.armDue()
+	oc2 := f.claimTask(uuid.New(), other2.ID)
+	txID2, txCtx2 := f.begin()
+	require.NoError(t, f.sts.StampSegment(txCtx2, stRef(oc2), true))
+	require.NoError(t, f.tm.Commit(txCtx2, txID2))
+	require.True(t, f.mustGet(other2.ID).PartialCommit)
 }
 
 func testSTMarkAcceptedAndIdempotent(t *testing.T, h Harness) {
@@ -151,8 +197,22 @@ func testSTMarkMarkedByAnotherClaim(t *testing.T, h Harness) {
 	b := f.reclaim(uuid.New(), task.ID) // A died holding the mark
 	require.True(t, b.UnsafeMarked, "the claim returns the life's mark (C3)")
 	require.Equal(t, 1, b.LostOwners)
+
+	// A's claim is stale: its ClearOwnMark is refused, and A's mark stays.
+	require.ErrorIs(t, f.sts.RecordAttempt(f.ctx, stRef(a), spi.Attempt{
+		Error: "E", AtMs: stNow, NextAttemptTime: stNow, ClearOwnMark: true}), spi.ErrStaleClaim)
+	require.True(t, f.mustGet(task.ID).UnsafeMarked, "A's refused ClearOwnMark did not remove the mark")
+
 	require.ErrorIs(t, f.sts.MarkUnsafe(f.ctx, stRef(b)), spi.ErrMarkedByAnotherClaim)
 	requireUnchangedClaim(t, b, f.mustGet(task.ID))
+
+	// B never wrote a mark of its own: its ClearOwnMark removes nothing,
+	// and the next claim still sees A's mark.
+	require.NoError(t, f.sts.RecordAttempt(f.ctx, stRef(b), spi.Attempt{
+		Error: "E", AtMs: stNow, NextAttemptTime: stNow, ClearOwnMark: true}))
+	next := f.claimTask(uuid.New(), task.ID)
+	require.True(t, next.UnsafeMarked,
+		"B's refused mark did not take over A's mark, and B's ClearOwnMark did not remove it")
 }
 
 // A mark survives the rollback of the transaction on ctx (spec §13).
@@ -166,6 +226,48 @@ func testSTMarkSurvivesRollback(t *testing.T, h Harness) {
 	require.NoError(t, f.tm.Rollback(txCtx, txID))
 	require.True(t, f.mustGet(task.ID).UnsafeMarked)
 	require.True(t, f.reclaim(uuid.New(), task.ID).UnsafeMarked)
+}
+
+// A mark does not survive DeleteForEntities: the id, re-armed, starts
+// unmarked at once, with no sweep required.
+func testSTMarkDeleteThenRearmUnmarked(t *testing.T, h Harness) {
+	f := newSTFixture(t, h)
+	task := f.armDue()
+	c := f.claimTask(uuid.New(), task.ID)
+	require.NoError(t, f.sts.MarkUnsafe(f.ctx, stRef(c)))
+	require.True(t, f.mustGet(task.ID).UnsafeMarked, "the mark was really written")
+
+	require.NoError(t, f.sts.DeleteForEntities(f.ctx, f.tenant, []string{task.EntityID}))
+	f.requireGone(task.ID)
+
+	s := f.spec(task.EntityID, "S", "T", stDue)
+	f.reconcile(f.ctx, task.EntityID, "S", s)
+	got := f.mustGet(task.ID)
+	require.False(t, got.UnsafeMarked, "a re-armed life after a delete starts unmarked")
+	require.False(t, f.claimTask(uuid.New(), task.ID).UnsafeMarked)
+}
+
+// Marking one task leaves a sibling task's mark untouched.
+func testSTMarkSiblingUnaffected(t *testing.T, h Harness) {
+	f := newSTFixture(t, h)
+	// Armed and claimed one at a time: two due tasks armed together could
+	// both land in a single ClaimDue call, and f.claimTask requires that
+	// call take exactly one task.
+	e1 := f.newEntity()
+	s1 := f.spec(e1, "S", "T", stDue)
+	f.reconcile(f.ctx, e1, "S", s1)
+	c1 := f.claimTask(uuid.New(), s1.ID)
+
+	e2 := f.newEntity()
+	s2 := f.spec(e2, "S", "T", stDue)
+	f.reconcile(f.ctx, e2, "S", s2)
+	c2 := f.claimTask(uuid.New(), s2.ID)
+
+	require.NoError(t, f.sts.MarkUnsafe(f.ctx, stRef(c1)))
+
+	require.True(t, f.mustGet(s1.ID).UnsafeMarked, "the mark was really written")
+	require.False(t, f.mustGet(s2.ID).UnsafeMarked, "marking one task does not mark another")
+	requireUnchangedClaim(t, c2, f.mustGet(s2.ID))
 }
 
 func testSTRecordCounted(t *testing.T, h Harness) {
@@ -200,10 +302,15 @@ func testSTRecordNotCounted(t *testing.T, h Harness) {
 	task := f.armDue()
 	c := f.claimTask(uuid.New(), task.ID)
 	require.NoError(t, f.sts.RecordAttempt(f.ctx, stRef(c), spi.Attempt{
+		Error: "E0", AtMs: stNow - 10, NextAttemptTime: stNow}))
+	require.Equal(t, 1, f.mustGet(task.ID).Attempts, "the counted attempt above was really counted")
+
+	c = f.claimTask(uuid.New(), task.ID)
+	require.NoError(t, f.sts.RecordAttempt(f.ctx, stRef(c), spi.Attempt{
 		Error: "CANCELLED: the run was stopped by the scheduler", AtMs: stNow, NextAttemptTime: stNow, NotCounted: true}))
 	got := f.mustGet(task.ID)
 	require.Equal(t, spi.ScheduledTaskWaiting, got.Status)
-	require.Zero(t, got.Attempts)
+	require.Equal(t, 1, got.Attempts, "an attempt marked NotCounted does not add to Attempts")
 	require.Equal(t, "CANCELLED: the run was stopped by the scheduler", got.LastError,
 		"an attempt that is not counted is still recorded")
 	require.NotNil(t, got.LastAttemptTime)
@@ -262,6 +369,11 @@ func testSTRecordRepeatRefused(t *testing.T, h Harness) {
 	require.NoError(t, f.sts.RecordAttempt(f.ctx, stRef(c), a))
 	require.ErrorIs(t, f.sts.RecordAttempt(f.ctx, stRef(c), a), spi.ErrStaleClaim)
 	require.Equal(t, 1, f.mustGet(task.ID).Attempts)
+
+	// The claim the accepted record released is refused by every fenced
+	// method, not just a repeat of the same write.
+	requireAllFencedRefused(t, f.ctx, f.sts, stRef(c), "a claim already recorded")
+	require.Equal(t, 1, f.mustGet(task.ID).Attempts)
 }
 
 func testSTFailFields(t *testing.T, h Harness) {
@@ -285,18 +397,25 @@ func testSTFailFields(t *testing.T, h Harness) {
 		require.Nil(t, got.Claim)
 		require.Equal(t, c.ArmToken, got.ArmToken)
 		requireAllFencedRefused(t, f.ctx, f.sts, stRef(c), "a claim of a FAILED task")
+		after := f.mustGet(task.ID)
+		require.Equal(t, got.LastError, after.LastError, "a refused write changes nothing")
+		require.Equal(t, got.PartialCommit, after.PartialCommit, "a refused write changes nothing")
 	}
 
-	// After a recorded attempt, Fail keeps its LastAttemptTime.
+	// After a recorded attempt and a lost-owner reclaim, Fail keeps
+	// LastAttemptTime, Attempts and LostOwners.
 	task := f.armDue()
 	c := f.claimTask(uuid.New(), task.ID)
 	require.NoError(t, f.sts.RecordAttempt(f.ctx, stRef(c), spi.Attempt{Error: "E1", AtMs: stNow - 3, NextAttemptTime: stNow}))
-	c = f.claimTask(uuid.New(), task.ID)
+	c = f.claimTask(uuid.New(), task.ID) // this owner never heartbeats: lost at once
+	c = f.reclaim(uuid.New(), task.ID)
+	require.Equal(t, 1, c.LostOwners, "the reclaim above was really a lost-owner claim")
 	require.NoError(t, f.sts.Fail(f.ctx, stRef(c), spi.Failure{Reason: spi.FailureRunPanicked, Error: "E2", AtMs: stNow + 7}))
 	got := f.mustGet(task.ID)
 	require.NotNil(t, got.LastAttemptTime)
 	require.Equal(t, stNow-3, *got.LastAttemptTime, "Fail leaves LastAttemptTime unchanged")
 	require.Equal(t, 1, got.Attempts, "Fail leaves Attempts unchanged")
+	require.Equal(t, 1, got.LostOwners, "Fail leaves LostOwners unchanged")
 }
 
 // Fail replaces LastError, even with an empty text.
@@ -334,10 +453,27 @@ func testSTFailJoinsTransaction(t *testing.T, h Harness) {
 	require.Equal(t, spi.ScheduledTaskFailed, f.mustGet(task.ID).Status)
 }
 
+// An unknown or empty Failure.Reason is rejected on every backend and
+// changes nothing (types.go, Failure.Reason doc;
+// scheduled_task_helpers.go ValidateFailureReason).
+func testSTFailUnknownReasonRejected(t *testing.T, h Harness) {
+	f := newSTFixture(t, h)
+	task := f.armDue()
+	c := f.claimTask(uuid.New(), task.ID)
+	for why, reason := range map[string]spi.ScheduledTaskFailureReason{
+		"empty":        "",
+		"not a reason": "NOT_A_REASON",
+	} {
+		err := f.sts.Fail(f.ctx, stRef(c), spi.Failure{Reason: reason, Error: "E", AtMs: stNow})
+		require.ErrorIs(t, err, spi.ErrStoreRejected, "Fail with a %s reason", why)
+		requireUnchangedClaim(t, c, f.mustGet(task.ID))
+	}
+}
+
 // stMaxErrorText is 1024 bytes of valid UTF-8 with multi-byte characters
 // and the U+FFFD a sanitiser puts in place of a NUL.
 func stMaxErrorText() string {
-	return "�" + strings.Repeat("é", 509) + "€"
+	return "\uFFFD" + strings.Repeat("\u00e9", 509) + "\u20ac"
 }
 
 // The longest error text a caller may send is stored intact on every
@@ -368,6 +504,16 @@ func testSTErrorTextStoreRejected(t *testing.T, h Harness) {
 	f := newSTFixture(t, h)
 	task := f.armDue()
 	c := f.claimTask(uuid.New(), task.ID)
+	// A counted attempt first, so LastError, LastAttemptTime and Attempts
+	// are non-zero: the "unchanged" assertions below are not vacuous.
+	require.NoError(t, f.sts.RecordAttempt(f.ctx, stRef(c), spi.Attempt{Error: "E0", AtMs: stNow - 10, NextAttemptTime: stNow}))
+	before := f.mustGet(task.ID)
+	require.Equal(t, "E0", before.LastError)
+	require.NotNil(t, before.LastAttemptTime)
+	require.Equal(t, 1, before.Attempts)
+	require.Nil(t, before.FailedTime)
+
+	c = f.claimTask(uuid.New(), task.ID)
 	for why, text := range map[string]string{
 		"a NUL":                "a\x00b",
 		"invalid UTF-8":        "a\xffb",
@@ -378,6 +524,13 @@ func testSTErrorTextStoreRejected(t *testing.T, h Harness) {
 		err = f.sts.Fail(f.ctx, stRef(c), spi.Failure{Reason: spi.FailureRunPanicked, Error: text, AtMs: stNow})
 		require.ErrorIs(t, err, spi.ErrStoreRejected, "Fail with %s", why)
 		requireUnchangedClaim(t, c, f.mustGet(task.ID))
+
+		got := f.mustGet(task.ID)
+		require.Equal(t, before.LastError, got.LastError, "a refused write changes nothing, %s", why)
+		require.Equal(t, *before.LastAttemptTime, *got.LastAttemptTime, "a refused write changes nothing, %s", why)
+		require.Equal(t, before.Attempts, got.Attempts, "a refused write changes nothing, %s", why)
+		require.Equal(t, before.NextAttemptTime, got.NextAttemptTime, "a refused write changes nothing, %s", why)
+		require.Nil(t, got.FailedTime, "a refused write changes nothing, %s", why)
 	}
 	// A refused write is not a stale claim: the claim still holds.
 	require.NoError(t, f.sts.RecordAttempt(f.ctx, stRef(c), spi.Attempt{Error: "E", AtMs: stNow, NextAttemptTime: stNow}))

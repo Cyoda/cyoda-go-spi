@@ -70,7 +70,22 @@ func TestSelectClaims_PerTenantLimitCountsRunsInProgress(t *testing.T) {
 		TenantInProgress: map[TenantID]int{"A": 1, "C": 3},
 	})
 	if want := "a1,b1"; strings.Join(claimIDs(got), ",") != want {
-		t.Fatalf("claimed %v, want %s: A has room for one, B for two, C for none", claimIDs(got), want)
+		t.Fatalf("claimed %v, want %s: A has room for one, B for two, C already has more runs in progress than PerTenantLimit allows (negative quota), so none", claimIDs(got), want)
+	}
+}
+
+// The one-task-per-entity key is {tenant, entityID}, not the bare entityID:
+// two different tenants may legitimately use the same entity-id string
+// without either taking the other's claim slot. A same-tenant duplicate is
+// the control — it still collapses to one.
+func TestSelectClaims_EntityDedupIsPerTenant(t *testing.T) {
+	got := SelectClaims([]ScheduledTask{
+		cand("A", "shared", "a1", 1),
+		cand("B", "shared", "b1", 1),
+		cand("A", "shared", "a2", 2), // same tenant, same entity id as a1: control, collapses to one
+	}, ClaimRequest{Limit: 10, PerTenantLimit: 10})
+	if want := "a1,b1"; strings.Join(claimIDs(got), ",") != want {
+		t.Fatalf("claimed %v, want %s: tenant A and tenant B share the entity id %q and must each get their claim; a2 (tenant A, same entity id as a1) must collapse into a1", claimIDs(got), want, "shared")
 	}
 }
 

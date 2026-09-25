@@ -177,6 +177,36 @@ func testSTClaimLimitAndOrder(t *testing.T, h Harness) {
 		"within a tenant, tasks are claimed in NextAttemptTime order")
 }
 
+// C6: a task row an open transaction has written is not a claim candidate,
+// so its turn passes to the next task rather than blocking the call (C6,
+// persistence.go ClaimDue doc). a1 is due earlier than a2 but is made busy
+// by an open DeleteForEntities on its entity; ClaimDue must skip a1 and
+// claim a2 instead. Proven non-vacuous by rolling the transaction back and
+// claiming again: the same ClaimDue then claims a1, so a1 was genuinely
+// claimable all along and the first result was not an accident of a
+// shrunk candidate set.
+func testSTClaimBusyRowTurnPassesOn(t *testing.T, h Harness) {
+	f := newSTFixture(t, h)
+	a1 := f.arm(stDue - 10) // due earlier, made busy below
+	a2 := f.arm(stDue)      // due later, on a different entity, left claimable
+
+	txID, txCtx := f.begin()
+	require.NoError(t, f.sts.DeleteForEntities(txCtx, f.tenant, []string{a1.EntityID}))
+
+	req := f.claimReq(uuid.New(), false)
+	req.Limit = 1
+	res := f.claimWith(req)
+	require.Len(t, res, 1, "a1's row is busy and not a candidate; a2's turn comes instead")
+	require.Equal(t, a2.ID, res[0].ID)
+
+	require.NoError(t, f.tm.Rollback(txCtx, txID))
+
+	res = f.claimWith(req)
+	require.Len(t, res, 1)
+	require.Equal(t, a1.ID, res[0].ID,
+		"non-vacuous: once the transaction ends, the same ClaimDue claims a1")
+}
+
 // Limit and PerTenantLimit below 1 are caller errors, not "claim nothing".
 func testSTClaimInvalidLimits(t *testing.T, h Harness) {
 	f := newSTFixture(t, h)
@@ -573,9 +603,9 @@ func testSTClaimOrderEarliestTenantFirst(t *testing.T, h Harness) {
 	// holds the 3 EARLIEST candidates. Neither insertion order nor
 	// tenant-id order coincides with the correct NextAttemptTime order, so
 	// only a store that actually orders by NextAttemptTime passes.
-	small.arm(stDue - 10)
-	big.arm(stDue - 100)
-	big.arm(stDue - 90)
+	smallTask := small.arm(stDue - 10)
+	big1 := big.arm(stDue - 100)
+	big2 := big.arm(stDue - 90)
 	big.arm(stDue - 80)
 
 	// (a) Limit 1: the earliest candidate's tenant (big) gets the only
@@ -604,6 +634,15 @@ func testSTClaimOrderEarliestTenantFirst(t *testing.T, h Harness) {
 	require.NoError(t, err)
 	require.Len(t, big.own(res), 2, "the earliest-candidate tenant's turn comes first each round")
 	require.Len(t, small.own(res), 1, "round-robin still gives the other tenant its turn, unlike a naive earliest-N-overall selection")
+	// The returned slice itself is in spi.SelectClaims's order (persistence.go
+	// ClaimDue doc), not just the right set: round 1 takes big's earliest
+	// then small's only task, round 2 takes big's next — [big1, small,
+	// big2]. Insertion order ([small, big1, big2]) and the reverse of the
+	// correct order ([big2, small, big1]) both fail this, and so does a
+	// plain-NextAttemptTime-only order ([big1, big2, small]) that the two
+	// Len checks above alone would miss.
+	require.Equal(t, []string{big1.ID, smallTask.ID, big2.ID}, stIDs(res),
+		"ClaimDue returns claims in the order spi.SelectClaims produces")
 }
 
 // Order: a NextAttemptTime tie across tenants is broken by tenant id

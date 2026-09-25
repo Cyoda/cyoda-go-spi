@@ -92,7 +92,21 @@ MAINTAINING.md.
   another entity's task being left untouched, and a `RemoveLife` naming a
   life the transaction's snapshot already shows replaced or missing: a
   no-op that is no C1 write, does not make the row busy under C6, and
-  commits even when the row changes after Begin.
+  commits even when the row changes after Begin. The interface doc now also
+  states, once each: `ReconcileForEntity` returns its removed tasks sorted
+  by task ID byte-wise (`Arm/RemovedOrderByID`); `ClaimDue` returns claims
+  in the order `SelectClaims` produces, not just selects them in that order
+  (`Claim/OrderEarliestTenantFirst` now checks the returned sequence
+  itself); any method returning a slice may answer nil or an empty slice
+  for "nothing", callers use `len`; and refusal precedence is the same on
+  every backend — input validation (`ErrStoreRejected`), then the
+  transaction-tenant check (`ErrTxTenantMismatch`), then fencing and busy
+  (`ErrStaleClaim`/`ErrTaskBusy`) — pinned by new case
+  `Precedence/RejectedBeforeTenantMismatch`. New case
+  `Claim/BusyRowTurnPassesOn`: a row an open transaction has made busy is
+  skipped rather than waited on, its turn passing to the next due task,
+  proven non-vacuous by claiming the same row once the transaction rolls
+  back.
   `Harness.AdvanceClock`'s contract now covers a capped real-clock harness:
   it moves the store clock forward by at least `min(d, cap)`, never less,
   and the strict-dominance guarantee holds for the smaller amount.

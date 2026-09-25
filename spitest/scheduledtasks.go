@@ -51,6 +51,7 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Arm/TenantAndEntityFromRequest", testSTArmTenantAndEntityFromRequest)
 	runSubtest(t, h, tracker, "Arm/EveryArmIsNewLife", testSTArmEveryArmIsNewLife)
 	runSubtest(t, h, tracker, "Arm/RemovesOtherTasks", testSTArmRemovesOtherTasks)
+	runSubtest(t, h, tracker, "Arm/RemovedOrderByID", testSTArmRemovedOrderByID)
 	runSubtest(t, h, tracker, "Arm/CancelNotReported", testSTArmCancelNotReported)
 	runSubtest(t, h, tracker, "Arm/CancelOtherEntityUntouched", testSTArmCancelOtherEntityUntouched)
 	runSubtest(t, h, tracker, "Arm/JoinsTransaction", testSTArmJoinsTransaction)
@@ -80,6 +81,7 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Claim/LostOwnersCounted", testSTClaimLostOwnersCounted)
 	runSubtest(t, h, tracker, "Claim/OnePerEntity", testSTClaimOnePerEntity)
 	runSubtest(t, h, tracker, "Claim/LimitAndOrder", testSTClaimLimitAndOrder)
+	runSubtest(t, h, tracker, "Claim/BusyRowTurnPassesOn", testSTClaimBusyRowTurnPassesOn)
 	runSubtest(t, h, tracker, "Claim/InvalidLimits", testSTClaimInvalidLimits)
 	runSubtest(t, h, tracker, "Claim/TenantsTakeTurns", testSTClaimTenantsTakeTurns)
 	runSubtest(t, h, tracker, "Claim/PerTenantLimit", testSTClaimPerTenantLimit)
@@ -157,6 +159,7 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Query/TenantIsolation", testSTQueryTenantIsolation)
 	runSubtest(t, h, tracker, "TenantIsolation/EveryMethod", testSTTenantIsolationEveryMethod)
 	runSubtest(t, h, tracker, "Tenant/JoiningWriteOtherTenantRefused", testSTTenantJoiningWriteOtherTenantRefused)
+	runSubtest(t, h, tracker, "Precedence/RejectedBeforeTenantMismatch", testSTPrecedenceRejectedBeforeTenantMismatch)
 }
 
 // stFixture is one subtest's tenant, store, transaction manager and model.

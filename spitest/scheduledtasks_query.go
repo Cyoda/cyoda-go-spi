@@ -298,3 +298,35 @@ func testSTTenantJoiningWriteOtherTenantRefused(t *testing.T, h Harness) {
 	_ = fa.tm.Commit(txCtx, txID)
 	requireUnchangedClaim(t, c, fb.mustGet(c.ID))
 }
+
+// Refusal precedence: input validation is checked before the
+// transaction-tenant check, so a joining write with invalid input made
+// under another tenant's transaction answers ErrStoreRejected, never
+// ErrTxTenantMismatch (persistence.go, ScheduledTaskStore doc, "Refusal
+// precedence").
+func testSTPrecedenceRejectedBeforeTenantMismatch(t *testing.T, h Harness) {
+	fa := newSTFixture(t, h)
+	fb := newSTFixture(t, h)
+	c := fb.claimTask(uuid.New(), fb.armDue().ID)
+	txID, txCtx := fa.begin() // tenant A's transaction; committed below
+
+	// ReconcileForEntity: an Arm item without an id, for tenant B's entity,
+	// under tenant A's transaction.
+	e := fb.newEntity()
+	badArm := fb.spec(e, "S", "T", stFuture)
+	badArm.ID = ""
+	_, err := fa.sts.ReconcileForEntity(txCtx, spi.ReconcileRequest{
+		TenantID: fb.tenant, EntityID: e, CurrentState: "S", Arm: []spi.ScheduledTask{badArm}})
+	require.ErrorIs(t, err, spi.ErrStoreRejected, "ReconcileForEntity: invalid input outranks the tenant mismatch")
+	require.NotErrorIs(t, err, spi.ErrTxTenantMismatch, "ReconcileForEntity")
+
+	// Fail: an unknown Failure.Reason, for tenant B's claimed task, under
+	// tenant A's transaction.
+	err = fa.sts.Fail(txCtx, stRef(c), spi.Failure{Reason: "NOT_A_REASON", Error: "E", AtMs: stNow})
+	require.ErrorIs(t, err, spi.ErrStoreRejected, "Fail: invalid input outranks the tenant mismatch")
+	require.NotErrorIs(t, err, spi.ErrTxTenantMismatch, "Fail")
+
+	require.NoError(t, fa.tm.Commit(txCtx, txID))
+	fb.requireGone(badArm.ID)
+	requireUnchangedClaim(t, c, fb.mustGet(c.ID))
+}

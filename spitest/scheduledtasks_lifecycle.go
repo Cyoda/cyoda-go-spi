@@ -143,6 +143,28 @@ func testSTArmRemovesOtherTasks(t *testing.T, h Harness) {
 	f.mustGet(o.ID) // another entity's task is never touched
 }
 
+// Order: ReconcileForEntity returns removed tasks sorted by task ID
+// byte-wise (persistence.go ReconcileForEntity doc). The three tasks below
+// are armed in an order that is neither ascending nor descending by id —
+// zzz, aaa, mmm — so a store returning them in insertion order ([zzz, aaa,
+// mmm]) or its reverse ([mmm, aaa, zzz]) both fail; only the sorted order
+// ([aaa, mmm, zzz]) passes.
+func testSTArmRemovedOrderByID(t *testing.T, h Harness) {
+	f := newSTFixture(t, h)
+	e := f.newEntity()
+	lo := f.spec(e, "S", "T1", stFuture)
+	lo.ID = "aaa-" + lo.ID
+	mid := f.spec(e, "S", "T2", stFuture)
+	mid.ID = "mmm-" + mid.ID
+	hi := f.spec(e, "S", "T3", stFuture)
+	hi.ID = "zzz-" + hi.ID
+	f.reconcile(f.ctx, e, "S", hi, lo, mid)
+
+	removed := f.reconcile(f.ctx, e, "S2") // entity leaves S: all three removed
+	require.Equal(t, []string{lo.ID, mid.ID, hi.ID}, stIDs(removed),
+		"removed tasks are sorted by task ID byte-wise, not insertion order or its reverse")
+}
+
 func testSTArmCancelNotReported(t *testing.T, h Harness) {
 	f := newSTFixture(t, h)
 	e := f.newEntity()

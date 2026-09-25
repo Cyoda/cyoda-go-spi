@@ -59,6 +59,10 @@ type ReconcileRequest struct {
 // ScheduledTaskStore persists ScheduledTasks and the claims, marks and
 // owner liveness records that fence their runs.
 //
+// A method returning a slice may return nil or an empty slice when there is
+// nothing to return; callers use len, never a nil check, to tell "nothing"
+// from "something".
+//
 // Transactions. A JOINING method takes part in the transaction on ctx when
 // there is one, so its effect commits or rolls back with the entity write;
 // without one it applies at once. A NEVER-JOINING method ignores any
@@ -81,6 +85,14 @@ type ReconcileRequest struct {
 // ctx from another tenant does not change what it returns — it still
 // answers only from the tenant argument, and never reveals whether another
 // tenant's task exists.
+//
+// Refusal precedence is the same on every backend, for any call that could
+// otherwise raise more than one of these: input validation (ErrStoreRejected)
+// is checked first, then the transaction-tenant check (ErrTxTenantMismatch),
+// then fencing and busy (ErrStaleClaim, ErrTaskBusy). A joining write with
+// invalid input — an Arm item without an id, an unknown Failure.Reason — made
+// under another tenant's transaction answers ErrStoreRejected, never
+// ErrTxTenantMismatch.
 //
 // Clauses every implementation meets:
 //
@@ -139,7 +151,7 @@ type ScheduledTaskStore interface {
 	// removes every other task of the entity, and every task of the entity
 	// named in req.Cancel — an id in req.Cancel that belongs to another
 	// entity is not touched. It returns the removed tasks, except those
-	// named in req.Cancel. Joining.
+	// named in req.Cancel, sorted by task ID byte-wise. Joining.
 	ReconcileForEntity(ctx context.Context, req ReconcileRequest) (removed []ScheduledTask, err error)
 
 	// RemoveLife removes the task, in any status, if armToken is the life
@@ -202,7 +214,9 @@ type ScheduledTaskStore interface {
 	// with the earliest candidate goes first, ties broken by tenant id
 	// byte-wise. SelectClaims (scheduled_task_helpers.go) implements this
 	// order; every backend follows it, in Go via SelectClaims or
-	// equivalently in its own query language.
+	// equivalently in its own query language. ClaimDue returns the claimed
+	// tasks in that same order — the order SelectClaims produces — never
+	// resorted or reversed afterward.
 	//
 	// A returned task carries UnsafeMarked as of the claim (C3), and
 	// ClaimedFromLostOwner when this claim took it from a stale or

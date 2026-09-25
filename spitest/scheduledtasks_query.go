@@ -91,6 +91,7 @@ func testSTQueryPagesInOrder(t *testing.T, h Harness) {
 	// first of the tied pair in the correct order), page 2 starts on
 	// tiedA. A cursor that compares only ScheduledTime, ignoring the tied
 	// ID already returned, would drop tiedA or repeat tiedB here.
+	require.Len(t, pages, 3, "5 tasks at 2 per page is 3 pages") // guards the indexing below
 	require.Equal(t, []string{want[0].ID, want[1].ID}, pages[0], "page 1 ends inside the tie")
 	require.Equal(t, []string{want[2].ID, want[3].ID}, pages[1], "page 2 starts inside the tie")
 
@@ -110,7 +111,10 @@ func testSTQueryFilterPagesAcrossNonMatchingRows(t *testing.T, h Harness) {
 	f := newSTFixture(t, h)
 	pageModel := f.model + "-paged"
 	var matched []spi.ScheduledTask
-	for i, at := range []int64{stFuture + 10, stFuture + 20, stFuture + 30, stFuture + 40, stFuture + 50} {
+	// A trailing filler row after the last match (+60) catches a store that
+	// decides Next by peeking one unfiltered row ahead instead of by
+	// whether the filter has any more matches.
+	for i, at := range []int64{stFuture + 10, stFuture + 20, stFuture + 30, stFuture + 40, stFuture + 50, stFuture + 60} {
 		e := f.newEntity()
 		s := f.spec(e, "S", "T", at)
 		if i%2 == 1 {
@@ -123,7 +127,7 @@ func testSTQueryFilterPagesAcrossNonMatchingRows(t *testing.T, h Harness) {
 			matched = append(matched, f.mustGet(s.ID))
 		}
 	}
-	require.Len(t, matched, 3, "test setup: three matching rows, two filler rows between them")
+	require.Len(t, matched, 3, "test setup: three matching rows, with a filler row between each pair and one trailing")
 
 	var got []string
 	var after *spi.ScheduledTaskCursor
@@ -142,6 +146,7 @@ func testSTQueryFilterPagesAcrossNonMatchingRows(t *testing.T, h Harness) {
 		after = page.Next
 	}
 	require.Equal(t, stIDs(matched), got, "a filtered page skips the non-matching rows between matches")
+	require.Equal(t, 3, pages, "3 matching rows at 1 per page is exactly 3 pages") // a store that ignores Limit fails here
 }
 
 // 200, each filter: status (one and several), model name, name and
@@ -259,7 +264,7 @@ func testSTTenantJoiningWriteOtherTenantRefused(t *testing.T, h Harness) {
 	fa := newSTFixture(t, h)
 	fa.model = fb.model
 	c := fb.claimTask(uuid.New(), fb.armDue().ID)
-	txID, txCtx := fa.begin() // tenant A's transaction; rolled back first at cleanup
+	txID, txCtx := fa.begin() // tenant A's transaction; committed below, after the refusals
 
 	_, err := fa.sts.ReconcileForEntity(txCtx, spi.ReconcileRequest{
 		TenantID: fb.tenant, EntityID: c.EntityID, CurrentState: "S",

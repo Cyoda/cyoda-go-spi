@@ -69,6 +69,7 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "DeleteForModel/TenantScoped", testSTDeleteForModelTenantScoped)
 	runSubtest(t, h, tracker, "Get/Missing", testSTGetMissing)
 	runSubtest(t, h, tracker, "Get/OtherTenantTransaction", testSTGetOtherTenantTransaction)
+	runSubtest(t, h, tracker, "Get/OtherTenantTransactionSeesCommitted", testSTGetOtherTenantTransactionSeesCommitted)
 
 	// Claims, liveness, give-back (S-5).
 	runSubtest(t, h, tracker, "Claim/DueWaiting", testSTClaimDueWaiting)

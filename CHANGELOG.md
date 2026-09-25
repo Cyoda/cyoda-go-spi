@@ -64,6 +64,18 @@ MAINTAINING.md.
   `ErrStaleClaim`'s comment now also names the scheduled-task fence
   (`StampSegment`, `MarkUnsafe`, `RecordAttempt`, `Fail`) alongside
   `AsyncSearchStore.Release`; its value and message are unchanged.
+  `ErrTaskBusy` is now store-neutral: its message drops the "scheduled
+  task:" prefix (`"row is being written by an open transaction"`), because
+  it is no longer scheduled-task-only. `AsyncSearchStore.Heartbeat` may
+  answer it when the job's row is held by an open write of the same job
+  (for example a `SaveResults` chunk) — Postgres may return this, memory
+  and SQLite never lock-wait there; Heartbeat does not wait and makes no
+  write, and the caller treats the answer as a missed tick, not
+  `ErrStaleClaim`'s lost claim. `ScheduledTaskStore.ClaimDue` may also
+  answer it, on a backend that lock-waits rather than selecting candidates
+  without blocking, for contention unrelated to the MarkUnsafe/ClaimDue
+  race (C3); a row an open transaction has written (C6) is still always
+  just skipped by `ClaimDue`, never waited on and never an error.
 - **`SMEventScheduledTransitionFailed` (`SCHEDULED_TRANSITION_FAIL`).** The
   audit event recorded with a task that ends FAILED.
 - **`ScheduledTask.ClaimedFromLostOwner`.** Read-only, not serialised, set
@@ -113,6 +125,10 @@ MAINTAINING.md.
   which the snapshot never saw at all, is a no-op too). The interface doc
   now states this last point once: a life armed by another transaction
   after Begin is not seen.
+  New case `Get/OtherTenantTransactionSeesCommitted`: another tenant's
+  transaction never changes what `Get` returns — it must answer the
+  tenant's current committed life, not the one that transaction's own
+  snapshot saw at `Begin`.
   `Harness.AdvanceClock`'s contract now covers a capped real-clock harness:
   it moves the store clock forward by at least `min(d, cap)`, never less,
   and the strict-dominance guarantee holds for the smaller amount.

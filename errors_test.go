@@ -185,7 +185,7 @@ func TestScheduledTaskSentinels(t *testing.T) {
 	}
 	want := map[error]string{
 		ErrMarkedByAnotherClaim: "scheduled task: marked by another claim of this life",
-		ErrTaskBusy:             "scheduled task: row is being written by an open transaction",
+		ErrTaskBusy:             "row is being written by an open transaction",
 		ErrStoreRejected:        "store rejected the write deterministically",
 	}
 	for err, msg := range want {

@@ -181,7 +181,22 @@ var ErrMarkedByAnotherClaim = errors.New("scheduled task: marked by another clai
 // ScheduledTaskStore.RecordAttempt when an open transaction has written the
 // task row. The write is not made. The caller treats it as a failure that
 // is safe to retry.
-var ErrTaskBusy = errors.New("scheduled task: row is being written by an open transaction")
+//
+// AsyncSearchStore.Heartbeat may answer it too, when the job's row is held
+// by an open write of the same job (for example a SaveResults chunk's
+// fencing transaction); Heartbeat does not wait and makes no write, and the
+// caller treats the answer as a missed tick, not a lost claim.
+//
+// ScheduledTaskStore.ClaimDue may answer it too, on a backend that
+// lock-waits rather than selecting candidates without blocking: a bounded
+// wait for a lock unrelated to the MarkUnsafe/ClaimDue race (C3) that gives
+// up is reported this way for the call, instead of blocking indefinitely.
+// This is distinct from a row an open transaction has written (C6), which
+// ClaimDue always just skips, never waiting and never erroring for it.
+//
+// The sentinel is store-neutral: it names no store because more than one
+// now returns it.
+var ErrTaskBusy = errors.New("row is being written by an open transaction")
 
 // ErrStoreRejected marks a deterministic rejection by the store: the same
 // write with the same input fails the same way every time, so retrying it

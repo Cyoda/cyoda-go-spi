@@ -174,6 +174,14 @@ type AsyncSearchStore interface {
 	// Heartbeat stamps HeartbeatTime, fenced by epoch. Returns ErrStaleClaim
 	// if epoch does not match the job's current Epoch, ErrAlreadyTerminal if
 	// the job is already terminal, and ErrNotFound if the job does not exist.
+	//
+	// A backend may instead answer errors.Is(err, ErrTaskBusy) when the
+	// job's row is held by an open write of the same job — for example a
+	// SaveResults chunk's fencing transaction. Postgres may return this;
+	// memory and SQLite never lock-wait there. Heartbeat does not wait and
+	// makes no write in this case; the caller treats the answer as a missed
+	// tick, not a lost claim — ErrStaleClaim, not ErrTaskBusy, is what means
+	// the claim was lost.
 	Heartbeat(ctx context.Context, jobID string, epoch int64) error
 
 	// ClaimStale atomically claims up to limit RUNNING jobs whose heartbeat

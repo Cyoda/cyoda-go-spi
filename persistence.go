@@ -210,6 +210,16 @@ type ScheduledTaskStore interface {
 	// at most req.PerTenantLimit - req.TenantInProgress[tenant] tasks are
 	// claimed.
 	//
+	// A row an open transaction has written (C6) is never a claim
+	// candidate: it is skipped, exactly like GiveBackIdle (C6) — never
+	// waited on, never reported as an error. Separately, a backend that
+	// serialises the claim itself with blocking locks, rather than
+	// selecting candidates without blocking, may bound that wait; on
+	// giving up it may instead answer an error satisfying
+	// errors.Is(err, ErrTaskBusy) for the call. That is a signal to retry
+	// the call, not a lost claim, and it is distinct from the
+	// MarkUnsafe/ClaimDue race (C3), which resolves without an error.
+	//
 	// Order: within a tenant, candidates are ordered by (NextAttemptTime,
 	// ID byte-wise); a lost-owner RUNNING task is claimable whatever its
 	// NextAttemptTime. Tenants take turns, one task per turn, so each

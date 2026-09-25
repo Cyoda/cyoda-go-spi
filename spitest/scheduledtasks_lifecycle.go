@@ -1,6 +1,7 @@
 package spitest
 
 import (
+	"context"
 	"testing"
 
 	"github.com/google/uuid"
@@ -499,4 +500,44 @@ func testSTGetOtherTenantTransaction(t *testing.T, h Harness) {
 	_, foundStaged, err := fa.sts.Get(txCtxA, fb.tenant, aTask.ID)
 	require.NoError(t, err)
 	require.False(t, foundStaged)
+}
+
+// Another tenant's transaction does not change what Get returns (the
+// ScheduledTaskStore doc comment, "Get carries no such refusal"): a
+// backend must not answer a cross-tenant Get from the ambient
+// transaction's own snapshot. B begins a transaction and pins its
+// snapshot with a read before A's task re-arms; A's re-arm then commits
+// outside any transaction. Get(txCtxB, tenantA, id) must still answer A's
+// CURRENT committed life, not the one B's snapshot saw at Begin.
+func testSTGetOtherTenantTransactionSeesCommitted(t *testing.T, h Harness) {
+	fa := newSTFixture(t, h)
+	fb := newSTFixture(t, h)
+	aTask := fa.armDue()
+	oldToken := aTask.ArmToken
+
+	_, txCtxB := fb.begin()
+
+	// Pin B's transaction snapshot with a read, before A's task changes.
+	gotBefore, foundBefore, err := fb.sts.Get(txCtxB, fa.tenant, aTask.ID)
+	require.NoError(t, err)
+	require.True(t, foundBefore)
+	require.Equal(t, oldToken, gotBefore.ArmToken)
+
+	// Outside any transaction, re-arm A's task to a new life and commit.
+	reArmed := fa.spec(aTask.EntityID, "S", "T", stFuture)
+	fa.reconcile(fa.ctx, aTask.EntityID, "S", reArmed)
+	current := fa.mustGet(aTask.ID)
+	require.NotEqual(t, oldToken, current.ArmToken,
+		"non-vacuous: A's life really changed after B's Begin")
+
+	// Get through B's still-open transaction must answer A's CURRENT
+	// committed life, not the one B's snapshot saw at Begin.
+	ctx, cancel := context.WithTimeout(txCtxB, stWait)
+	defer cancel()
+	gotAfter, foundAfter, err := fb.sts.Get(ctx, fa.tenant, aTask.ID)
+	require.NoError(t, err)
+	require.NoError(t, ctx.Err(), "Get answers at once; it does not wait on B's own transaction")
+	require.True(t, foundAfter)
+	require.Equal(t, current.ArmToken, gotAfter.ArmToken,
+		"Get(txCtxB, tenantA, id) must return A's current committed life, not B's stale snapshot")
 }

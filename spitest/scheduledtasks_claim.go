@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -93,6 +94,7 @@ func testSTClaimStaleOwnerReclaimed(t *testing.T, h Harness) {
 	require.NotEqual(t, ca.Claim.Token, cb.Claim.Token)
 	require.Equal(t, 1, cb.LostOwners)
 	require.Zero(t, cb.Attempts)
+	require.True(t, cb.ClaimedFromLostOwner, "a lost-owner claim is flagged on the ClaimDue result")
 	requireUnchangedClaim(t, cb, f.mustGet(task.ID))
 }
 
@@ -110,6 +112,11 @@ func testSTClaimLostOwnerFlagged(t *testing.T, h Harness) {
 	second := f.reclaim(uuid.New(), task.ID)
 	require.True(t, second.ClaimedFromLostOwner, "a lost-owner claim is flagged on the ClaimDue result")
 	require.False(t, f.mustGet(task.ID).ClaimedFromLostOwner, "Get never carries the flag")
+
+	page, err := f.sts.Query(f.ctx, f.tenant, spi.ScheduledTaskQuery{EntityID: task.EntityID, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, page.Items, 1)
+	require.False(t, page.Items[0].ClaimedFromLostOwner, "Query never carries the flag")
 }
 
 // Every lost-owner claim adds one to LostOwners (spec §13 row "owner lost 3
@@ -271,6 +278,7 @@ func testSTClaimConcurrentDisjoint(t *testing.T, h Harness) {
 			requireUnchangedClaim(t, c, f.mustGet(c.ID))
 		}
 	}
+	require.NotEmpty(t, seen, "the concurrent calls must have actually claimed something")
 }
 
 // Two due siblings, two pnodes at once: one wins, the other claims nothing
@@ -468,11 +476,218 @@ func testSTGiveBackNotCountedKeepsMark(t *testing.T, h Harness) {
 	task := f.armDue()
 	c := f.claimTask(a, task.ID)
 	require.NoError(t, f.sts.MarkUnsafe(f.ctx, stRef(c)))
-	_, err := f.sts.GiveBackIdle(context.Background(), a, nil)
+	n, err := f.sts.GiveBackIdle(context.Background(), a, nil)
 	require.NoError(t, err)
+	require.Equal(t, 1, n)
 
 	next := f.claimTask(uuid.New(), task.ID)
 	require.Zero(t, next.Attempts)
 	require.Zero(t, next.LostOwners)
 	require.True(t, next.UnsafeMarked, "the mark belongs to the life; a give-back does not remove it")
+}
+
+// --- Fix round 1: coverage gaps found by review. ---
+
+// A second heartbeat before the old one goes stale keeps the owner live;
+// without it the elapsed time alone would exceed StaleAfter.
+func testSTLivenessHeartbeatRefreshes(t *testing.T, h Harness) {
+	f := newSTFixture(t, h)
+	a := uuid.New()
+	require.NoError(t, f.sts.Heartbeat(context.Background(), a))
+	task := f.armDue()
+	c := f.claimTask(a, task.ID)
+
+	h.AdvanceClock(60 * time.Millisecond)
+	h.AdvanceClock(60 * time.Millisecond)
+	require.NoError(t, f.sts.Heartbeat(context.Background(), a))
+
+	req := f.claimReq(uuid.New(), true)
+	req.StaleAfter = 100 * time.Millisecond
+	require.Empty(t, f.claimWith(req),
+		"the refreshing heartbeat keeps the owner live; without it, 120ms would exceed a 100ms StaleAfter")
+	requireUnchangedClaim(t, c, f.mustGet(task.ID))
+}
+
+// A lost-owner RUNNING task is claimable whatever its NextAttemptTime (the
+// NowMs-vs-NextAttemptTime comparison applies only to WAITING tasks).
+func testSTClaimLostOwnerIgnoresNextAttemptTime(t *testing.T, h Harness) {
+	f := newSTFixture(t, h)
+	task := f.arm(stNow + 10)
+
+	due := f.claimReq(uuid.New(), false)
+	due.NowMs = stNow + 10
+	f.claimOnly(due, task.ID)
+	require.Equal(t, stNow+10, f.mustGet(task.ID).NextAttemptTime,
+		"claiming a WAITING task does not change NextAttemptTime")
+
+	lost := f.claimReq(uuid.New(), true)
+	lost.NowMs = stNow // earlier than the task's NextAttemptTime
+	cb := f.claimOnly(lost, task.ID)
+	require.Equal(t, 1, cb.LostOwners,
+		"a lost-owner RUNNING task is claimable whatever its NextAttemptTime")
+}
+
+// One AllowLostOwner call claims a due WAITING task and a RUNNING task whose
+// owner is missing in the same round; ClaimedFromLostOwner and LostOwners
+// are set per task, not for the whole result (README C-S1).
+func testSTClaimLostOwnerFlagPerTask(t *testing.T, h Harness) {
+	f := newSTFixture(t, h)
+	waiting := f.armDue()
+	running := f.armDue()
+	f.claimTask(uuid.New(), running.ID) // this owner never heartbeats: missing counts as stale
+
+	res := f.claimWith(f.claimReq(uuid.New(), true))
+	require.Len(t, res, 2, "one AllowLostOwner call claims both the due WAITING task and the lost RUNNING task")
+
+	w := findST(res, waiting.ID)
+	require.NotNil(t, w)
+	require.False(t, w.ClaimedFromLostOwner, "a claim of a WAITING task is not from a lost owner")
+	require.Zero(t, w.LostOwners)
+
+	r := findST(res, running.ID)
+	require.NotNil(t, r)
+	require.True(t, r.ClaimedFromLostOwner, "a claim of a lost RUNNING task is flagged")
+	require.Equal(t, 1, r.LostOwners)
+}
+
+// Order: the tenant with the earliest candidate goes first, and each
+// tenant's turn recurs every round (persistence.go ClaimDue doc, C-S5).
+func testSTClaimOrderEarliestTenantFirst(t *testing.T, h Harness) {
+	fa := newSTFixture(t, h)
+	fb := newSTFixture(t, h)
+	// Tenant A's earliest candidate predates tenant B's.
+	fa.arm(stDue - 100)
+	fa.arm(stDue - 90)
+	fb.arm(stDue - 10)
+	fb.arm(stDue - 5)
+
+	// (a) Limit 1: only the tenant with the earliest candidate gets the slot.
+	req := fa.claimReq(uuid.New(), false)
+	req.Limit = 1
+	res, err := fa.sts.ClaimDue(context.Background(), req)
+	require.NoError(t, err)
+	got := fa.own(res)
+	require.Len(t, got, 1, "the earliest candidate's tenant gets the only slot")
+	require.Empty(t, fb.own(res))
+
+	// Give the claimed task back so the due set is unchanged for (b).
+	n, err := fa.sts.GiveBackIdle(context.Background(), got[0].Claim.Owner, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	// (b) Limit 3: tenant A's turn comes first each round, so it gets 2
+	// (one per round) and tenant B gets 1.
+	req.Limit = 3
+	res, err = fa.sts.ClaimDue(context.Background(), req)
+	require.NoError(t, err)
+	require.Len(t, fa.own(res), 2, "tenant A's turn comes first each round")
+	require.Len(t, fb.own(res), 1)
+}
+
+// Order: a NextAttemptTime tie across tenants is broken by tenant id
+// byte-wise, smaller first (persistence.go ClaimDue doc, C-S5).
+func testSTClaimOrderTenantTieBrokenByID(t *testing.T, h Harness) {
+	fa := newSTFixture(t, h)
+	fb := newSTFixture(t, h)
+	lo, hi := fa, fb
+	if hi.tenant < lo.tenant {
+		lo, hi = hi, lo
+	}
+	loTask := lo.arm(stDue)
+	hi.arm(stDue) // same NextAttemptTime as loTask
+
+	req := lo.claimReq(uuid.New(), false)
+	req.Limit = 1
+	res, err := lo.sts.ClaimDue(context.Background(), req)
+	require.NoError(t, err)
+	got := append(lo.own(res), hi.own(res)...)
+	require.Len(t, got, 1)
+	require.Equal(t, loTask.ID, got[0].ID, "a NextAttemptTime tie is broken by tenant id byte-wise, smaller wins")
+}
+
+// Order: a NextAttemptTime tie within one tenant is broken by task ID
+// byte-wise, smaller first (persistence.go ClaimDue doc, C-S5).
+func testSTClaimOrderEntityTieBrokenByID(t *testing.T, h Harness) {
+	f := newSTFixture(t, h)
+	e1, e2 := f.newEntity(), f.newEntity()
+	s1 := f.spec(e1, "S", "T", stDue)
+	s2 := f.spec(e2, "S", "T", stDue)
+	f.reconcile(f.ctx, e1, "S", s1)
+	f.reconcile(f.ctx, e2, "S", s2)
+	lo := s1.ID
+	if s2.ID < lo {
+		lo = s2.ID
+	}
+
+	req := f.claimReq(uuid.New(), false)
+	req.Limit = 1
+	res, err := f.sts.ClaimDue(context.Background(), req)
+	require.NoError(t, err)
+	got := f.own(res)
+	require.Len(t, got, 1)
+	require.Equal(t, lo, got[0].ID, "a NextAttemptTime tie among one tenant's tasks is broken by task id byte-wise, smaller wins")
+}
+
+// PerTenantLimit and TenantInProgress combine by subtraction: a partial
+// quota claims exactly that many, the oldest first.
+func testSTClaimPerTenantLimitPartialQuota(t *testing.T, h Harness) {
+	fa := newSTFixture(t, h)
+	fb := newSTFixture(t, h)
+	oldest := fa.arm(stDue - 100).ID
+	fa.arm(stDue - 90)
+	fb.arm(stDue - 10)
+
+	req := fa.claimReq(uuid.New(), false)
+	req.PerTenantLimit = 2
+	req.TenantInProgress = map[spi.TenantID]int{fa.tenant: 1}
+	res, err := fa.sts.ClaimDue(context.Background(), req)
+	require.NoError(t, err)
+	got := fa.own(res)
+	require.Len(t, got, 1, "quota is PerTenantLimit minus TenantInProgress[tenant]")
+	require.Equal(t, oldest, got[0].ID, "the one slot goes to the oldest candidate")
+}
+
+// The OnePerEntity dedup key is (tenant, entity), not the bare entity id: two
+// tenants may each arm a task under the same EntityID string, and neither
+// blocks the other. A store that deduped on the bare entity id would claim
+// only one of the two in this single call.
+func testSTClaimEntityKeyIsPerTenant(t *testing.T, h Harness) {
+	fa := newSTFixture(t, h)
+	fb := newSTFixture(t, h)
+	entity := newID()
+	fa.entities = append(fa.entities, entity)
+	fb.entities = append(fb.entities, entity)
+	fa.reconcile(fa.ctx, entity, "S", fa.spec(entity, "S", "T", stDue))
+	fb.reconcile(fb.ctx, entity, "S", fb.spec(entity, "S", "T", stDue))
+
+	res, err := fa.sts.ClaimDue(context.Background(), fa.claimReq(uuid.New(), false))
+	require.NoError(t, err)
+	require.Len(t, fa.own(res), 1, "same entity id in another tenant does not collide")
+	require.Len(t, fb.own(res), 1, "one call claims both tenants' tasks of the same entity id")
+}
+
+// GiveBackIdle leaves Attempts and LostOwners exactly as they were: it is
+// not counted and does not clear the lost-owner count.
+func testSTGiveBackKeepsCounters(t *testing.T, h Harness) {
+	f := newSTFixture(t, h)
+	a := uuid.New()
+	task := f.armDue()
+	c := f.claimTask(a, task.ID)
+	require.NoError(t, f.sts.RecordAttempt(f.ctx, stRef(c), spi.Attempt{
+		Error: "E", AtMs: stNow, NextAttemptTime: stNow}))
+	c = f.claimTask(a, task.ID)
+	require.Equal(t, 1, c.Attempts)
+
+	c = f.reclaim(a, task.ID) // a never heartbeats: its own claim is lost-owner reclaimable
+	require.Equal(t, 1, c.LostOwners)
+	require.Equal(t, 1, c.Attempts)
+
+	n, err := f.sts.GiveBackIdle(context.Background(), a, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	got := f.mustGet(task.ID)
+	require.Equal(t, spi.ScheduledTaskWaiting, got.Status)
+	require.Equal(t, 1, got.Attempts, "give-back does not reset Attempts")
+	require.Equal(t, 1, got.LostOwners, "give-back does not reset LostOwners")
 }

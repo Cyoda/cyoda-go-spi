@@ -92,6 +92,17 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "GiveBack/LostReply", testSTGiveBackLostReply)
 	runSubtest(t, h, tracker, "GiveBack/KeepsLiveRuns", testSTGiveBackKeepsLiveRuns)
 	runSubtest(t, h, tracker, "GiveBack/NotCountedKeepsMark", testSTGiveBackNotCountedKeepsMark)
+
+	// Claims, liveness, give-back — fix round 1 (coverage gaps).
+	runSubtest(t, h, tracker, "Liveness/HeartbeatRefreshes", testSTLivenessHeartbeatRefreshes)
+	runSubtest(t, h, tracker, "Claim/LostOwnerIgnoresNextAttemptTime", testSTClaimLostOwnerIgnoresNextAttemptTime)
+	runSubtest(t, h, tracker, "Claim/LostOwnerFlagPerTask", testSTClaimLostOwnerFlagPerTask)
+	runSubtest(t, h, tracker, "Claim/OrderEarliestTenantFirst", testSTClaimOrderEarliestTenantFirst)
+	runSubtest(t, h, tracker, "Claim/OrderTenantTieBrokenByID", testSTClaimOrderTenantTieBrokenByID)
+	runSubtest(t, h, tracker, "Claim/OrderEntityTieBrokenByID", testSTClaimOrderEntityTieBrokenByID)
+	runSubtest(t, h, tracker, "Claim/PerTenantLimitPartialQuota", testSTClaimPerTenantLimitPartialQuota)
+	runSubtest(t, h, tracker, "Claim/EntityKeyIsPerTenant", testSTClaimEntityKeyIsPerTenant)
+	runSubtest(t, h, tracker, "GiveBack/KeepsCounters", testSTGiveBackKeepsCounters)
 }
 
 // stFixture is one subtest's tenant, store, transaction manager and model.

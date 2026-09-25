@@ -14,6 +14,14 @@
 // returns, every subsequent timestamp the plugin assigns strictly
 // dominates every timestamp assigned before the call. d > 0.
 //
+// A harness backed by a real clock (one that sleeps rather than moving an
+// injected clock) may cap how far a single call advances: it moves the
+// clock forward by at least min(d, that cap), never less, and the strict-
+// dominance guarantee still holds for the smaller amount. A subtest that
+// needs a specific elapsed duration larger than a harness's cap issues
+// AdvanceClock that many times rather than relying on one call for the
+// full d.
+//
 // A backend whose StoreFactory.ScheduledTaskStore returns an error
 // satisfying errors.Is(err, errors.ErrUnsupported) skips the ScheduledTasks
 // group.

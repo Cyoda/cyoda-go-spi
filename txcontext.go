@@ -63,9 +63,10 @@ type WriteAttribution struct {
 //   - Closed: written under OpMu.Lock by Commit/Rollback in their defer
 //     (so all return paths are covered); read under OpMu.RLock by every
 //     in-flight op so the op fails fast on a closed tx.
-//   - RolledBack: written under OpMu.Lock by Rollback eagerly inside the
-//     OpMu region (not in defer); read under OpMu.RLock by every
-//     in-flight op.
+//   - RolledBack: written under OpMu.Lock, eagerly inside the OpMu region
+//     (not in defer), by Rollback and by a Commit that aborts the
+//     transaction instead of committing it (for example on a conflict);
+//     read under OpMu.RLock by every in-flight op.
 //   - ID, TenantID, SnapshotTime, Origin: immutable after
 //     [TransactionManager.Begin] returns; safe to read without locks.
 //

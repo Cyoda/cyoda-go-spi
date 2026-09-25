@@ -220,16 +220,18 @@ MAINTAINING.md.
   workflows need no migration.
 
 - **`spitest.StoreFactoryConformance` failed a `-run`-filtered invocation
-  over `Harness.Skip` keys in groups the filter excluded.** The unused-key
-  check now reports a key only when it wasn't matched exactly AND its
-  top-level group (the key's first `/`-separated segment) had some subtest
-  run; a key whose group never ran because of `-run` filtering is no
-  longer reported. The check is deliberately group-grained rather than
-  matching a key's full parent path: a parent-path check would let a typo
-  in any segment before the last — the common shape for this suite's keys,
-  e.g. `Entity/CompareAndSave/Conflict` — pass unnoticed, since the
-  corrupted parent path then matches no ran subtest. A real typo or stale
-  entry anywhere in a group that ran is still caught.
+  over `Harness.Skip` keys the filter excluded from running.** `-run` can
+  filter this suite at any segment depth — this package documents
+  invocations that filter below the group level, e.g. `go test -run
+  'TestConformance/Transaction/TxStateErrors/JoinAfterCommit'` — so no
+  fixed grain of "did this key's subtest have a chance to run" comparison
+  (the whole key, its top-level group, its parent path) is correct for
+  every filter depth: each either lets some real typo pass or false-flags
+  some excluded key. The unmatched-key check now runs only on a fully
+  unfiltered invocation (the `test.run` flag empty); under any `-run`
+  filter it does not run at all. A full run (`make test`, CI) is always
+  unfiltered and still catches every typo or stale entry, at any segment
+  depth, exactly as before.
 
 ## [0.8.4] - 2026-09-09
 

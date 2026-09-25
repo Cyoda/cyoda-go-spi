@@ -180,15 +180,25 @@ func testSTC1CommittedTxFailsOldCommit(t *testing.T, h Harness) {
 	others := []struct {
 		name  string
 		write func(ctx context.Context, f *stFixture, a spi.ScheduledTask) error
+		// verify checks the second writer's committed effect, which stands
+		// regardless of tx1's outcome: gone after DeleteForModel, a fresh
+		// life after the re-arm.
+		verify func(t *testing.T, f *stFixture, a spi.ScheduledTask)
 	}{
-		{"DeleteForModel", func(ctx context.Context, f *stFixture, a spi.ScheduledTask) error {
-			return f.sts.DeleteForModel(ctx, f.tenant, f.model, 1, nil)
-		}},
-		{"Rearm", func(ctx context.Context, f *stFixture, a spi.ScheduledTask) error {
-			_, err := f.sts.ReconcileForEntity(ctx, spi.ReconcileRequest{TenantID: f.tenant, EntityID: a.EntityID,
-				CurrentState: "S", Arm: []spi.ScheduledTask{f.spec(a.EntityID, "S", "T", stFuture)}})
-			return err
-		}},
+		{"DeleteForModel",
+			func(ctx context.Context, f *stFixture, a spi.ScheduledTask) error {
+				return f.sts.DeleteForModel(ctx, f.tenant, f.model, 1, nil)
+			},
+			func(t *testing.T, f *stFixture, a spi.ScheduledTask) { f.requireGone(a.ID) }},
+		{"Rearm",
+			func(ctx context.Context, f *stFixture, a spi.ScheduledTask) error {
+				_, err := f.sts.ReconcileForEntity(ctx, spi.ReconcileRequest{TenantID: f.tenant, EntityID: a.EntityID,
+					CurrentState: "S", Arm: []spi.ScheduledTask{f.spec(a.EntityID, "S", "T", stFuture)}})
+				return err
+			},
+			func(t *testing.T, f *stFixture, a spi.ScheduledTask) {
+				requireFreshLife(t, f.spec(a.EntityID, "S", "T", stFuture), f.mustGet(a.ID))
+			}},
 	}
 	for _, w := range stRunWrites {
 		t.Run(w.name, func(t *testing.T) {
@@ -207,6 +217,7 @@ func testSTC1CommittedTxFailsOldCommit(t *testing.T, h Harness) {
 					stmtErr := w.write(tx1Ctx, f, a)
 					requireTxRefused(t, stmtErr, func() error { return f.tm.Commit(tx1Ctx, tx1ID) }, w.fenced)
 					_ = f.tm.Rollback(tx1Ctx, tx1ID)
+					other.verify(t, f, a)
 				})
 			}
 		})
@@ -466,7 +477,7 @@ func testSTC6NeverJoiningWriteBounded(t *testing.T, h Harness) {
 
 	if recErr != nil {
 		require.ErrorIs(t, recErr, spi.ErrTaskBusy,
-			"a never-joining write that gives up on a row an open transaction wrote answers ErrTaskBusy (C6, C-S5)")
+			"a never-joining write that gives up on a row an open transaction wrote answers ErrTaskBusy (C6)")
 		requireUnchangedClaim(t, c, f.mustGet(c.ID))
 		require.NoError(t, f.tm.Rollback(txCtx, txID))
 		require.NoError(t, f.sts.RecordAttempt(context.Background(), stRef(c), attempt), "the retry is accepted")

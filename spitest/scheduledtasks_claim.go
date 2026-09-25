@@ -99,9 +99,8 @@ func testSTClaimStaleOwnerReclaimed(t *testing.T, h Harness) {
 }
 
 // ClaimedFromLostOwner is set only on a ClaimDue result, and only when that
-// claim took the task from a stale or missing owner (README C-S1): the
-// scheduler counts cyoda.scheduler.claims{reason} from it. A read never
-// carries it.
+// claim took the task from a stale or missing owner: the scheduler counts
+// cyoda.scheduler.claims{reason} from it. A read never carries it.
 func testSTClaimLostOwnerFlagged(t *testing.T, h Harness) {
 	f := newSTFixture(t, h)
 	task := f.armDue()
@@ -535,7 +534,7 @@ func testSTClaimLostOwnerIgnoresNextAttemptTime(t *testing.T, h Harness) {
 
 // One AllowLostOwner call claims a due WAITING task and a RUNNING task whose
 // owner is missing in the same round; ClaimedFromLostOwner and LostOwners
-// are set per task, not for the whole result (README C-S1).
+// are set per task, not for the whole result.
 func testSTClaimLostOwnerFlagPerTask(t *testing.T, h Harness) {
 	f := newSTFixture(t, h)
 	waiting := f.armDue()
@@ -558,7 +557,7 @@ func testSTClaimLostOwnerFlagPerTask(t *testing.T, h Harness) {
 
 // Order: the tenant with the earliest candidate goes first, whatever its
 // tenant id or arm (insertion) order, and each tenant's turn recurs every
-// round (persistence.go ClaimDue doc, C-S5). Round-robin fairness itself —
+// round (persistence.go ClaimDue doc). Round-robin fairness itself —
 // each tenant gets at least one — is Claim/TenantsTakeTurns's job; this
 // case pins the exact split, which a naive "take the earliest N overall"
 // selection (ignoring tenant fairness) would get wrong.
@@ -608,7 +607,7 @@ func testSTClaimOrderEarliestTenantFirst(t *testing.T, h Harness) {
 }
 
 // Order: a NextAttemptTime tie across tenants is broken by tenant id
-// byte-wise, smaller first (persistence.go ClaimDue doc, C-S5).
+// byte-wise, smaller first (persistence.go ClaimDue doc).
 func testSTClaimOrderTenantTieBrokenByID(t *testing.T, h Harness) {
 	fa := newSTFixture(t, h)
 	fb := newSTFixture(t, h)
@@ -644,7 +643,7 @@ func testSTClaimOrderTenantTieBrokenByID(t *testing.T, h Harness) {
 }
 
 // Order: a NextAttemptTime tie within one tenant is broken by task ID
-// byte-wise, smaller first (persistence.go ClaimDue doc, C-S5). newID() is
+// byte-wise, smaller first (persistence.go ClaimDue doc). newID() is
 // time-based and its string order is not predictable, so the two task ids
 // are constructed with a KNOWN order, and the larger one is reconciled
 // FIRST: only a store that actually orders by task id passes; one that

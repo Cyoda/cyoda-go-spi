@@ -219,11 +219,12 @@ type ScheduledTaskStore interface {
 	// RecordAttempt sets the task WAITING with a.NextAttemptTime, adds 1
 	// to Attempts unless a.NotCounted, records a.Error and a.AtMs as
 	// LastError and LastAttemptTime (with or without NotCounted), and
-	// clears the claim, fenced. With
-	// a.ClearOwnMark it also removes the mark this claim wrote, in the
-	// same atomic write; a mark another claim wrote stays. It may return
-	// ErrTaskBusy when an open transaction has written the row (C6); the
-	// write did not happen, and the caller retries it. Never joining.
+	// clears the claim, fenced. With a.ClearOwnMark it also removes the
+	// mark this claim wrote, in the same atomic write; a mark another
+	// claim wrote stays. When it gives up waiting on a row an open
+	// transaction has written (C6), it returns an error satisfying
+	// errors.Is(err, ErrTaskBusy), and the write is not made; the caller
+	// retries it. Never joining.
 	RecordAttempt(ctx context.Context, ref TaskRef, a Attempt) error
 
 	// Fail sets the task FAILED with f.Reason, replaces LastError with

@@ -252,8 +252,8 @@ func testSTTenantIsolationEveryMethod(t *testing.T, h Harness) {
 }
 
 // A joining write whose tenant is not the tenant of the transaction on ctx is
-// refused with ErrTxTenantMismatch and changes nothing (README C-S5): a task
-// row of tenant B never enters tenant A's transaction.
+// refused with ErrTxTenantMismatch and changes nothing: a task row of
+// tenant B never enters tenant A's transaction.
 func testSTTenantJoiningWriteOtherTenantRefused(t *testing.T, h Harness) {
 	fb := newSTFixture(t, h)
 	fa := newSTFixture(t, h)

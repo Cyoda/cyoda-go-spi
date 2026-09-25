@@ -114,10 +114,17 @@ var ErrTxCommitInProgress = errors.New("transaction commit in progress")
 // answer to a cross-tenant lookup, or it becomes an existence oracle.
 var ErrTxNotCommitted = errors.New("transaction not yet committed")
 
-// ErrTxTenantMismatch indicates a transaction-lifecycle operation
-// (Join, Commit, Rollback, Savepoint, etc.) was attempted with a
-// UserContext whose tenant does not match the transaction's tenant.
-// Tenant-isolation invariant — distinct from data-op tenant checks.
+// ErrTxTenantMismatch indicates a tenant mismatch against the transaction
+// on ctx:
+//
+//   - A transaction-lifecycle operation (Join, Commit, Rollback,
+//     Savepoint, etc.) was attempted with a UserContext whose tenant does
+//     not match the transaction's tenant.
+//   - A JOINING ScheduledTaskStore write (see ScheduledTaskStore's doc)
+//     was called with a transaction on ctx whose tenant is not the
+//     method's own tenant argument (or req.TenantID / ref.TenantID).
+//
+// Tenant-isolation invariant in both cases.
 var ErrTxTenantMismatch = errors.New("transaction tenant mismatch")
 
 // ErrGroupCardinalityExceeded is returned by GroupedAggregator
@@ -170,9 +177,10 @@ var ErrStaleClaim = errors.New("write fenced: stale claim epoch")
 // caller must not dispatch it again.
 var ErrMarkedByAnotherClaim = errors.New("scheduled task: marked by another claim of this life")
 
-// ErrTaskBusy is returned by ScheduledTaskStore.MarkUnsafe when an open
-// transaction has written the task row. The mark is not written. The
-// caller treats it as a failure that is safe to retry.
+// ErrTaskBusy is returned by ScheduledTaskStore.MarkUnsafe and
+// ScheduledTaskStore.RecordAttempt when an open transaction has written the
+// task row. The write is not made. The caller treats it as a failure that
+// is safe to retry.
 var ErrTaskBusy = errors.New("scheduled task: row is being written by an open transaction")
 
 // ErrStoreRejected marks a deterministic rejection by the store: the same

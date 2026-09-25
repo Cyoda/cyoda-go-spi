@@ -108,13 +108,25 @@ func ValidateFailureReason(r ScheduledTaskFailureReason) error {
 }
 
 // ValidateArm refuses a ReconcileRequest whose Arm names a task without an
-// id, with an error that satisfies errors.Is(err, ErrStoreRejected). The
-// tenant and the entity come from the request (see ReconcileRequest.Arm), so
-// an Arm item's own fields for them are not checked.
+// id, or whose Arm and Cancel both name the same id — a caller defect: Arm
+// means "this task's life continues" and Cancel means "remove it", and a
+// request cannot mean both for the same id. Either refusal satisfies
+// errors.Is(err, ErrStoreRejected). The tenant and the entity come from the
+// request (see ReconcileRequest.Arm), so an Arm item's own fields for them
+// are not checked.
 func ValidateArm(req ReconcileRequest) error {
 	for _, a := range req.Arm {
 		if a.ID == "" {
 			return fmt.Errorf("scheduled task arm for entity %s names a task without an id: %w", req.EntityID, ErrStoreRejected)
+		}
+	}
+	cancelled := make(map[string]bool, len(req.Cancel))
+	for _, id := range req.Cancel {
+		cancelled[id] = true
+	}
+	for _, a := range req.Arm {
+		if cancelled[a.ID] {
+			return fmt.Errorf("scheduled task %s is in both Arm and Cancel for entity %s: %w", a.ID, req.EntityID, ErrStoreRejected)
 		}
 	}
 	return nil

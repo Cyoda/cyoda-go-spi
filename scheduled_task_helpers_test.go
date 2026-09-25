@@ -135,3 +135,14 @@ func TestValidateArm(t *testing.T) {
 		t.Fatalf("an arm task without an id: err = %v, want ErrStoreRejected", err)
 	}
 }
+
+func TestValidateArm_RejectsIDInBothArmAndCancel(t *testing.T) {
+	req := ReconcileRequest{
+		TenantID: "A", EntityID: "e1",
+		Arm:    []ScheduledTask{{ID: "e1:S:T"}},
+		Cancel: []string{"e1:S:T"},
+	}
+	if err := ValidateArm(req); !errors.Is(err, ErrStoreRejected) {
+		t.Fatalf("an id in both Arm and Cancel: err = %v, want ErrStoreRejected", err)
+	}
+}

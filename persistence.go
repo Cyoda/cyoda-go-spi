@@ -45,6 +45,11 @@ type ReconcileRequest struct {
 	// ScheduleFunction whose result already lies in the past. They are not
 	// reported in ReconcileForEntity's result: the caller audits them
 	// separately.
+	//
+	// An id in both Arm and Cancel is a caller defect: Arm means the
+	// task's life continues, Cancel means it is removed, and a request
+	// cannot mean both for the same id. ValidateArm (scheduled_task_helpers.go)
+	// refuses it with an error satisfying errors.Is(err, ErrStoreRejected).
 	Cancel []string
 }
 
@@ -56,18 +61,23 @@ type ReconcileRequest struct {
 // without one it applies at once. A NEVER-JOINING method ignores any
 // transaction on ctx and commits on its own — that is how a mark survives
 // the rollback of the run's transaction. Joining: ReconcileForEntity,
-// RemoveLife, StampSegment, DeleteForEntities, DeleteForModel, Fail. Get
-// may join. Never joining: Query, ClaimDue, Heartbeat, RetireOwner,
-// SweepOwners, GiveBackIdle, MarkUnsafe, RecordAttempt, SweepMarks.
+// RemoveLife, StampSegment, DeleteForEntities, DeleteForModel, Fail, and
+// Get for reads (C2). Never joining: Query, ClaimDue, Heartbeat,
+// RetireOwner, SweepOwners, GiveBackIdle, MarkUnsafe, RecordAttempt,
+// SweepMarks.
 //
 // Fenced methods (StampSegment, MarkUnsafe, RecordAttempt, Fail) are
 // accepted only if the task's current arm token and claim token are the
 // ones in the TaskRef, in the TaskRef's tenant. Otherwise, or when the
 // task is missing, they return ErrStaleClaim and change nothing.
 //
-// A joining method called with a transaction on ctx whose tenant is not
+// A joining WRITE called with a transaction on ctx whose tenant is not
 // the method's tenant (its tenant argument, req.TenantID or ref.TenantID)
-// is refused with ErrTxTenantMismatch and changes nothing.
+// is refused with ErrTxTenantMismatch and changes nothing. Get carries no
+// such refusal: it is tenant-filtered like every read, so a transaction on
+// ctx from another tenant does not change what it returns — it still
+// answers only from the tenant argument, and never reveals whether another
+// tenant's task exists.
 //
 // Clauses every implementation meets:
 //
@@ -97,12 +107,25 @@ type ReconcileRequest struct {
 // errors.Is(err, ErrStoreRejected); no other error does (see
 // ErrStoreRejected).
 type ScheduledTaskStore interface {
-	// ReconcileForEntity arms req.Arm, each as a new life (WAITING,
-	// NextAttemptTime = ScheduledTime, a new ArmToken, no claim, counters
-	// and error fields cleared, PartialCommit false, no mark), whatever
-	// status the row had. It removes every other task of the entity and
-	// every task in req.Cancel. It returns the removed tasks, except those
-	// named in req.Cancel. Joining.
+	// ReconcileForEntity arms req.Arm, each as a new life, whatever
+	// status, claim or mark the row had before:
+	//
+	//	Status          = WAITING
+	//	ArmToken        = a new token
+	//	NextAttemptTime = ScheduledTime
+	//	Claim           = nil
+	//	Attempts        = 0
+	//	LostOwners      = 0
+	//	LastAttemptTime = nil
+	//	LastError       = ""
+	//	FailureReason   = ""
+	//	FailedTime      = nil
+	//	PartialCommit   = false
+	//
+	// and no mark exists for the new life (UnsafeMarked reads false). It
+	// removes every other task of the entity and every task in req.Cancel.
+	// It returns the removed tasks, except those named in req.Cancel.
+	// Joining.
 	ReconcileForEntity(ctx context.Context, req ReconcileRequest) (removed []ScheduledTask, err error)
 
 	// RemoveLife removes the task if its current life is armToken, in any
@@ -129,7 +152,11 @@ type ScheduledTaskStore interface {
 
 	// Get returns the task, with found false and a nil error when it does
 	// not exist in tenant. With a transaction on ctx it sees that
-	// transaction's staged operations (C2).
+	// transaction's staged operations (C2). Joining, for reads: it never
+	// takes part in a commit or rollback, and a tenant mismatch against
+	// the transaction on ctx never refuses the call — tenant filters the
+	// read, so it simply answers from tenant, same as with no transaction
+	// on ctx at all.
 	Get(ctx context.Context, tenant TenantID, id string) (task *ScheduledTask, found bool, err error)
 
 	// Query returns one page of tenant's tasks matching q, in
@@ -147,14 +174,23 @@ type ScheduledTaskStore interface {
 	// most one task per entity is claimed per call; concurrent callers
 	// obtain disjoint sets and never two tasks of one entity. Per tenant
 	// at most req.PerTenantLimit - req.TenantInProgress[tenant] tasks are
-	// claimed; tenants take turns — each tenant's first task comes before
-	// any tenant's second — and within a tenant tasks are claimed in
-	// NextAttemptTime order. A returned task carries UnsafeMarked as of
-	// the claim (C3), and ClaimedFromLostOwner when this claim took it from
-	// a stale or missing owner. Losing a race to another caller is not an error: the
-	// call returns what it claimed, possibly nothing. req.Limit < 1 or
-	// req.PerTenantLimit < 1 is a caller error: ClaimDue returns an error
-	// and claims nothing. Never joining.
+	// claimed.
+	//
+	// Order: within a tenant, candidates are ordered by (NextAttemptTime,
+	// ID byte-wise); a lost-owner RUNNING task is claimable whatever its
+	// NextAttemptTime. Tenants take turns, one task per turn, so each
+	// tenant's first task comes before any tenant's second: the tenant
+	// with the earliest candidate goes first, ties broken by tenant id
+	// byte-wise. SelectClaims (scheduled_task_helpers.go) implements this
+	// order; every backend follows it, in Go via SelectClaims or
+	// equivalently in its own query language.
+	//
+	// A returned task carries UnsafeMarked as of the claim (C3), and
+	// ClaimedFromLostOwner when this claim took it from a stale or
+	// missing owner. Losing a race to another caller is not an error:
+	// the call returns what it claimed, possibly nothing. req.Limit < 1
+	// or req.PerTenantLimit < 1 is a caller error: ClaimDue returns an
+	// error and claims nothing. Never joining.
 	ClaimDue(ctx context.Context, req ClaimRequest) ([]ScheduledTask, error)
 
 	// Heartbeat creates or refreshes owner's liveness record, stamped with

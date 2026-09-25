@@ -353,41 +353,56 @@ func testSTC3MarkRacesClaim(t *testing.T, h Harness) {
 
 // stOpenWrites are joining writes that leave a task row written by an open
 // transaction. lost says whether the row is claimable only by a lost-owner
-// claim.
+// claim. notBusy says the write removes nothing, so C6 does not apply: the
+// row stays claimable throughout, unlike every other row here.
 var stOpenWrites = []struct {
 	name    string
 	lost    bool
+	notBusy bool
 	prepare func(f *stFixture) spi.ScheduledTask
 	write   func(ctx context.Context, f *stFixture, task spi.ScheduledTask) error
 }{
-	{"StagedRearm", false,
+	{"StagedRearm", false, false,
 		func(f *stFixture) spi.ScheduledTask { return f.armDue() },
 		func(ctx context.Context, f *stFixture, task spi.ScheduledTask) error {
 			_, err := f.sts.ReconcileForEntity(ctx, spi.ReconcileRequest{TenantID: f.tenant, EntityID: task.EntityID,
 				CurrentState: "S", Arm: []spi.ScheduledTask{f.spec(task.EntityID, "S", "T", stDue)}})
 			return err
 		}},
-	{"StagedDelete", false,
+	{"StagedDelete", false, false,
 		func(f *stFixture) spi.ScheduledTask { return f.armDue() },
 		func(ctx context.Context, f *stFixture, task spi.ScheduledTask) error {
 			return f.sts.DeleteForEntities(ctx, f.tenant, []string{task.EntityID})
 		}},
-	{"StagedRemoveLife", false,
+	{"StagedRemoveLife", false, false,
 		func(f *stFixture) spi.ScheduledTask { return f.armDue() },
 		func(ctx context.Context, f *stFixture, task spi.ScheduledTask) error {
 			return f.sts.RemoveLife(ctx, f.tenant, task.ID, task.ArmToken)
 		}},
-	{"StagedDeleteForModel", false,
+	// StagedRemoveLifeStale is the non-vacuous counterpart of StagedRemoveLife
+	// directly above: same due task, same open transaction, but the life is
+	// replaced (outside the transaction, so it commits at once) before
+	// RemoveLife is staged against the now-stale token it had before the
+	// replace. StagedRemoveLife already proves the current-token call makes
+	// the row busy; this proves the stale-token call does not (the lead
+	// ruling in persistence.go's C6 clause and the RemoveLife doc).
+	{"StagedRemoveLifeStale", false, true,
+		func(f *stFixture) spi.ScheduledTask { return f.armDue() },
+		func(ctx context.Context, f *stFixture, task spi.ScheduledTask) error {
+			f.reconcile(f.ctx, task.EntityID, "S", f.spec(task.EntityID, "S", "T", stDue))
+			return f.sts.RemoveLife(ctx, f.tenant, task.ID, task.ArmToken)
+		}},
+	{"StagedDeleteForModel", false, false,
 		func(f *stFixture) spi.ScheduledTask { return f.armDue() },
 		func(ctx context.Context, f *stFixture, task spi.ScheduledTask) error {
 			return f.sts.DeleteForModel(ctx, f.tenant, f.model, 1, nil)
 		}},
-	{"StagedStamp", true,
+	{"StagedStamp", true, false,
 		func(f *stFixture) spi.ScheduledTask { return f.claimTask(uuid.New(), f.armDue().ID) },
 		func(ctx context.Context, f *stFixture, task spi.ScheduledTask) error {
 			return f.sts.StampSegment(ctx, stRef(task), false)
 		}},
-	{"StagedFail", true,
+	{"StagedFail", true, false,
 		func(f *stFixture) spi.ScheduledTask { return f.claimTask(uuid.New(), f.armDue().ID) },
 		func(ctx context.Context, f *stFixture, task spi.ScheduledTask) error {
 			return f.sts.Fail(ctx, stRef(task), spi.Failure{Reason: spi.FailureRunPanicked, Error: "E", AtMs: stNow})
@@ -395,7 +410,9 @@ var stOpenWrites = []struct {
 }
 
 // A row written by an open transaction is not claimable (C6), and the claim
-// skips it rather than waiting.
+// skips it rather than waiting — except a notBusy row (a RemoveLife that
+// removes nothing): that row stays claimable throughout, and MarkUnsafe on
+// the resulting claim is accepted, because the row was never busy.
 func testSTC6OpenWriteNotClaimable(t *testing.T, h Harness) {
 	for _, w := range stOpenWrites {
 		t.Run(w.name, func(t *testing.T) {
@@ -408,7 +425,17 @@ func testSTC6OpenWriteNotClaimable(t *testing.T, h Harness) {
 			defer cancel()
 			res, err := f.sts.ClaimDue(ctx, f.claimReq(uuid.New(), w.lost))
 			require.NoError(t, err, "a claim skips a row an open transaction wrote; it does not wait for it")
-			require.Nil(t, findST(f.own(res), task.ID))
+			claimed := findST(f.own(res), task.ID)
+
+			if w.notBusy {
+				require.NotNil(t, claimed,
+					"a RemoveLife that removes nothing does not make the row busy (C6): still claimable while the transaction is open")
+				require.NoError(t, f.sts.MarkUnsafe(ctx, stRef(*claimed)),
+					"MarkUnsafe on the claim is accepted: the row was never busy (C6)")
+				require.NoError(t, f.tm.Rollback(txCtx, txID))
+				return
+			}
+			require.Nil(t, claimed)
 
 			require.NoError(t, f.tm.Rollback(txCtx, txID))
 			require.NotNil(t, findST(f.claimWith(f.claimReq(uuid.New(), w.lost)), task.ID),

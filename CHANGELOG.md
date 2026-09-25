@@ -88,8 +88,10 @@ MAINTAINING.md.
   skips such a row rather than waiting for it, a lost-owner claim that
   is flagged, a joining write of another tenant that is refused, `Query` and
   `ClaimDue` refusing a Limit below 1 (`ErrStoreRejected`) even when the
-  tenant has matching rows, and a `ReconcileForEntity` Cancel id that names
-  another entity's task being left untouched.
+  tenant has matching rows, a `ReconcileForEntity` Cancel id that names
+  another entity's task being left untouched, and a `RemoveLife` that
+  removes nothing — a stale or missing life — not making the row busy under
+  C6, unlike every other joining write (it still counts as a write for C1).
   `Harness.AdvanceClock`'s contract now covers a capped real-clock harness:
   it moves the store clock forward by at least `min(d, cap)`, never less,
   and the strict-dominance guarantee holds for the smaller amount.

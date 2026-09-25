@@ -101,7 +101,11 @@ type ReconcileRequest struct {
 //	C6  A task row written by an open transaction is not claimable until
 //	    that transaction ends. MarkUnsafe and RecordAttempt answer
 //	    ErrTaskBusy for it and make no write. GiveBackIdle leaves the row
-//	    as it is: the row is not counted, and it stays under its claim.
+//	    as it is: the row is not counted, and it stays under its claim. A
+//	    RemoveLife that removes nothing — its armToken is not the row's
+//	    current life, or the row is missing — writes nothing, so it does
+//	    not make the row busy, even while its transaction stays open (C1
+//	    still counts the call as a write to the row it names).
 //
 // Tenant scoping: every method that takes a tenant, or a TaskRef, reads
 // and writes that tenant's tasks only. ClaimDue, GiveBackIdle, Heartbeat,
@@ -137,7 +141,9 @@ type ScheduledTaskStore interface {
 	// RemoveLife removes the task if its current life is armToken, in any
 	// status; otherwise, or when the task is missing, it does nothing and
 	// returns nil. It does nothing when this same transaction has already
-	// replaced or removed the task. Joining.
+	// replaced or removed the task. A call that does nothing writes
+	// nothing: it does not make the row busy under C6, though C1 still
+	// counts it as a write to the row it names. Joining.
 	RemoveLife(ctx context.Context, tenant TenantID, id string, armToken uuid.UUID) error
 
 	// StampSegment writes the task row, fenced. With partial it sets

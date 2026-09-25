@@ -55,6 +55,8 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Arm/JoinsTransaction", testSTArmJoinsTransaction)
 	runSubtest(t, h, tracker, "Arm/SelfLoopRearmsRunning", testSTArmSelfLoopRearmsRunning)
 	runSubtest(t, h, tracker, "Arm/RearmResetsLife", testSTArmRearmResetsLife)
+	runSubtest(t, h, tracker, "Arm/ArmAndCancelRejected", testSTArmAndCancelRejected)
+	runSubtest(t, h, tracker, "Arm/EmptyIDRejected", testSTArmEmptyIDRejected)
 	runSubtest(t, h, tracker, "RemoveLife/CurrentLife", testSTRemoveLifeCurrentLife)
 	runSubtest(t, h, tracker, "RemoveLife/OtherLifeIsNoOp", testSTRemoveLifeOtherLifeIsNoOp)
 	runSubtest(t, h, tracker, "RemoveLife/JoinsTransaction", testSTRemoveLifeJoinsTransaction)
@@ -64,6 +66,7 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "DeleteForModel/NilKeepRemovesAll", testSTDeleteForModelNilKeep)
 	runSubtest(t, h, tracker, "DeleteForModel/TenantScoped", testSTDeleteForModelTenantScoped)
 	runSubtest(t, h, tracker, "Get/Missing", testSTGetMissing)
+	runSubtest(t, h, tracker, "Get/OtherTenantTransaction", testSTGetOtherTenantTransaction)
 
 	// Claims, liveness, give-back (S-5).
 	runSubtest(t, h, tracker, "Claim/DueWaiting", testSTClaimDueWaiting)

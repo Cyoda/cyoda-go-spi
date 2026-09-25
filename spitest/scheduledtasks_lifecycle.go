@@ -205,13 +205,25 @@ func testSTArmRearmResetsLife(t *testing.T, h Harness) {
 	task := f.armDue()
 	s := f.spec(task.EntityID, "S", "T", stDue)
 
-	// FAILED, with a mark and PartialCommit.
-	c := f.claimTask(uuid.New(), task.ID)
+	// FAILED, with a mark, PartialCommit and a lost-owner reclaim: the
+	// LostOwners reset below is proven from a non-zero value, not vacuously.
+	f.claimTask(uuid.New(), task.ID) // this owner never heartbeats: lost at once
+	c := f.reclaim(uuid.New(), task.ID)
+	require.Equal(t, 1, c.LostOwners)
 	require.NoError(t, f.sts.MarkUnsafe(f.ctx, stRef(c)))
 	require.NoError(t, f.sts.StampSegment(f.ctx, stRef(c), true))
 	require.NoError(t, f.sts.Fail(f.ctx, stRef(c), spi.Failure{
 		Reason: spi.FailureUnsafeWorkNotCompleted, Error: "UNSAFE", AtMs: stNow}))
-	require.Equal(t, spi.ScheduledTaskFailed, f.mustGet(task.ID).Status)
+	failed := f.mustGet(task.ID)
+	require.Equal(t, spi.ScheduledTaskFailed, failed.Status)
+	// The mark and the other fields were really written: the reset
+	// assertions below would pass vacuously against a zero value otherwise.
+	require.True(t, failed.UnsafeMarked, "the mark was really written")
+	require.True(t, failed.PartialCommit, "PartialCommit was really set")
+	require.Equal(t, "UNSAFE", failed.LastError)
+	require.Equal(t, spi.FailureUnsafeWorkNotCompleted, failed.FailureReason)
+	require.NotNil(t, failed.FailedTime)
+	require.Equal(t, 1, failed.LostOwners)
 
 	f.reconcile(f.ctx, task.EntityID, "S", s)
 	got := f.mustGet(task.ID)
@@ -227,9 +239,50 @@ func testSTArmRearmResetsLife(t *testing.T, h Harness) {
 	waiting := f.mustGet(task.ID)
 	require.Equal(t, 1, waiting.Attempts)
 	require.True(t, waiting.PartialCommit)
+	// LastAttemptTime and LastError were really set: the reset assertion
+	// on requireFreshLife below would pass vacuously against nil/empty
+	// otherwise.
+	require.NotNil(t, waiting.LastAttemptTime)
+	require.Equal(t, stNow, *waiting.LastAttemptTime)
+	require.Equal(t, "E", waiting.LastError)
 
 	f.reconcile(f.ctx, task.EntityID, "S", s)
 	requireFreshLife(t, s, f.mustGet(task.ID))
+}
+
+// A rejected ReconcileForEntity changes nothing: the entity's existing task
+// keeps its life (ReconcileRequest.Cancel, ValidateArm).
+func testSTArmAndCancelRejected(t *testing.T, h Harness) {
+	f := newSTFixture(t, h)
+	e := f.newEntity()
+	existing := f.spec(e, "S", "T0", stFuture)
+	f.reconcile(f.ctx, e, "S", existing)
+	before := f.mustGet(existing.ID)
+
+	s := f.spec(e, "S", "T1", stFuture)
+	_, err := f.sts.ReconcileForEntity(f.ctx, spi.ReconcileRequest{
+		TenantID: f.tenant, EntityID: e, CurrentState: "S",
+		Arm: []spi.ScheduledTask{s}, Cancel: []string{s.ID}})
+	require.ErrorIs(t, err, spi.ErrStoreRejected, "an id in both Arm and Cancel is rejected")
+	after := f.mustGet(existing.ID)
+	require.Equal(t, before.ArmToken, after.ArmToken, "a rejected request leaves the entity's existing task unchanged")
+	f.requireGone(s.ID)
+}
+
+func testSTArmEmptyIDRejected(t *testing.T, h Harness) {
+	f := newSTFixture(t, h)
+	e := f.newEntity()
+	existing := f.spec(e, "S", "T0", stFuture)
+	f.reconcile(f.ctx, e, "S", existing)
+	before := f.mustGet(existing.ID)
+
+	s := f.spec(e, "S", "T1", stFuture)
+	s.ID = ""
+	_, err := f.sts.ReconcileForEntity(f.ctx, spi.ReconcileRequest{
+		TenantID: f.tenant, EntityID: e, CurrentState: "S", Arm: []spi.ScheduledTask{s}})
+	require.ErrorIs(t, err, spi.ErrStoreRejected, "an Arm item without an id is rejected")
+	after := f.mustGet(existing.ID)
+	require.Equal(t, before.ArmToken, after.ArmToken, "a rejected request leaves the entity's existing task unchanged")
 }
 
 func testSTRemoveLifeCurrentLife(t *testing.T, h Harness) {
@@ -267,6 +320,8 @@ func testSTRemoveLifeJoinsTransaction(t *testing.T, h Harness) {
 	require.NoError(t, f.sts.RemoveLife(txCtx, f.tenant, task.ID, task.ArmToken))
 	_, found := f.get(txCtx, task.ID)
 	require.False(t, found, "the transaction sees its own removal (C2)")
+	require.NoError(t, f.sts.RemoveLife(txCtx, f.tenant, task.ID, task.ArmToken),
+		"RemoveLife does nothing once this transaction has already removed the task")
 	f.mustGet(task.ID) // not yet outside it
 	require.NoError(t, f.tm.Rollback(txCtx, txID))
 	require.Equal(t, task.ArmToken, f.mustGet(task.ID).ArmToken)
@@ -367,4 +422,42 @@ func testSTGetMissing(t *testing.T, h Harness) {
 	f := newSTFixture(t, h)
 	_, found := f.get(f.ctx, "st-missing-"+newID())
 	require.False(t, found)
+}
+
+// Get is tenant-filtered like every read: a transaction on ctx from another
+// tenant never refuses the call and never changes what it answers (the
+// ScheduledTaskStore doc comment, "Get carries no such refusal").
+func testSTGetOtherTenantTransaction(t *testing.T, h Harness) {
+	fa := newSTFixture(t, h)
+	fb := newSTFixture(t, h)
+	bTask := fb.arm(stFuture)
+
+	_, txCtxA := fa.begin()
+	aTask := fa.spec(fa.newEntity(), "S", "T", stFuture)
+	fa.reconcile(txCtxA, aTask.EntityID, "S", aTask) // staged in A's open transaction, uncommitted
+
+	// The staged task is visible in A's own transaction, under A's tenant —
+	// proves the setup below is not vacuous.
+	_, foundOwn := fa.get(txCtxA, aTask.ID)
+	require.True(t, foundOwn, "the transaction sees its own staged arm (C2)")
+
+	// B's committed task, read through A's transaction context but B's
+	// tenant: found, and Get does not refuse the cross-tenant transaction.
+	gotB, foundB, err := fa.sts.Get(txCtxA, fb.tenant, bTask.ID)
+	require.NoError(t, err)
+	require.True(t, foundB)
+	require.NotNil(t, gotB)
+	require.Equal(t, bTask.ID, gotB.ID)
+
+	// The same id, read under tenant A instead of B: not found. Get answers
+	// from the tenant argument, not from whose transaction ctx carries.
+	_, foundWrongTenant, err := fa.sts.Get(txCtxA, fa.tenant, bTask.ID)
+	require.NoError(t, err)
+	require.False(t, foundWrongTenant)
+
+	// A's own staged task, read under tenant B through A's transaction: not
+	// visible — tenant filtering applies to the transaction's own writes too.
+	_, foundStaged, err := fa.sts.Get(txCtxA, fb.tenant, aTask.ID)
+	require.NoError(t, err)
+	require.False(t, foundStaged)
 }

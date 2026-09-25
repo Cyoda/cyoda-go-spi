@@ -44,7 +44,7 @@ type ReconcileRequest struct {
 	// state, e.g. born-expired scheduled transitions computed by a
 	// ScheduleFunction whose result already lies in the past. They are not
 	// reported in ReconcileForEntity's result: the caller audits them
-	// separately.
+	// separately. A Cancel id with no task is a no-op.
 	//
 	// An id in both Arm and Cancel is a caller defect: Arm means the
 	// task's life continues, Cancel means it is removed, and a request

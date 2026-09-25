@@ -498,6 +498,10 @@ type WorkflowStore interface {
 // GetEvents and GetEventsByTransaction return that id in TimeUUID on every
 // event, and the same value on every read. A store that cannot assign an id
 // fails Record with an error rather than recording the event without one.
+//
+// The store takes the transaction from each call's ctx, not from the ctx it
+// was obtained with. Record joins the transaction on the call's ctx: an
+// event recorded in a transaction that rolls back is not kept.
 type StateMachineAuditStore interface {
 	Record(ctx context.Context, entityID string, event StateMachineEvent) error
 	GetEvents(ctx context.Context, entityID string) ([]StateMachineEvent, error)

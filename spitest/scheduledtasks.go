@@ -148,6 +148,7 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 
 	// Query and tenant isolation (S-8).
 	runSubtest(t, h, tracker, "Query/PagesInOrder", testSTQueryPagesInOrder)
+	runSubtest(t, h, tracker, "Query/FilterPagesAcrossNonMatchingRows", testSTQueryFilterPagesAcrossNonMatchingRows)
 	runSubtest(t, h, tracker, "Query/Filters", testSTQueryFilters)
 	runSubtest(t, h, tracker, "Query/TenantIsolation", testSTQueryTenantIsolation)
 	runSubtest(t, h, tracker, "TenantIsolation/EveryMethod", testSTTenantIsolationEveryMethod)

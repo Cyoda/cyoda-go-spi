@@ -29,29 +29,55 @@ func (f *stFixture) queryEntities(q spi.ScheduledTaskQuery) []string {
 	return out
 }
 
-// 200, no filter, several pages (spec §13, GET /scheduled-tasks).
+// armID arms one task on a new entity with an explicit id, so a test can
+// control the byte order of a (ScheduledTime, ID) tie directly instead of
+// leaving it to however the store generates ids.
+func (f *stFixture) armID(id string, scheduledTime int64) spi.ScheduledTask {
+	f.t.Helper()
+	e := f.newEntity()
+	s := f.spec(e, "S", "T", scheduledTime)
+	s.ID = id
+	f.reconcile(f.ctx, e, "S", s)
+	return f.mustGet(id)
+}
+
+// 200, no filter, several pages, IDs compared byte-wise (spec §13,
+// GET /scheduled-tasks).
 func testSTQueryPagesInOrder(t *testing.T, h Harness) {
 	f := newSTFixture(t, h)
+	tiedBase := uuid.NewString()
+
 	var want []spi.ScheduledTask
-	// Two tasks share a ScheduledTime, so the ID breaks the tie.
-	for _, at := range []int64{stFuture + 30, stFuture + 10, stFuture + 20, stFuture + 10, stFuture + 40} {
-		want = append(want, f.arm(at))
-	}
+	want = append(want, f.arm(stFuture+10))
+	// A tied pair at the same ScheduledTime, armed "-a" then "-B". Byte-wise,
+	// "B" (0x42) sorts before "a" (0x61): the correct order is the reverse
+	// of arm order, and also differs from en_US/ICU collation (which would
+	// put "-a" first case-insensitively) — a PostgreSQL store without
+	// COLLATE "C" fails this.
+	tiedA := f.armID(tiedBase+"-a", stFuture+20)
+	tiedB := f.armID(tiedBase+"-B", stFuture+20)
+	want = append(want, tiedA, tiedB)
+	want = append(want, f.arm(stFuture+30))
+	want = append(want, f.arm(stFuture+40))
 	slices.SortFunc(want, func(a, b spi.ScheduledTask) int {
 		if c := cmp.Compare(a.ScheduledTime, b.ScheduledTime); c != 0 {
 			return c
 		}
 		return strings.Compare(a.ID, b.ID)
 	})
+	// want is now [+10, +20-B, +20-a, +30, +40]: tiedB before tiedA.
+	require.Equal(t, tiedB.ID, want[1].ID, "test setup: the tie-break puts -B before -a")
+	require.Equal(t, tiedA.ID, want[2].ID, "test setup: the tie-break puts -B before -a")
 
 	var got []string
+	var pages [][]string
 	var after *spi.ScheduledTaskCursor
-	pages := 0
 	for {
 		page := f.query(spi.ScheduledTaskQuery{After: after, Limit: 2})
-		pages++
-		require.LessOrEqual(t, pages, 3, "5 tasks at 2 per page is 3 pages")
-		got = append(got, stIDs(page.Items)...)
+		require.LessOrEqual(t, len(pages)+1, 3, "5 tasks at 2 per page is 3 pages")
+		ids := stIDs(page.Items)
+		pages = append(pages, ids)
+		got = append(got, ids...)
 		if page.Next == nil {
 			break
 		}
@@ -61,14 +87,61 @@ func testSTQueryPagesInOrder(t *testing.T, h Harness) {
 		after = page.Next
 	}
 	require.Equal(t, stIDs(want), got, "(ScheduledTime, ID) order, IDs compared byte-wise")
+	// The page boundary falls inside the tie: page 1 ends on tiedB (the
+	// first of the tied pair in the correct order), page 2 starts on
+	// tiedA. A cursor that compares only ScheduledTime, ignoring the tied
+	// ID already returned, would drop tiedA or repeat tiedB here.
+	require.Equal(t, []string{want[0].ID, want[1].ID}, pages[0], "page 1 ends inside the tie")
+	require.Equal(t, []string{want[2].ID, want[3].ID}, pages[1], "page 2 starts inside the tie")
 
 	whole := f.query(spi.ScheduledTaskQuery{Limit: 5})
 	require.Len(t, whole.Items, 5)
 	require.Nil(t, whole.Next, "no further page when exactly Limit tasks remain")
 
 	for i, x := range whole.Items {
-		requireFreshLife(t, want[i], x) // Query returns whole records
+		require.Equal(t, want[i], x, "Query returns the whole record, in order")
 	}
+}
+
+// A filtered page walks past non-matching rows: LIMIT applies after the
+// filter, not before, and Next is built from the last matching row, not
+// the last raw row (spec §13, GET /scheduled-tasks).
+func testSTQueryFilterPagesAcrossNonMatchingRows(t *testing.T, h Harness) {
+	f := newSTFixture(t, h)
+	pageModel := f.model + "-paged"
+	var matched []spi.ScheduledTask
+	for i, at := range []int64{stFuture + 10, stFuture + 20, stFuture + 30, stFuture + 40, stFuture + 50} {
+		e := f.newEntity()
+		s := f.spec(e, "S", "T", at)
+		if i%2 == 1 {
+			s.ModelName = pageModel + "-filler" // a non-matching row between two matches
+		} else {
+			s.ModelName = pageModel
+		}
+		f.reconcile(f.ctx, e, "S", s)
+		if i%2 == 0 {
+			matched = append(matched, f.mustGet(s.ID))
+		}
+	}
+	require.Len(t, matched, 3, "test setup: three matching rows, two filler rows between them")
+
+	var got []string
+	var after *spi.ScheduledTaskCursor
+	pages := 0
+	for {
+		page := f.query(spi.ScheduledTaskQuery{ModelName: pageModel, After: after, Limit: 1})
+		pages++
+		require.LessOrEqual(t, pages, 3, "3 matching rows at 1 per page is 3 pages")
+		got = append(got, stIDs(page.Items)...)
+		if page.Next == nil {
+			break
+		}
+		require.Len(t, page.Items, 1)
+		last := page.Items[0]
+		require.Equal(t, spi.ScheduledTaskCursor{ScheduledTime: last.ScheduledTime, ID: last.ID}, *page.Next)
+		after = page.Next
+	}
+	require.Equal(t, stIDs(matched), got, "a filtered page skips the non-matching rows between matches")
 }
 
 // 200, each filter: status (one and several), model name, name and
@@ -114,6 +187,7 @@ func testSTQueryFilters(t *testing.T, h Harness) {
 	require.Equal(t, spi.FailureRunPanicked, got.FailureReason)
 	require.Equal(t, "E", got.LastError)
 	require.NotNil(t, got.FailedTime)
+	require.Equal(t, stNow, *got.FailedTime)
 }
 
 // Another tenant's tasks are never returned, under any filter (spec §13,
@@ -127,19 +201,31 @@ func testSTQueryTenantIsolation(t *testing.T, h Harness) {
 	bRunning := fb.claimTask(uuid.New(), fb.armDue().ID)
 
 	all := []spi.ScheduledTaskStatus{spi.ScheduledTaskWaiting, spi.ScheduledTaskRunning, spi.ScheduledTaskFailed}
-	for name, q := range map[string]spi.ScheduledTaskQuery{
-		"no filter":        {},
-		"every status":     {Statuses: all},
-		"shared model":     {ModelName: fa.model},
-		"shared model v1":  {ModelName: fa.model, ModelVersion: 1},
-		"B's entity":       {EntityID: b.EntityID},
-		"B's RUNNING task": {EntityID: bRunning.EntityID, Statuses: []spi.ScheduledTaskStatus{spi.ScheduledTaskRunning}},
+	for name, tc := range map[string]struct {
+		q    spi.ScheduledTaskQuery
+		want []string
+	}{
+		"no filter":        {spi.ScheduledTaskQuery{}, []string{a.EntityID}},
+		"every status":     {spi.ScheduledTaskQuery{Statuses: all}, []string{a.EntityID}},
+		"shared model":     {spi.ScheduledTaskQuery{ModelName: fa.model}, []string{a.EntityID}},
+		"shared model v1":  {spi.ScheduledTaskQuery{ModelName: fa.model, ModelVersion: 1}, []string{a.EntityID}},
+		"B's entity":       {spi.ScheduledTaskQuery{EntityID: b.EntityID}, nil},
+		"B's RUNNING task": {spi.ScheduledTaskQuery{EntityID: bRunning.EntityID, Statuses: []spi.ScheduledTaskStatus{spi.ScheduledTaskRunning}}, nil},
 	} {
-		for _, e := range fa.queryEntities(q) {
-			require.Equal(t, a.EntityID, e, "%s: tenant A sees only its own task", name)
-		}
+		// Exact-set, not a loop that passes vacuously on an empty result:
+		// tenant A sees exactly its own task and never B's, under every
+		// filter, including one that names B's own entity/status.
+		require.ElementsMatch(t, tc.want, fa.queryEntities(tc.q), name)
 	}
-	require.Empty(t, fa.queryEntities(spi.ScheduledTaskQuery{EntityID: b.EntityID}))
+
+	// Positive control: the same filters against tenant B DO find B's
+	// tasks, proving the empty results above are tenant scoping and not an
+	// unmatched filter.
+	require.ElementsMatch(t, []string{b.EntityID}, fb.queryEntities(spi.ScheduledTaskQuery{EntityID: b.EntityID}),
+		"B's entity, queried as B, is found")
+	require.ElementsMatch(t, []string{bRunning.EntityID},
+		fb.queryEntities(spi.ScheduledTaskQuery{EntityID: bRunning.EntityID, Statuses: []spi.ScheduledTaskStatus{spi.ScheduledTaskRunning}}),
+		"B's RUNNING task, queried as B, is found")
 }
 
 // Every tenant-facing method is scoped to its tenant argument.
@@ -173,7 +259,7 @@ func testSTTenantJoiningWriteOtherTenantRefused(t *testing.T, h Harness) {
 	fa := newSTFixture(t, h)
 	fa.model = fb.model
 	c := fb.claimTask(uuid.New(), fb.armDue().ID)
-	_, txCtx := fa.begin() // tenant A's transaction; rolled back first at cleanup
+	txID, txCtx := fa.begin() // tenant A's transaction; rolled back first at cleanup
 
 	_, err := fa.sts.ReconcileForEntity(txCtx, spi.ReconcileRequest{
 		TenantID: fb.tenant, EntityID: c.EntityID, CurrentState: "S",
@@ -186,5 +272,8 @@ func testSTTenantJoiningWriteOtherTenantRefused(t *testing.T, h Harness) {
 	require.ErrorIs(t, fa.sts.Fail(txCtx, stRef(c), spi.Failure{Reason: spi.FailureRunPanicked, Error: "E", AtMs: stNow}),
 		spi.ErrTxTenantMismatch, "Fail")
 
+	// A refused joining write must not even be staged: committing the
+	// transaction after every refusal must not surface any of them.
+	_ = fa.tm.Commit(txCtx, txID)
 	requireUnchangedClaim(t, c, fb.mustGet(c.ID))
 }

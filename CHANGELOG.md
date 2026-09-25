@@ -12,8 +12,79 @@ MAINTAINING.md.
 
 ## [Unreleased]
 
+### Breaking
+
+- **`ScheduledTaskStore` is replaced: every scheduled run has one owner.**
+  A task now has lives. `ReconcileForEntity` arms each task as a new life
+  with a store-drawn `ArmToken` and removes every other task of the entity.
+  A pnode claims due tasks with `ClaimDue` (cross-tenant, disjoint across
+  callers, at most one RUNNING task per entity, per-tenant limits, tenants
+  taking turns, lost-owner claims against `Heartbeat` liveness records) and
+  every write it makes as the owner is fenced by a `TaskRef` (`StampSegment`,
+  `MarkUnsafe`, `RecordAttempt`, `Fail`; `ErrStaleClaim` otherwise). A
+  joining write whose transaction belongs to another tenant is refused with
+  `ErrTxTenantMismatch`. `GiveBackIdle`, `RetireOwner`, `SweepOwners`,
+  `SweepMarks`, `RemoveLife`, `DeleteForEntities`, `DeleteForModel`, and a
+  tenant-scoped `Query` complete the interface; `Get` takes the tenant.
+  Clauses C1-C6 on the interface doc bind every backend: first-committer-wins
+  on task rows, joining reads that see staged writes, a mark and a claim that
+  serialise, own connections for heartbeats and claims, recognisable
+  refusals, and rows written by an open transaction that are neither
+  claimable nor markable. `ScheduledTask` gains `Status`, `ArmToken`,
+  `NextAttemptTime`, `Attempts`, `LostOwners`, `LastAttemptTime`,
+  `LastError`, `FailureReason`, `FailedTime`, `PartialCommit`, `Claim` and
+  `UnsafeMarked`, and loses the redispatch throttle and its counter.
+  `Upsert`, `ScanDue`, `MarkRedispatch`, `Delete` and the root-package
+  `RunScheduledTaskStoreConformance` are removed.
+
+  Migration: implement the interface as documented on
+  `persistence.go`'s `ScheduledTaskStore`, and run the new `spitest`
+  ScheduledTasks group through `StoreFactoryConformance` instead of
+  `RunScheduledTaskStoreConformance`. A backend that has no scheduled-task
+  store returns an error satisfying `errors.Is(err, errors.ErrUnsupported)`
+  from `StoreFactory.ScheduledTaskStore`; the group then skips. Wrap every
+  deterministic rejection (bad input, SQL data or constraint errors) so that
+  `errors.Is(err, spi.ErrStoreRejected)` holds, and no other error.
+
 ### Added
 
+- **`ErrMarkedByAnotherClaim`, `ErrTaskBusy`, `ErrStoreRejected`.**
+  `ErrMarkedByAnotherClaim` is `ScheduledTaskStore.MarkUnsafe`'s refusal when
+  an earlier claim of the same life already wrote the mark. `ErrTaskBusy` is
+  returned by both `MarkUnsafe` and `RecordAttempt` when an open transaction
+  has written the task row (C6); the write is not made and the caller
+  retries. `ErrStoreRejected` is the marker a store puts on a deterministic
+  rejection — bad input, or a constraint/data error from the database — so a
+  caller can tell "retrying cannot help" from an outage; it applies to every
+  method of every store in this SPI, including a transaction's `Commit`.
+  `ErrStaleClaim`'s comment now also names the scheduled-task fence
+  (`StampSegment`, `MarkUnsafe`, `RecordAttempt`, `Fail`) alongside
+  `AsyncSearchStore.Release`; its value and message are unchanged.
+- **`SMEventScheduledTransitionFailed` (`SCHEDULED_TRANSITION_FAIL`).** The
+  audit event recorded with a task that ends FAILED.
+- **`ScheduledTask.ClaimedFromLostOwner`.** Read-only, not serialised, set
+  only on a `ClaimDue` result that took the task from a stale or missing
+  owner.
+- **Shared scheduled-task helpers for backends.** `SelectClaims` picks one
+  `ClaimDue` call's tasks (one per entity, per-tenant limits, tenants taking
+  turns); `ValidateTaskErrorText` refuses an error text over
+  `MaxTaskErrorBytes` (1024) bytes, not valid UTF-8, or holding a NUL;
+  `ValidateFailureReason` refuses a `Failure.Reason` that is not one of the
+  five known reasons, including an empty one; `ValidateArm` refuses an Arm
+  item with no id and an id that names both an Arm and a Cancel. All four
+  report `errors.Is(err, ErrStoreRejected)`. A backend calls them, or meets
+  the same rules in its own query language; no backend keeps its own copy.
+- **`spitest` `Audit/RolledBackEventNotKept`.** An audit event recorded in a
+  transaction that rolls back is not kept, on every backend.
+- **`spitest` ScheduledTasks group.** Covers every `ScheduledTaskStore`
+  method, every refusal and clauses C1, C2, C3, C5 and C6, including a mark
+  that survives the rollback of the transaction on ctx, the refusal of every
+  fenced write of a re-armed life, one claim for two due siblings, a row
+  written by an open transaction that is not claimed, a lost-owner claim that
+  is flagged, and a joining write of another tenant that is refused.
+  `Harness.AdvanceClock`'s contract now covers a capped real-clock harness:
+  it moves the store clock forward by at least `min(d, cap)`, never less,
+  and the strict-dominance guarantee holds for the smaller amount.
 - **`ProcessorConfig.Idempotent` and `ScheduleFunction.RetryPolicy`.** Two
   optional workflow-configuration fields. `idempotent` (bool, default false,
   omitted when false) is the author's declaration that a processor may be run

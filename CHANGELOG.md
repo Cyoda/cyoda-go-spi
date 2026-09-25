@@ -220,11 +220,16 @@ MAINTAINING.md.
   workflows need no migration.
 
 - **`spitest.StoreFactoryConformance` failed a `-run`-filtered invocation
-  over `Harness.Skip` keys in groups the filter excluded.** The
-  unused-key check now reports a key only when some subtest that shares
-  its parent path actually ran and still didn't match it; a key whose
-  group never ran because of `-run` filtering is no longer reported. A
-  real typo or stale entry in a group that ran is still caught.
+  over `Harness.Skip` keys in groups the filter excluded.** The unused-key
+  check now reports a key only when it wasn't matched exactly AND its
+  top-level group (the key's first `/`-separated segment) had some subtest
+  run; a key whose group never ran because of `-run` filtering is no
+  longer reported. The check is deliberately group-grained rather than
+  matching a key's full parent path: a parent-path check would let a typo
+  in any segment before the last — the common shape for this suite's keys,
+  e.g. `Entity/CompareAndSave/Conflict` — pass unnoticed, since the
+  corrupted parent path then matches no ran subtest. A real typo or stale
+  entry anywhere in a group that ran is still caught.
 
 ## [0.8.4] - 2026-09-09
 

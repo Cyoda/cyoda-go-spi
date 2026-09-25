@@ -62,14 +62,28 @@ type Harness struct {
 	// prevent false failures while documenting the open issues.
 	//
 	// StoreFactoryConformance fails the test if a key in Skip goes unmatched
-	// while the subtree it names actually ran. A key's subtree is
-	// considered to have run when some executed subtest shares the key's
-	// parent path (the key's segments up to but not including the last
-	// one — the top-level group for a two-segment key). This catches
-	// typos and stale entries in a group that ran, without failing a
-	// `-run`-filtered invocation over keys whose group never got a chance
-	// to match. See the check in StoreFactoryConformance and
-	// skipTracker.unusedKeys for the exact rule.
+	// while its top-level group actually ran. A key's group is its first
+	// "/"-separated segment (e.g. "Transaction" for
+	// "Transaction/TxStateErrors/OpAfterRollback"); the group is
+	// considered to have run when some executed subtest starts with that
+	// same segment. Matching itself is by exact string equality against
+	// the running subtest's full path (skipIfRegistered's map lookup) —
+	// a key that only ever names a path prefix, never a real subtest,
+	// cannot be matched and is reported once its group runs.
+	//
+	// The check is group-grained, not deeper, because `-run` filtering in
+	// this codebase is applied per group (e.g.
+	// `go test -run 'TestConformance/AsyncSearch'`): a key's group not
+	// running means the run excluded it and it gets no chance to match, so
+	// it is not reported. A finer-grained check (matching a key's full
+	// parent path) was tried and rejected: a typo in any segment before
+	// the last — the common shape for this suite's multi-segment keys,
+	// e.g. "Entity/CompareAndSave/Conflict" — would make the corrupted
+	// parent path match nothing and silently swallow the typo, which
+	// defeats the check for the key shapes actually in use. Group-only
+	// still catches such typos, since the group segment is unaffected.
+	// See the check in StoreFactoryConformance and skipTracker.unusedKeys
+	// for the exact rule.
 	Skip map[string]string
 }
 
@@ -105,11 +119,12 @@ func (st *skipTracker) recordMatch(name string) {
 }
 
 // unusedKeys returns the Skip keys that went unmatched despite their
-// subtree having run. A key is reported when it was not matched AND some
-// recorded ran path shares the key's parent path — see the Skip field's
-// doc comment for the exact rule. Keys whose group (or a filtered-out
-// intermediate group) never ran are not reported, since the run gave them
-// no chance to match.
+// top-level group having run. A key is reported when it was not matched
+// (no subtest's full path equalled the key exactly) AND some recorded ran
+// path starts with the key's own top-level group — see the Skip field's
+// doc comment for the exact rule and its rationale. A key whose group
+// never ran (excluded by `-run` filtering) is not reported, since the run
+// gave it no chance to match.
 func (st *skipTracker) unusedKeys(skip map[string]string) []string {
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -118,34 +133,20 @@ func (st *skipTracker) unusedKeys(skip map[string]string) []string {
 		if st.matched[k] {
 			continue
 		}
-		if st.parentRanLocked(k) {
+		if st.groupRanLocked(k) {
 			out = append(out, k)
 		}
 	}
 	return out
 }
 
-// parentRanLocked reports whether some recorded ran path shares key's
-// parent path (key's segments minus the last one; for a single-segment
-// key, the key's own single segment). Callers must hold st.mu.
-func (st *skipTracker) parentRanLocked(key string) bool {
-	parent := strings.Split(key, "/")
-	if len(parent) > 1 {
-		parent = parent[:len(parent)-1]
-	}
+// groupRanLocked reports whether some recorded ran path belongs to key's
+// top-level group — its first "/"-separated segment. Callers must hold
+// st.mu.
+func (st *skipTracker) groupRanLocked(key string) bool {
+	group, _, _ := strings.Cut(key, "/")
 	for ran := range st.ran {
-		segs := strings.Split(ran, "/")
-		if len(segs) < len(parent) {
-			continue
-		}
-		match := true
-		for i, p := range parent {
-			if segs[i] != p {
-				match = false
-				break
-			}
-		}
-		if match {
+		if ranGroup, _, _ := strings.Cut(ran, "/"); ranGroup == group {
 			return true
 		}
 	}
@@ -198,12 +199,18 @@ func StoreFactoryConformance(t *testing.T, h Harness) {
 	tracker := newSkipTracker()
 
 	// Validate that every registered Skip key was actually hit, but only
-	// among keys whose subtree ran: a `-run`-filtered invocation (e.g.
-	// `go test -run 'TestConformance/AsyncSearch'`) never executes other
-	// groups' subtests, so their Skip keys get no chance to match and must
-	// not fail the run. unusedKeys reports a key only when some subtest
-	// that shares its parent path did run and still didn't match it —
-	// that's a real typo or stale entry, not filtering. See skipTracker.
+	// among keys whose top-level group ran: a `-run`-filtered invocation
+	// (e.g. `go test -run 'TestConformance/AsyncSearch'`) never executes
+	// other groups' subtests, so their Skip keys get no chance to match and
+	// must not fail the run. unusedKeys reports a key only when some
+	// subtest in the same group did run and nothing matched the key
+	// exactly — that's a real typo or stale entry, not filtering. The
+	// check deliberately stops at the group segment rather than the key's
+	// full parent path: a parent-path check would let a typo in any
+	// segment before the last (the shape most of this suite's keys have,
+	// e.g. "Entity/CompareAndSave/Conflict") pass unnoticed, because a
+	// corrupted parent path matches no ran subtest and looks exactly like
+	// "the group never ran". See skipTracker.
 	t.Cleanup(func() {
 		for _, key := range tracker.unusedKeys(h.Skip) {
 			t.Errorf("Harness.Skip key %q was never matched — possible typo or stale entry", key)

@@ -64,6 +64,31 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "DeleteForModel/NilKeepRemovesAll", testSTDeleteForModelNilKeep)
 	runSubtest(t, h, tracker, "DeleteForModel/TenantScoped", testSTDeleteForModelTenantScoped)
 	runSubtest(t, h, tracker, "Get/Missing", testSTGetMissing)
+
+	// Claims, liveness, give-back (S-5).
+	runSubtest(t, h, tracker, "Claim/DueWaiting", testSTClaimDueWaiting)
+	runSubtest(t, h, tracker, "Claim/NewTokenPerClaim", testSTClaimNewTokenPerClaim)
+	runSubtest(t, h, tracker, "Claim/FailedNeverClaimed", testSTClaimFailedNeverClaimed)
+	runSubtest(t, h, tracker, "Claim/RunningNeedsAllowLostOwner", testSTClaimRunningNeedsAllowLostOwner)
+	runSubtest(t, h, tracker, "Claim/FreshOwnerKept", testSTClaimFreshOwnerKept)
+	runSubtest(t, h, tracker, "Claim/StaleOwnerReclaimed", testSTClaimStaleOwnerReclaimed)
+	runSubtest(t, h, tracker, "Claim/LostOwnerFlagged", testSTClaimLostOwnerFlagged)
+	runSubtest(t, h, tracker, "Claim/LostOwnersCounted", testSTClaimLostOwnersCounted)
+	runSubtest(t, h, tracker, "Claim/OnePerEntity", testSTClaimOnePerEntity)
+	runSubtest(t, h, tracker, "Claim/LimitAndOrder", testSTClaimLimitAndOrder)
+	runSubtest(t, h, tracker, "Claim/InvalidLimits", testSTClaimInvalidLimits)
+	runSubtest(t, h, tracker, "Claim/TenantsTakeTurns", testSTClaimTenantsTakeTurns)
+	runSubtest(t, h, tracker, "Claim/PerTenantLimit", testSTClaimPerTenantLimit)
+	runSubtest(t, h, tracker, "Claim/ConcurrentDisjoint", testSTClaimConcurrentDisjoint)
+	runSubtest(t, h, tracker, "Claim/SiblingsConcurrent", testSTClaimSiblingsConcurrent)
+	runSubtest(t, h, tracker, "Claim/ContendedNoReclaim", testSTClaimContendedNoReclaim)
+	runSubtest(t, h, tracker, "Liveness/SweepRemovesUnreferenced", testSTLivenessSweepRemovesUnreferenced)
+	runSubtest(t, h, tracker, "Liveness/SweepKeepsReferenced", testSTLivenessSweepKeepsReferenced)
+	runSubtest(t, h, tracker, "Liveness/HeartbeatRecreatesSwept", testSTLivenessHeartbeatRecreatesSwept)
+	runSubtest(t, h, tracker, "Liveness/RetireOwner", testSTLivenessRetireOwner)
+	runSubtest(t, h, tracker, "GiveBack/LostReply", testSTGiveBackLostReply)
+	runSubtest(t, h, tracker, "GiveBack/KeepsLiveRuns", testSTGiveBackKeepsLiveRuns)
+	runSubtest(t, h, tracker, "GiveBack/NotCountedKeepsMark", testSTGiveBackNotCountedKeepsMark)
 }
 
 // stFixture is one subtest's tenant, store, transaction manager and model.

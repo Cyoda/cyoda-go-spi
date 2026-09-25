@@ -135,6 +135,7 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	// Clauses C1, C2, C3, C6 (S-7).
 	runSubtest(t, h, tracker, "C1/ReclaimFailsOldCommit", testSTC1ReclaimFailsOldCommit)
 	runSubtest(t, h, tracker, "C1/RearmFailsOldCommit", testSTC1RearmFailsOldCommit)
+	runSubtest(t, h, tracker, "C1/StaleRemoveLifeIsNoWrite", testSTC1StaleRemoveLifeIsNoWrite)
 	runSubtest(t, h, tracker, "C1/ClientWriteAfterClaim", testSTC1ClientWriteAfterClaim)
 	runSubtest(t, h, tracker, "C1/OwnClaimNoConflict", testSTC1OwnClaimNoConflict)
 	runSubtest(t, h, tracker, "C1/CommittedTxFailsOldCommit", testSTC1CommittedTxFailsOldCommit)

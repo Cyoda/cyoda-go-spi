@@ -14,11 +14,13 @@ import (
 
 // How these tests hold "an open transaction": f.begin() opens one through
 // the harness's TransactionManager, and every joining call made with its
-// txCtx is staged in it until Commit or Rollback. On PostgreSQL a
-// REPEATABLE READ snapshot is taken at the transaction's first statement,
-// not at Begin, so a test that needs the transaction to have begun before
-// another write first reads through it (f.get(txCtx, …)). The other write
-// is made with f.ctx or a background context, which carry no transaction.
+// txCtx is staged in it until Commit or Rollback. The transaction's
+// snapshot is its view as of Begin (C1). A backend may take it lazily —
+// PostgreSQL's REPEATABLE READ takes it at the first statement — so a test
+// that needs another write to land after the snapshot first reads through
+// the transaction (f.get(txCtx, …)), and a test that needs a write inside
+// the snapshot makes it before f.begin(). The other write is made with
+// f.ctx or a background context, which carry no transaction.
 
 // stTaskWrite is a joining write a run's transaction makes to its own task
 // row.
@@ -88,6 +90,57 @@ func testSTC1RearmFailsOldCommit(t *testing.T, h Harness) {
 			got := f.mustGet(a.ID)
 			requireFreshLife(t, s, got)
 			require.NotEqual(t, a.ArmToken, got.ArmToken)
+		})
+	}
+}
+
+// A RemoveLife naming a life the transaction's snapshot already shows
+// replaced is a no-op: no write, so no C1 conflict at commit, even though
+// the row changes again after Begin. This is RearmFailsOldCommit/RemoveLife
+// with the re-arm moved before Begin, and that is the only difference that
+// decides the outcome: the row still changes after Begin (the outside
+// change below stands in for the re-arm there), so a store that counted the
+// stale call as a write would refuse this commit exactly as it refuses that
+// one. The outside change is bounded by stWait, so a store that wrongly
+// locks the row for the no-op fails the case instead of hanging it.
+func testSTC1StaleRemoveLifeIsNoWrite(t *testing.T, h Harness) {
+	outside := []struct {
+		name string
+		// change commits a change to the row outside the transaction and
+		// verify checks that it stands after the transaction's commit.
+		change func(f *stFixture, id string) (verify func(t *testing.T, got spi.ScheduledTask))
+	}{
+		{"Claim", func(f *stFixture, id string) func(*testing.T, spi.ScheduledTask) {
+			c := f.claimTask(uuid.New(), id)
+			return func(t *testing.T, got spi.ScheduledTask) { requireUnchangedClaim(t, c, got) }
+		}},
+		{"Rearm", func(f *stFixture, id string) func(*testing.T, spi.ScheduledTask) {
+			before := f.mustGet(id)
+			s := f.spec(before.EntityID, "S", "T", stFuture)
+			ctx, cancel := context.WithTimeout(f.ctx, stWait)
+			defer cancel()
+			f.reconcile(ctx, before.EntityID, "S", s)
+			return func(t *testing.T, got spi.ScheduledTask) {
+				requireFreshLife(t, s, got)
+				require.NotEqual(t, before.ArmToken, got.ArmToken)
+			}
+		}},
+	}
+	for _, o := range outside {
+		t.Run(o.name, func(t *testing.T) {
+			f := newSTFixture(t, h)
+			a := f.claimTask(uuid.New(), f.armDue().ID)
+			f.reconcile(f.ctx, a.EntityID, "S", f.spec(a.EntityID, "S", "T", stDue)) // re-armed before Begin
+			require.NotEqual(t, a.ArmToken, f.mustGet(a.ID).ArmToken)
+
+			txID, txCtx := f.begin()
+			_, _ = f.get(txCtx, a.ID)
+			require.NoError(t, f.sts.RemoveLife(txCtx, f.tenant, a.ID, a.ArmToken),
+				"a RemoveLife naming a replaced life is a no-op")
+			verify := o.change(f, a.ID) // commits a change to the row after the transaction began
+
+			require.NoError(t, f.tm.Commit(txCtx, txID), "the no-op wrote nothing, so C1 has nothing to refuse")
+			verify(t, f.mustGet(a.ID))
 		})
 	}
 }
@@ -380,16 +433,19 @@ var stOpenWrites = []struct {
 			return f.sts.RemoveLife(ctx, f.tenant, task.ID, task.ArmToken)
 		}},
 	// StagedRemoveLifeStale is the non-vacuous counterpart of StagedRemoveLife
-	// directly above: same due task, same open transaction, but the life is
-	// replaced (outside the transaction, so it commits at once) before
-	// RemoveLife is staged against the now-stale token it had before the
-	// replace. StagedRemoveLife already proves the current-token call makes
-	// the row busy; this proves the stale-token call does not (the lead
-	// ruling in persistence.go's C6 clause and the RemoveLife doc).
+	// directly above: same due task, same open transaction, but prepare
+	// re-arms the task before Begin, so the transaction's snapshot already
+	// shows the new life, and RemoveLife is staged with the old token — a
+	// no-op (C1). StagedRemoveLife proves the current-token call makes the
+	// row busy; this proves the no-op does not (C6).
 	{"StagedRemoveLifeStale", false, true,
-		func(f *stFixture) spi.ScheduledTask { return f.armDue() },
+		func(f *stFixture) spi.ScheduledTask {
+			old := f.armDue()
+			f.reconcile(f.ctx, old.EntityID, "S", f.spec(old.EntityID, "S", "T", stDue))
+			require.NotEqual(f.t, old.ArmToken, f.mustGet(old.ID).ArmToken)
+			return old
+		},
 		func(ctx context.Context, f *stFixture, task spi.ScheduledTask) error {
-			f.reconcile(f.ctx, task.EntityID, "S", f.spec(task.EntityID, "S", "T", stDue))
 			return f.sts.RemoveLife(ctx, f.tenant, task.ID, task.ArmToken)
 		}},
 	{"StagedDeleteForModel", false, false,

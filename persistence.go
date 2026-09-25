@@ -86,8 +86,14 @@ type ReconcileRequest struct {
 //
 //	C1  First-committer-wins covers task rows. A transaction that writes a
 //	    task row fails if another transaction, joining or not, committed a
-//	    write to that row after this one began. RemoveLife counts as a
-//	    write to the row it names whether or not it removes it.
+//	    write to that row after this one began. RemoveLife is a write
+//	    exactly when the life it names is the one the transaction sees as
+//	    current: the life its snapshot shows, after its own staged writes
+//	    (C2). The snapshot is the transaction's view as of Begin, for
+//	    backends whose transactions see a snapshot taken at Begin; other
+//	    backends judge RemoveLife as if they did. A RemoveLife naming a
+//	    life the snapshot shows replaced or missing is a no-op: not a
+//	    write, and no conflict at commit, even if the row changes later.
 //	C2  A joining read sees the operations staged earlier in the same
 //	    transaction.
 //	C3  A mark and a claim serialise: when MarkUnsafe and ClaimDue race on
@@ -102,10 +108,8 @@ type ReconcileRequest struct {
 //	    that transaction ends. MarkUnsafe and RecordAttempt answer
 //	    ErrTaskBusy for it and make no write. GiveBackIdle leaves the row
 //	    as it is: the row is not counted, and it stays under its claim. A
-//	    RemoveLife that removes nothing — its armToken is not the row's
-//	    current life, or the row is missing — writes nothing, so it does
-//	    not make the row busy, even while its transaction stays open (C1
-//	    still counts the call as a write to the row it names).
+//	    no-op RemoveLife (C1) writes nothing, so it does not make the row
+//	    busy, even while its transaction stays open.
 //
 // Tenant scoping: every method that takes a tenant, or a TaskRef, reads
 // and writes that tenant's tasks only. ClaimDue, GiveBackIdle, Heartbeat,
@@ -138,12 +142,12 @@ type ScheduledTaskStore interface {
 	// named in req.Cancel. Joining.
 	ReconcileForEntity(ctx context.Context, req ReconcileRequest) (removed []ScheduledTask, err error)
 
-	// RemoveLife removes the task if its current life is armToken, in any
-	// status; otherwise, or when the task is missing, it does nothing and
-	// returns nil. It does nothing when this same transaction has already
-	// replaced or removed the task. A call that does nothing writes
-	// nothing: it does not make the row busy under C6, though C1 still
-	// counts it as a write to the row it names. Joining.
+	// RemoveLife removes the task, in any status, if armToken is the life
+	// the transaction sees as current (C1) — without a transaction, the
+	// committed life. Otherwise — the task is missing, or was replaced or
+	// removed before the snapshot or by this same transaction — it is a
+	// no-op and returns nil. A no-op writes nothing: it is not a C1 write
+	// and does not make the row busy (C6). Joining.
 	RemoveLife(ctx context.Context, tenant TenantID, id string, armToken uuid.UUID) error
 
 	// StampSegment writes the task row, fenced. With partial it sets

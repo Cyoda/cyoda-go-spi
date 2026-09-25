@@ -89,9 +89,10 @@ MAINTAINING.md.
   is flagged, a joining write of another tenant that is refused, `Query` and
   `ClaimDue` refusing a Limit below 1 (`ErrStoreRejected`) even when the
   tenant has matching rows, a `ReconcileForEntity` Cancel id that names
-  another entity's task being left untouched, and a `RemoveLife` that
-  removes nothing — a stale or missing life — not making the row busy under
-  C6, unlike every other joining write (it still counts as a write for C1).
+  another entity's task being left untouched, and a `RemoveLife` naming a
+  life the transaction's snapshot already shows replaced or missing: a
+  no-op that is no C1 write, does not make the row busy under C6, and
+  commits even when the row changes after Begin.
   `Harness.AdvanceClock`'s contract now covers a capped real-clock harness:
   it moves the store clock forward by at least `min(d, cap)`, never less,
   and the strict-dominance guarantee holds for the smaller amount.

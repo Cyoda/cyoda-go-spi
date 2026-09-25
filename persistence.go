@@ -206,7 +206,9 @@ type ScheduledTaskStore interface {
 
 	// GiveBackIdle returns every task RUNNING under owner whose claim
 	// token is not in keep to WAITING, claimable at once, and reports how
-	// many. Attempts, LostOwners and marks are unchanged. Never joining.
+	// many. NextAttemptTime is unchanged: the task stays claimable at once,
+	// it is not re-timed. Attempts, LostOwners and marks are unchanged.
+	// Never joining.
 	GiveBackIdle(ctx context.Context, owner uuid.UUID, keep []uuid.UUID) (int, error)
 
 	// MarkUnsafe writes the mark of ref's life, fenced. Idempotent for the

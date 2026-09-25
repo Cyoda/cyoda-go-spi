@@ -130,6 +130,20 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "ErrorText/RoundTrip", testSTErrorTextRoundTrip)
 	runSubtest(t, h, tracker, "ErrorText/StoreRejected", testSTErrorTextStoreRejected)
 	runSubtest(t, h, tracker, "SweepMarks/KeepsCurrentLife", testSTSweepMarksKeepsCurrentLife)
+
+	// Clauses C1, C2, C3, C6 (S-7).
+	runSubtest(t, h, tracker, "C1/ReclaimFailsOldCommit", testSTC1ReclaimFailsOldCommit)
+	runSubtest(t, h, tracker, "C1/RearmFailsOldCommit", testSTC1RearmFailsOldCommit)
+	runSubtest(t, h, tracker, "C1/ClientWriteAfterClaim", testSTC1ClientWriteAfterClaim)
+	runSubtest(t, h, tracker, "C1/OwnClaimNoConflict", testSTC1OwnClaimNoConflict)
+	runSubtest(t, h, tracker, "C2/StagedWritesVisible", testSTC2StagedWritesVisible)
+	runSubtest(t, h, tracker, "C2/CallbackRearmThenRemoveLife", testSTC2CallbackRearmThenRemoveLife)
+	runSubtest(t, h, tracker, "C2/CallbackRearmThenStamp", testSTC2CallbackRearmThenStamp)
+	runSubtest(t, h, tracker, "C2/CallbackDeleteThenRemoveLife", testSTC2CallbackDeleteThenRemoveLife)
+	runSubtest(t, h, tracker, "C3/MarkRacesClaim", testSTC3MarkRacesClaim)
+	runSubtest(t, h, tracker, "C6/OpenWriteNotClaimable", testSTC6OpenWriteNotClaimable)
+	runSubtest(t, h, tracker, "C6/MarkBusy", testSTC6MarkBusy)
+	runSubtest(t, h, tracker, "C6/NeverJoiningWriteBounded", testSTC6NeverJoiningWriteBounded)
 }
 
 // stFixture is one subtest's tenant, store, transaction manager and model.

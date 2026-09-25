@@ -144,6 +144,13 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "C6/OpenWriteNotClaimable", testSTC6OpenWriteNotClaimable)
 	runSubtest(t, h, tracker, "C6/MarkBusy", testSTC6MarkBusy)
 	runSubtest(t, h, tracker, "C6/NeverJoiningWriteBounded", testSTC6NeverJoiningWriteBounded)
+
+	// Query and tenant isolation (S-8).
+	runSubtest(t, h, tracker, "Query/PagesInOrder", testSTQueryPagesInOrder)
+	runSubtest(t, h, tracker, "Query/Filters", testSTQueryFilters)
+	runSubtest(t, h, tracker, "Query/TenantIsolation", testSTQueryTenantIsolation)
+	runSubtest(t, h, tracker, "TenantIsolation/EveryMethod", testSTTenantIsolationEveryMethod)
+	runSubtest(t, h, tracker, "Tenant/JoiningWriteOtherTenantRefused", testSTTenantJoiningWriteOtherTenantRefused)
 }
 
 // stFixture is one subtest's tenant, store, transaction manager and model.

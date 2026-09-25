@@ -106,7 +106,13 @@ MAINTAINING.md.
   `Claim/BusyRowTurnPassesOn`: a row an open transaction has made busy is
   skipped rather than waited on, its turn passing to the next due task,
   proven non-vacuous by claiming the same row once the transaction rolls
-  back.
+  back. Two more cases close the RemoveLife no-op edges a review raised:
+  `C1/StaleRemoveLifeAfterFurtherChange` (the outside change committing
+  again before, not after, the no-op call gives the identical verdict) and
+  `C1/RemoveLifeOfALifeArmedAfterBegin` (naming a life armed after Begin,
+  which the snapshot never saw at all, is a no-op too). The interface doc
+  now states this last point once: a life armed by another transaction
+  after Begin is not seen.
   `Harness.AdvanceClock`'s contract now covers a capped real-clock harness:
   it moves the store clock forward by at least `min(d, cap)`, never less,
   and the strict-dominance guarantee holds for the smaller amount.

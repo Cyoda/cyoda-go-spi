@@ -145,6 +145,98 @@ func testSTC1StaleRemoveLifeIsNoWrite(t *testing.T, h Harness) {
 	}
 }
 
+// StaleRemoveLifeIsNoWrite proves the no-op survives a racing write that
+// commits AFTER the no-op RemoveLife call runs. This proves the reverse
+// timing gives the identical verdict: the row is re-armed before Begin
+// (L1 -> L2, what the snapshot pins), then, inside the open transaction, an
+// outside write commits AGAIN (L2 -> L3, or a claim) BEFORE RemoveLife(L1)
+// executes — the same timing ReclaimFailsOldCommit/RearmFailsOldCommit rely
+// on to fail a real write's commit ("another transaction ... committed a
+// write to that row after this one began"). RemoveLife(L1) must still be a
+// no-op, because the snapshot never showed L1 as current in the first
+// place — C1's write-conflict window governs writes, not a call that was
+// never one — so the commit succeeds and the outside change stands. It
+// differs from StaleRemoveLifeIsNoWrite only in whether the outside change
+// lands before or after the no-op call.
+func testSTC1StaleRemoveLifeAfterFurtherChange(t *testing.T, h Harness) {
+	outside := []struct {
+		name string
+		// change commits a change to the row, inside the transaction's
+		// lifetime but outside it, before the no-op RemoveLife call runs.
+		// verify checks that it stands after the transaction's commit.
+		change func(f *stFixture, id string) (verify func(t *testing.T, got spi.ScheduledTask))
+	}{
+		{"Claim", func(f *stFixture, id string) func(*testing.T, spi.ScheduledTask) {
+			c := f.claimTask(uuid.New(), id)
+			return func(t *testing.T, got spi.ScheduledTask) { requireUnchangedClaim(t, c, got) }
+		}},
+		{"Rearm", func(f *stFixture, id string) func(*testing.T, spi.ScheduledTask) {
+			before := f.mustGet(id)
+			s := f.spec(before.EntityID, "S", "T", stFuture)
+			ctx, cancel := context.WithTimeout(f.ctx, stWait)
+			defer cancel()
+			f.reconcile(ctx, before.EntityID, "S", s)
+			return func(t *testing.T, got spi.ScheduledTask) {
+				requireFreshLife(t, s, got)
+				require.NotEqual(t, before.ArmToken, got.ArmToken)
+			}
+		}},
+	}
+	for _, o := range outside {
+		t.Run(o.name, func(t *testing.T) {
+			f := newSTFixture(t, h)
+			a := f.claimTask(uuid.New(), f.armDue().ID)
+			f.reconcile(f.ctx, a.EntityID, "S", f.spec(a.EntityID, "S", "T", stDue)) // re-armed before Begin: L1 -> L2
+			require.NotEqual(t, a.ArmToken, f.mustGet(a.ID).ArmToken)
+
+			txID, txCtx := f.begin()
+			_, _ = f.get(txCtx, a.ID) // pins the snapshot: it shows L2
+
+			verify := o.change(f, a.ID) // outside write commits after Begin, before the no-op call: L2 -> L3, or claimed
+
+			require.NoError(t, f.sts.RemoveLife(txCtx, f.tenant, a.ID, a.ArmToken),
+				"a RemoveLife naming a life the snapshot never showed as current is a no-op")
+			require.NoError(t, f.tm.Commit(txCtx, txID), "the no-op wrote nothing, so C1 has nothing to refuse")
+			verify(t, f.mustGet(a.ID))
+		})
+	}
+}
+
+// RearmFailsOldCommit names the life the snapshot DOES show as current (L1)
+// and re-arms it (to L2) after Begin: RemoveLife(L1) is then a real write,
+// and it conflicts because another transaction committed a write to the row
+// after this one began. This case flips both which life is named and when
+// the re-arm happens: the transaction's snapshot, pinned at Begin, shows
+// L1; outside the transaction L1 is re-armed to L2 and committed; RemoveLife
+// then names L2, a life this transaction's snapshot never saw at all — not
+// "replaced", just never present. A backend that judged staleness against
+// the row's current committed value instead of the transaction's own pinned
+// snapshot would find L2 sitting right there and wrongly perform a real
+// delete of a life its snapshot never established as current. RemoveLife(L2)
+// must be a no-op, and the commit must succeed with L2 still in place.
+func testSTC1RemoveLifeOfALifeArmedAfterBegin(t *testing.T, h Harness) {
+	f := newSTFixture(t, h)
+	a := f.claimTask(uuid.New(), f.armDue().ID) // life L1
+
+	txID, txCtx := f.begin()
+	_, _ = f.get(txCtx, a.ID) // pins the snapshot: it shows L1
+
+	s := f.spec(a.EntityID, "S", "T", stFuture)
+	ctx, cancel := context.WithTimeout(f.ctx, stWait)
+	f.reconcile(ctx, a.EntityID, "S", s) // outside the transaction, re-armed to L2 and committed
+	cancel()
+	l2 := f.mustGet(a.ID)
+	require.NotEqual(t, a.ArmToken, l2.ArmToken)
+
+	require.NoError(t, f.sts.RemoveLife(txCtx, f.tenant, a.ID, l2.ArmToken),
+		"a RemoveLife naming a life this transaction never saw is a no-op")
+	require.NoError(t, f.tm.Commit(txCtx, txID), "the no-op wrote nothing, so C1 has nothing to refuse")
+
+	got := f.mustGet(a.ID)
+	requireFreshLife(t, s, got)
+	require.Equal(t, l2.ArmToken, got.ArmToken, "L2 is still there")
+}
+
 // An update, a delete or an import racing a claim gets a C1 conflict; the
 // server's retry in a new transaction succeeds; the same on every backend
 // (spec §13 row "an update racing a claim → retryable 409; a delete or

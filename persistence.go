@@ -105,7 +105,10 @@ type ReconcileRequest struct {
 //	    backends whose transactions see a snapshot taken at Begin; other
 //	    backends judge RemoveLife as if they did. A RemoveLife naming a
 //	    life the snapshot shows replaced or missing is a no-op: not a
-//	    write, and no conflict at commit, even if the row changes later.
+//	    write, and no conflict at commit, even if the row changes later. A
+//	    life armed by another transaction after Begin is not seen: naming
+//	    it is a no-op too, the same as naming a life the snapshot shows
+//	    already replaced.
 //	C2  A joining read sees the operations staged earlier in the same
 //	    transaction.
 //	C3  A mark and a claim serialise: when MarkUnsafe and ClaimDue race on

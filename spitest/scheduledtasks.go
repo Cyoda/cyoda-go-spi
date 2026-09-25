@@ -138,6 +138,8 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "C1/ReclaimFailsOldCommit", testSTC1ReclaimFailsOldCommit)
 	runSubtest(t, h, tracker, "C1/RearmFailsOldCommit", testSTC1RearmFailsOldCommit)
 	runSubtest(t, h, tracker, "C1/StaleRemoveLifeIsNoWrite", testSTC1StaleRemoveLifeIsNoWrite)
+	runSubtest(t, h, tracker, "C1/StaleRemoveLifeAfterFurtherChange", testSTC1StaleRemoveLifeAfterFurtherChange)
+	runSubtest(t, h, tracker, "C1/RemoveLifeOfALifeArmedAfterBegin", testSTC1RemoveLifeOfALifeArmedAfterBegin)
 	runSubtest(t, h, tracker, "C1/ClientWriteAfterClaim", testSTC1ClientWriteAfterClaim)
 	runSubtest(t, h, tracker, "C1/OwnClaimNoConflict", testSTC1OwnClaimNoConflict)
 	runSubtest(t, h, tracker, "C1/CommittedTxFailsOldCommit", testSTC1CommittedTxFailsOldCommit)

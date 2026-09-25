@@ -499,12 +499,18 @@ func testSTLivenessHeartbeatRefreshes(t *testing.T, h Harness) {
 
 	h.AdvanceClock(60 * time.Millisecond)
 	h.AdvanceClock(60 * time.Millisecond)
+	h.AdvanceClock(60 * time.Millisecond)
 	require.NoError(t, f.sts.Heartbeat(context.Background(), a))
 
+	// StaleAfter leaves about 150ms of headroom between the refreshing
+	// heartbeat and this claim, so a real-clock harness (PostgreSQL, whose
+	// AdvanceClock sleeps for real) has margin against flaking: the record
+	// only needs to read as fresher than 150ms old, not fresher than the
+	// 180ms it would be without the refresh.
 	req := f.claimReq(uuid.New(), true)
-	req.StaleAfter = 100 * time.Millisecond
+	req.StaleAfter = 150 * time.Millisecond
 	require.Empty(t, f.claimWith(req),
-		"the refreshing heartbeat keeps the owner live; without it, 120ms would exceed a 100ms StaleAfter")
+		"the refreshing heartbeat keeps the owner live; without it, the 180ms elapsed would exceed a 150ms StaleAfter")
 	requireUnchangedClaim(t, c, f.mustGet(task.ID))
 }
 
@@ -550,38 +556,55 @@ func testSTClaimLostOwnerFlagPerTask(t *testing.T, h Harness) {
 	require.Equal(t, 1, r.LostOwners)
 }
 
-// Order: the tenant with the earliest candidate goes first, and each
-// tenant's turn recurs every round (persistence.go ClaimDue doc, C-S5).
+// Order: the tenant with the earliest candidate goes first, whatever its
+// tenant id or arm (insertion) order, and each tenant's turn recurs every
+// round (persistence.go ClaimDue doc, C-S5). Round-robin fairness itself —
+// each tenant gets at least one — is Claim/TenantsTakeTurns's job; this
+// case pins the exact split, which a naive "take the earliest N overall"
+// selection (ignoring tenant fairness) would get wrong.
 func testSTClaimOrderEarliestTenantFirst(t *testing.T, h Harness) {
 	fa := newSTFixture(t, h)
 	fb := newSTFixture(t, h)
-	// Tenant A's earliest candidate predates tenant B's.
-	fa.arm(stDue - 100)
-	fa.arm(stDue - 90)
-	fb.arm(stDue - 10)
-	fb.arm(stDue - 5)
+	small, big := fa, fb
+	if big.tenant < small.tenant {
+		small, big = big, small
+	}
+	// small has the smaller tenant id and is armed FIRST, with the single
+	// LATEST candidate. big has the larger tenant id, is armed LAST, and
+	// holds the 3 EARLIEST candidates. Neither insertion order nor
+	// tenant-id order coincides with the correct NextAttemptTime order, so
+	// only a store that actually orders by NextAttemptTime passes.
+	small.arm(stDue - 10)
+	big.arm(stDue - 100)
+	big.arm(stDue - 90)
+	big.arm(stDue - 80)
 
-	// (a) Limit 1: only the tenant with the earliest candidate gets the slot.
-	req := fa.claimReq(uuid.New(), false)
+	// (a) Limit 1: the earliest candidate's tenant (big) gets the only
+	// slot, despite its larger tenant id and later insertion.
+	req := big.claimReq(uuid.New(), false)
 	req.Limit = 1
-	res, err := fa.sts.ClaimDue(context.Background(), req)
+	res, err := big.sts.ClaimDue(context.Background(), req)
 	require.NoError(t, err)
-	got := fa.own(res)
-	require.Len(t, got, 1, "the earliest candidate's tenant gets the only slot")
-	require.Empty(t, fb.own(res))
+	got := big.own(res)
+	require.Len(t, got, 1, "the earliest candidate's tenant gets the only slot, whatever its tenant id or insertion order")
+	require.Empty(t, small.own(res))
 
-	// Give the claimed task back so the due set is unchanged for (b).
-	n, err := fa.sts.GiveBackIdle(context.Background(), got[0].Claim.Owner, nil)
+	// Give the claim back so the due set is unchanged for (b).
+	n, err := big.sts.GiveBackIdle(context.Background(), got[0].Claim.Owner, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
 
-	// (b) Limit 3: tenant A's turn comes first each round, so it gets 2
-	// (one per round) and tenant B gets 1.
+	// (b) Limit 3: big holds the 3 earliest candidates overall, so a naive
+	// "take the earliest N, ignoring tenant fairness" selection would give
+	// big all 3 and small none. Round-robin instead gives every tenant a
+	// turn each round: big goes first each round (2 turns fit in 3 slots),
+	// small goes once — 2 for big, 1 for small; this is the split
+	// round-robin gets right and plain time order gets wrong.
 	req.Limit = 3
-	res, err = fa.sts.ClaimDue(context.Background(), req)
+	res, err = big.sts.ClaimDue(context.Background(), req)
 	require.NoError(t, err)
-	require.Len(t, fa.own(res), 2, "tenant A's turn comes first each round")
-	require.Len(t, fb.own(res), 1)
+	require.Len(t, big.own(res), 2, "the earliest-candidate tenant's turn comes first each round")
+	require.Len(t, small.own(res), 1, "round-robin still gives the other tenant its turn, unlike a naive earliest-N-overall selection")
 }
 
 // Order: a NextAttemptTime tie across tenants is broken by tenant id
@@ -593,8 +616,22 @@ func testSTClaimOrderTenantTieBrokenByID(t *testing.T, h Harness) {
 	if hi.tenant < lo.tenant {
 		lo, hi = hi, lo
 	}
-	loTask := lo.arm(stDue)
-	hi.arm(stDue) // same NextAttemptTime as loTask
+
+	// hi (the larger tenant id) is armed FIRST and given the
+	// lexicographically SMALLER task id; lo (the smaller tenant id) is
+	// armed SECOND with the LARGER task id. Neither insertion order nor
+	// task-id order coincides with the correct tenant-id tie-break, so
+	// only a store that breaks the NextAttemptTime tie on tenant id (lo
+	// wins) passes.
+	hiEntity := hi.newEntity()
+	hiTask := hi.spec(hiEntity, "S", "T", stDue)
+	hiTask.ID = "aaa-" + hiTask.ID
+	hi.reconcile(hi.ctx, hiEntity, "S", hiTask)
+
+	loEntity := lo.newEntity()
+	loTask := lo.spec(loEntity, "S", "T", stDue)
+	loTask.ID = "zzz-" + loTask.ID
+	lo.reconcile(lo.ctx, loEntity, "S", loTask)
 
 	req := lo.claimReq(uuid.New(), false)
 	req.Limit = 1
@@ -602,22 +639,26 @@ func testSTClaimOrderTenantTieBrokenByID(t *testing.T, h Harness) {
 	require.NoError(t, err)
 	got := append(lo.own(res), hi.own(res)...)
 	require.Len(t, got, 1)
-	require.Equal(t, loTask.ID, got[0].ID, "a NextAttemptTime tie is broken by tenant id byte-wise, smaller wins")
+	require.Equal(t, loTask.ID, got[0].ID,
+		"a NextAttemptTime tie is broken by tenant id byte-wise (lo wins), never by insertion order or task id (hi's task id sorts lower)")
 }
 
 // Order: a NextAttemptTime tie within one tenant is broken by task ID
-// byte-wise, smaller first (persistence.go ClaimDue doc, C-S5).
+// byte-wise, smaller first (persistence.go ClaimDue doc, C-S5). newID() is
+// time-based and its string order is not predictable, so the two task ids
+// are constructed with a KNOWN order, and the larger one is reconciled
+// FIRST: only a store that actually orders by task id passes; one that
+// orders by insertion fails.
 func testSTClaimOrderEntityTieBrokenByID(t *testing.T, h Harness) {
 	f := newSTFixture(t, h)
-	e1, e2 := f.newEntity(), f.newEntity()
-	s1 := f.spec(e1, "S", "T", stDue)
-	s2 := f.spec(e2, "S", "T", stDue)
-	f.reconcile(f.ctx, e1, "S", s1)
-	f.reconcile(f.ctx, e2, "S", s2)
-	lo := s1.ID
-	if s2.ID < lo {
-		lo = s2.ID
-	}
+	eHi, eLo := f.newEntity(), f.newEntity()
+	hiTask := f.spec(eHi, "S", "T", stDue)
+	hiTask.ID = "zzz-" + hiTask.ID
+	f.reconcile(f.ctx, eHi, "S", hiTask) // larger id, reconciled first
+
+	loTask := f.spec(eLo, "S", "T", stDue)
+	loTask.ID = "aaa-" + loTask.ID
+	f.reconcile(f.ctx, eLo, "S", loTask) // smaller id, reconciled second
 
 	req := f.claimReq(uuid.New(), false)
 	req.Limit = 1
@@ -625,7 +666,8 @@ func testSTClaimOrderEntityTieBrokenByID(t *testing.T, h Harness) {
 	require.NoError(t, err)
 	got := f.own(res)
 	require.Len(t, got, 1)
-	require.Equal(t, lo, got[0].ID, "a NextAttemptTime tie among one tenant's tasks is broken by task id byte-wise, smaller wins")
+	require.Equal(t, loTask.ID, got[0].ID,
+		"a NextAttemptTime tie among one tenant's tasks is broken by task id byte-wise (smaller wins), never by insertion order")
 }
 
 // PerTenantLimit and TenantInProgress combine by subtraction: a partial
@@ -649,11 +691,14 @@ func testSTClaimPerTenantLimitPartialQuota(t *testing.T, h Harness) {
 
 // The OnePerEntity dedup key is (tenant, entity), not the bare entity id: two
 // tenants may each arm a task under the same EntityID string, and neither
-// blocks the other. A store that deduped on the bare entity id would claim
-// only one of the two in this single call.
+// blocks the other.
 func testSTClaimEntityKeyIsPerTenant(t *testing.T, h Harness) {
 	fa := newSTFixture(t, h)
 	fb := newSTFixture(t, h)
+
+	// First half: one call claims both tenants' due tasks under the same
+	// EntityID string. A store deduping candidates on the bare entity id
+	// would claim only one of the two in this single call.
 	entity := newID()
 	fa.entities = append(fa.entities, entity)
 	fb.entities = append(fb.entities, entity)
@@ -664,6 +709,21 @@ func testSTClaimEntityKeyIsPerTenant(t *testing.T, h Harness) {
 	require.NoError(t, err)
 	require.Len(t, fa.own(res), 1, "same entity id in another tenant does not collide")
 	require.Len(t, fb.own(res), 1, "one call claims both tenants' tasks of the same entity id")
+
+	// Second half: tenant A's task of one entity id is claimed (RUNNING) in
+	// one call; a SECOND, later call must still claim tenant B's due task
+	// of the SAME entity id. A candidate query keyed on the bare entity id
+	// (not (tenant, entity)) would wrongly treat B's task as blocked by
+	// A's RUNNING one — this is exactly where that bug would hide.
+	entity2 := newID()
+	fa.entities = append(fa.entities, entity2)
+	fb.entities = append(fb.entities, entity2)
+	fa.reconcile(fa.ctx, entity2, "S", fa.spec(entity2, "S", "T", stDue))
+	fa.claimTask(uuid.New(), fa.taskID(entity2, "S", "T")) // call 1: only A's task exists yet
+
+	fb.reconcile(fb.ctx, entity2, "S", fb.spec(entity2, "S", "T", stDue)) // B's task armed while A's is RUNNING
+	claimedB := fb.claimTask(uuid.New(), fb.taskID(entity2, "S", "T"))    // call 2: B's task, same entity id, still claimable
+	require.Equal(t, entity2, claimedB.EntityID)
 }
 
 // GiveBackIdle leaves Attempts and LostOwners exactly as they were: it is

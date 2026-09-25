@@ -40,11 +40,14 @@ type ReconcileRequest struct {
 	// from an Arm item, sets every life field (see ScheduledTask), and
 	// ignores the caller's values for all of them.
 	Arm []ScheduledTask
-	// Cancel lists task IDs to remove whether or not they are in Arm's
+	// Cancel lists task IDs to remove, whether or not they are in Arm's
 	// state, e.g. born-expired scheduled transitions computed by a
-	// ScheduleFunction whose result already lies in the past. They are not
-	// reported in ReconcileForEntity's result: the caller audits them
-	// separately. A Cancel id with no task is a no-op.
+	// ScheduleFunction whose result already lies in the past. Only a task
+	// of THIS entity (TenantID, EntityID above) is removed: an id in
+	// Cancel that belongs to another entity is left untouched, the same
+	// as an id with no task at all — both are a no-op. Removed Cancel
+	// tasks are not reported in ReconcileForEntity's result: the caller
+	// audits them separately.
 	//
 	// An id in both Arm and Cancel is a caller defect: Arm means the
 	// task's life continues, Cancel means it is removed, and a request
@@ -123,9 +126,10 @@ type ScheduledTaskStore interface {
 	//	PartialCommit   = false
 	//
 	// and no mark exists for the new life (UnsafeMarked reads false). It
-	// removes every other task of the entity and every task in req.Cancel.
-	// It returns the removed tasks, except those named in req.Cancel.
-	// Joining.
+	// removes every other task of the entity, and every task of the entity
+	// named in req.Cancel — an id in req.Cancel that belongs to another
+	// entity is not touched. It returns the removed tasks, except those
+	// named in req.Cancel. Joining.
 	ReconcileForEntity(ctx context.Context, req ReconcileRequest) (removed []ScheduledTask, err error)
 
 	// RemoveLife removes the task if its current life is armToken, in any
@@ -161,7 +165,9 @@ type ScheduledTaskStore interface {
 
 	// Query returns one page of tenant's tasks matching q, in
 	// (ScheduledTime, ID) order ascending, IDs compared byte-wise. Next is
-	// nil when no task follows the page. Never joining.
+	// nil when no task follows the page. q.Limit < 1 is a caller error:
+	// Query returns an error satisfying errors.Is(err, ErrStoreRejected)
+	// and no page. Never joining.
 	Query(ctx context.Context, tenant TenantID, q ScheduledTaskQuery) (ScheduledTaskPage, error)
 
 	// ClaimDue atomically claims up to req.Limit tasks across tenants and
@@ -190,7 +196,8 @@ type ScheduledTaskStore interface {
 	// missing owner. Losing a race to another caller is not an error:
 	// the call returns what it claimed, possibly nothing. req.Limit < 1
 	// or req.PerTenantLimit < 1 is a caller error: ClaimDue returns an
-	// error and claims nothing. Never joining.
+	// error satisfying errors.Is(err, ErrStoreRejected) and claims
+	// nothing. Never joining.
 	ClaimDue(ctx context.Context, req ClaimRequest) ([]ScheduledTask, error)
 
 	// Heartbeat creates or refreshes owner's liveness record, stamped with

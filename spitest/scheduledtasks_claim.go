@@ -190,7 +190,7 @@ func testSTClaimInvalidLimits(t *testing.T, h Harness) {
 		req := f.claimReq(uuid.New(), false)
 		mutate(&req)
 		_, err := f.sts.ClaimDue(context.Background(), req)
-		require.Error(t, err, name)
+		require.ErrorIs(t, err, spi.ErrStoreRejected, name)
 	}
 	require.Equal(t, spi.ScheduledTaskWaiting, f.mustGet(task.ID).Status, "a refused call claims nothing")
 }
@@ -537,9 +537,9 @@ func testSTClaimLostOwnerIgnoresNextAttemptTime(t *testing.T, h Harness) {
 // are set per task, not for the whole result.
 func testSTClaimLostOwnerFlagPerTask(t *testing.T, h Harness) {
 	f := newSTFixture(t, h)
-	waiting := f.armDue()
 	running := f.armDue()
 	f.claimTask(uuid.New(), running.ID) // this owner never heartbeats: missing counts as stale
+	waiting := f.armDue()               // armed only now: claimTask above requires exactly one due task
 
 	res := f.claimWith(f.claimReq(uuid.New(), true))
 	require.Len(t, res, 2, "one AllowLostOwner call claims both the due WAITING task and the lost RUNNING task")

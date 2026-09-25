@@ -81,7 +81,10 @@ MAINTAINING.md.
   that survives the rollback of the transaction on ctx, the refusal of every
   fenced write of a re-armed life, one claim for two due siblings, a row
   written by an open transaction that is not claimed, a lost-owner claim that
-  is flagged, and a joining write of another tenant that is refused.
+  is flagged, a joining write of another tenant that is refused, `Query` and
+  `ClaimDue` refusing a Limit below 1 (`ErrStoreRejected`) even when the
+  tenant has matching rows, and a `ReconcileForEntity` Cancel id that names
+  another entity's task being left untouched.
   `Harness.AdvanceClock`'s contract now covers a capped real-clock harness:
   it moves the store clock forward by at least `min(d, cap)`, never less,
   and the strict-dominance guarantee holds for the smaller amount.

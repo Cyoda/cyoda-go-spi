@@ -160,6 +160,23 @@ func testSTArmCancelNotReported(t *testing.T, h Harness) {
 	f.requireGone(y.ID)
 }
 
+func testSTArmCancelOtherEntityUntouched(t *testing.T, h Harness) {
+	f := newSTFixture(t, h)
+	x := f.newEntity()
+	y := f.newEntity()
+	xTask := f.spec(x, "S", "T", stFuture)
+	f.reconcile(f.ctx, x, "S", xTask)
+	before := f.mustGet(xTask.ID)
+
+	removed, err := f.sts.ReconcileForEntity(f.ctx, spi.ReconcileRequest{
+		TenantID: f.tenant, EntityID: y, CurrentState: "S", Cancel: []string{xTask.ID}})
+	require.NoError(t, err, "a Cancel id naming another entity's task is a no-op")
+	require.Empty(t, removed, "x's task belongs to x, not y: Cancel does not touch it, and y had nothing else to remove")
+	after := f.mustGet(xTask.ID)
+	require.Equal(t, before.ArmToken, after.ArmToken, "x's task is unchanged")
+	require.Equal(t, before.Status, after.Status)
+}
+
 func testSTArmJoinsTransaction(t *testing.T, h Harness) {
 	f := newSTFixture(t, h)
 	e := f.newEntity()

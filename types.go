@@ -538,7 +538,10 @@ type ScheduledTaskQuery struct {
 	ModelVersion int                   // 0 = any; only with ModelName
 	EntityID     string                // "" = any
 	After        *ScheduledTaskCursor  // exclusive
-	Limit        int                   // 1..1000, validated by the caller
+	// Limit caps the page size: 1..1000, validated by the caller. Limit < 1
+	// is a caller error; ScheduledTaskStore.Query returns an error
+	// satisfying errors.Is(err, ErrStoreRejected) and no page.
+	Limit int
 }
 
 // ScheduledTaskPage is one page of ScheduledTaskStore.Query.

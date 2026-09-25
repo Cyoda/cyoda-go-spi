@@ -195,6 +195,22 @@ func testSTQueryFilters(t *testing.T, h Harness) {
 	require.Equal(t, stNow, *got.FailedTime)
 }
 
+// Limit < 1 is a caller error even when the tenant has matching rows: a
+// store that pages instead of rejecting, or panics on a non-positive
+// limit, fails this.
+func testSTQueryInvalidLimit(t *testing.T, h Harness) {
+	f := newSTFixture(t, h)
+	f.arm(stFuture)
+
+	for name, limit := range map[string]int{"0": 0, "-1": -1} {
+		q := spi.ScheduledTaskQuery{Limit: limit}
+		page, err := f.sts.Query(f.ctx, f.tenant, q)
+		require.ErrorIs(t, err, spi.ErrStoreRejected, "Limit %s", name)
+		require.Empty(t, page.Items, "Limit %s: no page is returned", name)
+		require.Nil(t, page.Next, "Limit %s: no page is returned", name)
+	}
+}
+
 // Another tenant's tasks are never returned, under any filter (spec §13,
 // GET /scheduled-tasks).
 func testSTQueryTenantIsolation(t *testing.T, h Harness) {

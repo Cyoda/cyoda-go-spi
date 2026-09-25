@@ -136,6 +136,7 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "C1/RearmFailsOldCommit", testSTC1RearmFailsOldCommit)
 	runSubtest(t, h, tracker, "C1/ClientWriteAfterClaim", testSTC1ClientWriteAfterClaim)
 	runSubtest(t, h, tracker, "C1/OwnClaimNoConflict", testSTC1OwnClaimNoConflict)
+	runSubtest(t, h, tracker, "C1/CommittedTxFailsOldCommit", testSTC1CommittedTxFailsOldCommit)
 	runSubtest(t, h, tracker, "C2/StagedWritesVisible", testSTC2StagedWritesVisible)
 	runSubtest(t, h, tracker, "C2/CallbackRearmThenRemoveLife", testSTC2CallbackRearmThenRemoveLife)
 	runSubtest(t, h, tracker, "C2/CallbackRearmThenStamp", testSTC2CallbackRearmThenStamp)
@@ -274,10 +275,14 @@ func (f *stFixture) claimReq(owner uuid.UUID, lost bool) spi.ClaimRequest {
 }
 
 // claimWith runs ClaimDue with a tenant-less context and returns this
-// fixture's tasks only.
+// fixture's tasks only. Bounded by stWait, so a store that serialises
+// ClaimDue behind a row an open transaction holds fails the test cleanly
+// instead of hanging it.
 func (f *stFixture) claimWith(req spi.ClaimRequest) []spi.ScheduledTask {
 	f.t.Helper()
-	res, err := f.sts.ClaimDue(context.Background(), req)
+	ctx, cancel := context.WithTimeout(context.Background(), stWait)
+	defer cancel()
+	res, err := f.sts.ClaimDue(ctx, req)
 	require.NoError(f.t, err)
 	return f.own(res)
 }

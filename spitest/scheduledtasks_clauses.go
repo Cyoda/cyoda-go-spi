@@ -23,15 +23,23 @@ import (
 // stTaskWrite is a joining write a run's transaction makes to its own task
 // row.
 type stTaskWrite struct {
-	name  string
-	write func(ctx context.Context, f *stFixture, c spi.ScheduledTask) error
+	name string
+	// fenced says whether write checks ref's arm/claim tokens
+	// (StampSegment). A fenced write may refuse a stale row earlier, from
+	// the statement itself, with ErrStaleClaim — that is the fence (C5),
+	// not the C1 first-committer-wins check, and requireTxRefused's
+	// allowStale accepts it as an earlier-arriving equivalent. RemoveLife
+	// carries no fence and can only be refused by a C1 commit failure, so
+	// it must never be excused with ErrStaleClaim.
+	fenced bool
+	write  func(ctx context.Context, f *stFixture, c spi.ScheduledTask) error
 }
 
 var stRunWrites = []stTaskWrite{
-	{"StampSegment", func(ctx context.Context, f *stFixture, c spi.ScheduledTask) error {
+	{name: "StampSegment", fenced: true, write: func(ctx context.Context, f *stFixture, c spi.ScheduledTask) error {
 		return f.sts.StampSegment(ctx, stRef(c), false)
 	}},
-	{"RemoveLife", func(ctx context.Context, f *stFixture, c spi.ScheduledTask) error {
+	{name: "RemoveLife", fenced: false, write: func(ctx context.Context, f *stFixture, c spi.ScheduledTask) error {
 		return f.sts.RemoveLife(ctx, f.tenant, c.ID, c.ArmToken)
 	}},
 }
@@ -51,7 +59,7 @@ func testSTC1ReclaimFailsOldCommit(t *testing.T, h Harness) {
 			b := f.reclaim(uuid.New(), a.ID) // commits a change to the row after the run's transaction began
 
 			stmtErr := w.write(txCtx, f, a)
-			requireTxRefused(t, stmtErr, func() error { return f.tm.Commit(txCtx, txID) }, true)
+			requireTxRefused(t, stmtErr, func() error { return f.tm.Commit(txCtx, txID) }, w.fenced)
 			_ = f.tm.Rollback(txCtx, txID)
 
 			got := f.mustGet(a.ID) // the classifying re-read joins no transaction
@@ -74,7 +82,7 @@ func testSTC1RearmFailsOldCommit(t *testing.T, h Harness) {
 			f.reconcile(f.ctx, a.EntityID, "S", s) // a client write re-arms the task
 
 			stmtErr := w.write(txCtx, f, a)
-			requireTxRefused(t, stmtErr, func() error { return f.tm.Commit(txCtx, txID) }, true)
+			requireTxRefused(t, stmtErr, func() error { return f.tm.Commit(txCtx, txID) }, w.fenced)
 			_ = f.tm.Rollback(txCtx, txID)
 
 			got := f.mustGet(a.ID)
@@ -89,18 +97,32 @@ func testSTC1RearmFailsOldCommit(t *testing.T, h Harness) {
 // (spec §13 row "an update racing a claim → retryable 409; a delete or
 // import racing one claim succeeds after the server retry").
 func testSTC1ClientWriteAfterClaim(t *testing.T, h Harness) {
-	writes := []stTaskWrite{
-		{"ReconcileForEntity", func(ctx context.Context, f *stFixture, c spi.ScheduledTask) error {
-			_, err := f.sts.ReconcileForEntity(ctx, spi.ReconcileRequest{TenantID: f.tenant, EntityID: c.EntityID,
-				CurrentState: "S", Arm: []spi.ScheduledTask{f.spec(c.EntityID, "S", "T", stFuture)}})
-			return err
-		}},
-		{"DeleteForEntities", func(ctx context.Context, f *stFixture, c spi.ScheduledTask) error {
-			return f.sts.DeleteForEntities(ctx, f.tenant, []string{c.EntityID})
-		}},
-		{"DeleteForModel", func(ctx context.Context, f *stFixture, c spi.ScheduledTask) error {
-			return f.sts.DeleteForModel(ctx, f.tenant, f.model, 1, nil)
-		}},
+	writes := []struct {
+		name  string
+		write func(ctx context.Context, f *stFixture, c spi.ScheduledTask) error
+		// verify checks the retry's effect once it has committed: a fresh
+		// life for the re-arm, gone for the two deletes.
+		verify func(t *testing.T, f *stFixture, task spi.ScheduledTask)
+	}{
+		{"ReconcileForEntity",
+			func(ctx context.Context, f *stFixture, c spi.ScheduledTask) error {
+				_, err := f.sts.ReconcileForEntity(ctx, spi.ReconcileRequest{TenantID: f.tenant, EntityID: c.EntityID,
+					CurrentState: "S", Arm: []spi.ScheduledTask{f.spec(c.EntityID, "S", "T", stFuture)}})
+				return err
+			},
+			func(t *testing.T, f *stFixture, task spi.ScheduledTask) {
+				requireFreshLife(t, f.spec(task.EntityID, "S", "T", stFuture), f.mustGet(task.ID))
+			}},
+		{"DeleteForEntities",
+			func(ctx context.Context, f *stFixture, c spi.ScheduledTask) error {
+				return f.sts.DeleteForEntities(ctx, f.tenant, []string{c.EntityID})
+			},
+			func(t *testing.T, f *stFixture, task spi.ScheduledTask) { f.requireGone(task.ID) }},
+		{"DeleteForModel",
+			func(ctx context.Context, f *stFixture, c spi.ScheduledTask) error {
+				return f.sts.DeleteForModel(ctx, f.tenant, f.model, 1, nil)
+			},
+			func(t *testing.T, f *stFixture, task spi.ScheduledTask) { f.requireGone(task.ID) }},
 	}
 	for _, w := range writes {
 		t.Run(w.name, func(t *testing.T) {
@@ -119,6 +141,7 @@ func testSTC1ClientWriteAfterClaim(t *testing.T, h Harness) {
 			txID, txCtx = f.begin()
 			require.NoError(t, w.write(txCtx, f, task), "the retry in a new transaction is accepted")
 			require.NoError(t, f.tm.Commit(txCtx, txID))
+			w.verify(t, f, task)
 		})
 	}
 }
@@ -144,6 +167,50 @@ func testSTC1OwnClaimNoConflict(t *testing.T, h Harness) {
 	require.NoError(t, f.sts.RemoveLife(txCtx, f.tenant, task.ID, c.ArmToken))
 	require.NoError(t, f.tm.Commit(txCtx, txID))
 	f.requireGone(task.ID)
+}
+
+// C1 says "another transaction, joining or not" — a joining transaction
+// that fully committed counts too, not only a non-joining claim or a
+// plain, implicitly-committed call. Driving the second writer through its
+// own explicit Begin/Commit (rather than f.ctx or a non-joining call, as
+// the other C1 cases do) catches a memory or SQLite store whose Commit
+// path never adds its task keys to the committed log that another open
+// transaction's conflict check reads.
+func testSTC1CommittedTxFailsOldCommit(t *testing.T, h Harness) {
+	others := []struct {
+		name  string
+		write func(ctx context.Context, f *stFixture, a spi.ScheduledTask) error
+	}{
+		{"DeleteForModel", func(ctx context.Context, f *stFixture, a spi.ScheduledTask) error {
+			return f.sts.DeleteForModel(ctx, f.tenant, f.model, 1, nil)
+		}},
+		{"Rearm", func(ctx context.Context, f *stFixture, a spi.ScheduledTask) error {
+			_, err := f.sts.ReconcileForEntity(ctx, spi.ReconcileRequest{TenantID: f.tenant, EntityID: a.EntityID,
+				CurrentState: "S", Arm: []spi.ScheduledTask{f.spec(a.EntityID, "S", "T", stFuture)}})
+			return err
+		}},
+	}
+	for _, w := range stRunWrites {
+		t.Run(w.name, func(t *testing.T) {
+			for _, other := range others {
+				t.Run(other.name, func(t *testing.T) {
+					f := newSTFixture(t, h)
+					a := f.claimTask(uuid.New(), f.armDue().ID)
+
+					tx1ID, tx1Ctx := f.begin()
+					_, _ = f.get(tx1Ctx, a.ID)
+
+					tx2ID, tx2Ctx := f.begin()
+					require.NoError(t, other.write(tx2Ctx, f, a))
+					require.NoError(t, f.tm.Commit(tx2Ctx, tx2ID), "the second writer's own transaction fully commits")
+
+					stmtErr := w.write(tx1Ctx, f, a)
+					requireTxRefused(t, stmtErr, func() error { return f.tm.Commit(tx1Ctx, tx1ID) }, w.fenced)
+					_ = f.tm.Rollback(tx1Ctx, tx1ID)
+				})
+			}
+		})
+	}
 }
 
 // A joining read sees its own staged writes (C2).
@@ -213,13 +280,17 @@ func testSTC2CallbackRearmThenStamp(t *testing.T, h Harness) {
 	requireUnchangedClaim(t, c, f.mustGet(c.ID))
 }
 
-// A joined callback deletes the fired entity: the run commits (spec §13).
+// A joined callback deletes the fired entity: the run's own RemoveLife
+// sees the transaction's own staged delete (C2) and the run commits
+// (spec §13).
 func testSTC2CallbackDeleteThenRemoveLife(t *testing.T, h Harness) {
 	f := newSTFixture(t, h)
 	c := f.claimTask(uuid.New(), f.armDue().ID)
 
 	txID, txCtx := f.begin()
 	require.NoError(t, f.sts.DeleteForEntities(txCtx, f.tenant, []string{c.EntityID}))
+	_, found := f.get(txCtx, c.ID)
+	require.False(t, found, "the transaction sees its own staged delete (C2)")
 	require.NoError(t, f.sts.RemoveLife(txCtx, f.tenant, c.ID, c.ArmToken))
 	require.NoError(t, f.tm.Commit(txCtx, txID))
 	f.requireGone(c.ID)
@@ -290,10 +361,25 @@ var stOpenWrites = []struct {
 		func(ctx context.Context, f *stFixture, task spi.ScheduledTask) error {
 			return f.sts.DeleteForEntities(ctx, f.tenant, []string{task.EntityID})
 		}},
+	{"StagedRemoveLife", false,
+		func(f *stFixture) spi.ScheduledTask { return f.armDue() },
+		func(ctx context.Context, f *stFixture, task spi.ScheduledTask) error {
+			return f.sts.RemoveLife(ctx, f.tenant, task.ID, task.ArmToken)
+		}},
+	{"StagedDeleteForModel", false,
+		func(f *stFixture) spi.ScheduledTask { return f.armDue() },
+		func(ctx context.Context, f *stFixture, task spi.ScheduledTask) error {
+			return f.sts.DeleteForModel(ctx, f.tenant, f.model, 1, nil)
+		}},
 	{"StagedStamp", true,
 		func(f *stFixture) spi.ScheduledTask { return f.claimTask(uuid.New(), f.armDue().ID) },
 		func(ctx context.Context, f *stFixture, task spi.ScheduledTask) error {
 			return f.sts.StampSegment(ctx, stRef(task), false)
+		}},
+	{"StagedFail", true,
+		func(f *stFixture) spi.ScheduledTask { return f.claimTask(uuid.New(), f.armDue().ID) },
+		func(ctx context.Context, f *stFixture, task spi.ScheduledTask) error {
+			return f.sts.Fail(ctx, stRef(task), spi.Failure{Reason: spi.FailureRunPanicked, Error: "E", AtMs: stNow})
 		}},
 }
 
@@ -326,16 +412,19 @@ func testSTC6OpenWriteNotClaimable(t *testing.T, h Harness) {
 // entity, then an unsafe processor → ErrTaskBusy, safe failure, no hang").
 func testSTC6MarkBusy(t *testing.T, h Harness) {
 	writes := []stTaskWrite{
-		{"Stamp", func(ctx context.Context, f *stFixture, c spi.ScheduledTask) error {
+		{name: "Stamp", write: func(ctx context.Context, f *stFixture, c spi.ScheduledTask) error {
 			return f.sts.StampSegment(ctx, stRef(c), false)
 		}},
-		{"CallbackRearm", func(ctx context.Context, f *stFixture, c spi.ScheduledTask) error {
+		{name: "CallbackRearm", write: func(ctx context.Context, f *stFixture, c spi.ScheduledTask) error {
 			_, err := f.sts.ReconcileForEntity(ctx, spi.ReconcileRequest{TenantID: f.tenant, EntityID: c.EntityID,
 				CurrentState: "S", Arm: []spi.ScheduledTask{f.spec(c.EntityID, "S", "T", stFuture)}})
 			return err
 		}},
-		{"CallbackDelete", func(ctx context.Context, f *stFixture, c spi.ScheduledTask) error {
+		{name: "CallbackDelete", write: func(ctx context.Context, f *stFixture, c spi.ScheduledTask) error {
 			return f.sts.DeleteForEntities(ctx, f.tenant, []string{c.EntityID})
+		}},
+		{name: "DeleteForModel", write: func(ctx context.Context, f *stFixture, c spi.ScheduledTask) error {
+			return f.sts.DeleteForModel(ctx, f.tenant, f.model, 1, nil)
 		}},
 	}
 	for _, w := range writes {
@@ -348,7 +437,7 @@ func testSTC6MarkBusy(t *testing.T, h Harness) {
 			ctx, cancel := context.WithTimeout(context.Background(), stWait)
 			defer cancel()
 			require.ErrorIs(t, f.sts.MarkUnsafe(ctx, stRef(c)), spi.ErrTaskBusy)
-			require.NoError(t, ctx.Err(), "MarkUnsafe answers at once; it does not wait for the transaction")
+			require.NoError(t, ctx.Err(), "MarkUnsafe answers at once; it does not wait for the transaction to end")
 
 			require.NoError(t, f.tm.Rollback(txCtx, txID))
 			require.False(t, f.mustGet(c.ID).UnsafeMarked, "a busy answer writes no mark")
@@ -376,8 +465,8 @@ func testSTC6NeverJoiningWriteBounded(t *testing.T, h Harness) {
 	require.NoError(t, ctx.Err(), "the store must give up on its own, not run into the caller's deadline")
 
 	if recErr != nil {
-		require.NotErrorIs(t, recErr, spi.ErrStaleClaim, "a lock wait is not a refusal")
-		require.NotErrorIs(t, recErr, spi.ErrStoreRejected, "a lock wait is retryable")
+		require.ErrorIs(t, recErr, spi.ErrTaskBusy,
+			"a never-joining write that gives up on a row an open transaction wrote answers ErrTaskBusy (C6, C-S5)")
 		requireUnchangedClaim(t, c, f.mustGet(c.ID))
 		require.NoError(t, f.tm.Rollback(txCtx, txID))
 		require.NoError(t, f.sts.RecordAttempt(context.Background(), stRef(c), attempt), "the retry is accepted")

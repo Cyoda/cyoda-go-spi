@@ -99,7 +99,9 @@ type ReconcileRequest struct {
 //	    statement or the commit raises it. A fenced refusal is
 //	    ErrStaleClaim.
 //	C6  A task row written by an open transaction is not claimable until
-//	    that transaction ends, and MarkUnsafe answers ErrTaskBusy for it.
+//	    that transaction ends. MarkUnsafe and RecordAttempt answer
+//	    ErrTaskBusy for it and make no write. GiveBackIdle leaves the row
+//	    as it is: the row is not counted, and it stays under its claim.
 //
 // Tenant scoping: every method that takes a tenant, or a TaskRef, reads
 // and writes that tenant's tasks only. ClaimDue, GiveBackIdle, Heartbeat,
@@ -150,7 +152,8 @@ type ScheduledTaskStore interface {
 	// DeleteForModel removes every task, in any status, of the model
 	// version, except those for which keep(sourceState, transition) is
 	// true. A nil keep keeps none: every task of that model version is
-	// removed. Joining.
+	// removed. keep must not call the store: a store may run it while
+	// holding its own locks, and a reentrant call can deadlock. Joining.
 	DeleteForModel(ctx context.Context, tenant TenantID, modelName string, modelVersion int,
 		keep func(sourceState, transition string) bool) error
 
@@ -214,7 +217,11 @@ type ScheduledTaskStore interface {
 	// GiveBackIdle returns every task RUNNING under owner whose claim
 	// token is not in keep to WAITING and reports how many;
 	// NextAttemptTime is unchanged, so the task is claimable at once.
-	// Attempts, LostOwners and marks are unchanged. Never joining.
+	// Attempts, LostOwners and marks are unchanged. A row an open
+	// transaction has written is left as it is (C6): it is not counted,
+	// and it stays RUNNING under its claim. GiveBackIdle never waits for
+	// that transaction to end — it skips the row, the same as ClaimDue.
+	// Never joining.
 	GiveBackIdle(ctx context.Context, owner uuid.UUID, keep []uuid.UUID) (int, error)
 
 	// MarkUnsafe writes the mark of ref's life, fenced. Idempotent for the

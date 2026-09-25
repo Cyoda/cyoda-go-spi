@@ -479,11 +479,13 @@ type ClaimRequest struct {
 	// store clock, before its RUNNING tasks count as lost.
 	StaleAfter time.Duration
 	// Limit caps the number of tasks claimed by this call. Must be >= 1;
-	// ClaimDue returns an error otherwise.
+	// ClaimDue returns an error satisfying errors.Is(err, ErrStoreRejected)
+	// otherwise.
 	Limit int
 	// PerTenantLimit caps, per tenant, TenantInProgress[tenant] plus the
 	// tasks of that tenant claimed by this call. Must be >= 1; ClaimDue
-	// returns an error otherwise.
+	// returns an error satisfying errors.Is(err, ErrStoreRejected)
+	// otherwise.
 	PerTenantLimit int
 	// TenantInProgress is the caller's count of runs in progress per
 	// tenant. A missing tenant counts as 0.

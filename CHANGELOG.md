@@ -53,8 +53,12 @@ MAINTAINING.md.
   an earlier claim of the same life already wrote the mark. `ErrTaskBusy` is
   returned by both `MarkUnsafe` and `RecordAttempt` when an open transaction
   has written the task row (C6); the write is not made and the caller
-  retries. `ErrStoreRejected` is the marker a store puts on a deterministic
-  rejection — bad input, or a constraint/data error from the database — so a
+  retries — a store may never instead apply the write and let the open
+  transaction's commit fail. `GiveBackIdle` meets the same row by skipping
+  it: uncounted, unchanged, still RUNNING under its claim, and without
+  waiting for the transaction to end. `ErrStoreRejected` is the marker a
+  store puts on a deterministic rejection — bad input, or a constraint/data
+  error from the database — so a
   caller can tell "retrying cannot help" from an outage; it applies to every
   method of every store in this SPI, including a transaction's `Commit`.
   `ErrStaleClaim`'s comment now also names the scheduled-task fence
@@ -80,7 +84,8 @@ MAINTAINING.md.
   method, every refusal and clauses C1, C2, C3, C5 and C6, including a mark
   that survives the rollback of the transaction on ctx, the refusal of every
   fenced write of a re-armed life, one claim for two due siblings, a row
-  written by an open transaction that is not claimed, a lost-owner claim that
+  written by an open transaction that is not claimed, a `GiveBackIdle` that
+  skips such a row rather than waiting for it, a lost-owner claim that
   is flagged, a joining write of another tenant that is refused, `Query` and
   `ClaimDue` refusing a Limit below 1 (`ErrStoreRejected`) even when the
   tenant has matching rows, and a `ReconcileForEntity` Cancel id that names

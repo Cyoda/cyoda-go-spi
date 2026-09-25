@@ -146,6 +146,7 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "C6/OpenWriteNotClaimable", testSTC6OpenWriteNotClaimable)
 	runSubtest(t, h, tracker, "C6/MarkBusy", testSTC6MarkBusy)
 	runSubtest(t, h, tracker, "C6/NeverJoiningWriteBounded", testSTC6NeverJoiningWriteBounded)
+	runSubtest(t, h, tracker, "C6/GiveBackSkipsBusy", testSTC6GiveBackSkipsBusy)
 
 	// Query and tenant isolation (S-8).
 	runSubtest(t, h, tracker, "Query/PagesInOrder", testSTQueryPagesInOrder)

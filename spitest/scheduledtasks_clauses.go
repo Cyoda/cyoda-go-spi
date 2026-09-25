@@ -458,11 +458,12 @@ func testSTC6MarkBusy(t *testing.T, h Harness) {
 }
 
 // A never-joining write that meets a row an open transaction wrote gives up
-// on its own, or is applied and makes that transaction's commit fail; a
-// retry after the lock is gone is accepted (spec §13 rows "a
-// scheduler-pool statement blocked on a task-row lock gives up after
-// lock_timeout" and "a bookkeeping write retried through an outage;
-// accepted after recovery").
+// on its own and answers ErrTaskBusy, making no write; a retry after the
+// transaction ends is accepted (spec §13 rows "a scheduler-pool statement
+// blocked on a task-row lock gives up after lock_timeout" and "a
+// bookkeeping write retried through an outage; accepted after recovery").
+// A store may not instead apply the write and let the open transaction's
+// commit fail (C6).
 func testSTC6NeverJoiningWriteBounded(t *testing.T, h Harness) {
 	f := newSTFixture(t, h)
 	c := f.claimTask(uuid.New(), f.armDue().ID)
@@ -474,20 +475,47 @@ func testSTC6NeverJoiningWriteBounded(t *testing.T, h Harness) {
 	defer cancel()
 	recErr := f.sts.RecordAttempt(ctx, stRef(c), attempt)
 	require.NoError(t, ctx.Err(), "the store must give up on its own, not run into the caller's deadline")
+	require.ErrorIs(t, recErr, spi.ErrTaskBusy,
+		"a never-joining write on a row an open transaction wrote always answers ErrTaskBusy and makes no write (C6)")
+	requireUnchangedClaim(t, c, f.mustGet(c.ID))
 
-	if recErr != nil {
-		require.ErrorIs(t, recErr, spi.ErrTaskBusy,
-			"a never-joining write that gives up on a row an open transaction wrote answers ErrTaskBusy (C6)")
-		requireUnchangedClaim(t, c, f.mustGet(c.ID))
-		require.NoError(t, f.tm.Rollback(txCtx, txID))
-		require.NoError(t, f.sts.RecordAttempt(context.Background(), stRef(c), attempt), "the retry is accepted")
-	} else {
-		require.ErrorIs(t, f.tm.Commit(txCtx, txID), spi.ErrConflict,
-			"the write was applied at once, so the open transaction's commit fails (C1)")
-	}
+	require.NoError(t, f.tm.Rollback(txCtx, txID))
+	require.NoError(t, f.sts.RecordAttempt(context.Background(), stRef(c), attempt), "the retry is accepted")
 	got := f.mustGet(c.ID)
 	require.Equal(t, spi.ScheduledTaskWaiting, got.Status)
 	require.Equal(t, 1, got.Attempts)
+}
+
+// GiveBackIdle skips a row an open transaction wrote (C6): the give-back
+// neither counts it nor changes it, and the task stays RUNNING under its
+// claim until the transaction ends. It first proves GiveBackIdle would
+// give the task back if not for the open write — the after-rollback half —
+// so the busy half is not vacuous. GiveBackIdle never waits for the
+// transaction; the call is bounded by stWait so a store that blocks on the
+// row's lock fails the test cleanly instead of hanging it.
+func testSTC6GiveBackSkipsBusy(t *testing.T, h Harness) {
+	f := newSTFixture(t, h)
+	owner := uuid.New()
+	c := f.claimTask(owner, f.armDue().ID)
+
+	txID, txCtx := f.begin()
+	require.NoError(t, f.sts.StampSegment(txCtx, stRef(c), false))
+
+	ctx, cancel := context.WithTimeout(context.Background(), stWait)
+	defer cancel()
+	n, err := f.sts.GiveBackIdle(ctx, owner, nil)
+	require.NoError(t, err)
+	require.NoError(t, ctx.Err(), "GiveBackIdle skips a busy row; it does not wait for the transaction to end")
+	require.Equal(t, 0, n, "a row an open transaction wrote is not counted")
+	got := f.mustGet(c.ID)
+	require.Equal(t, spi.ScheduledTaskRunning, got.Status, "the row stays under its claim")
+	requireUnchangedClaim(t, c, got)
+
+	require.NoError(t, f.tm.Rollback(txCtx, txID))
+	n, err = f.sts.GiveBackIdle(context.Background(), owner, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, n, "claimable and countable once the transaction ended")
+	require.Equal(t, spi.ScheduledTaskWaiting, f.mustGet(c.ID).Status)
 }
 
 // requireTxRefused asserts that a transaction's task-row write was refused

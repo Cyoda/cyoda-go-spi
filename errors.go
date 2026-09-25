@@ -152,10 +152,44 @@ var ErrPartialUniqueKey = errors.New("invalid composite unique key value")
 // idempotent-nil exception.
 var ErrAlreadyTerminal = errors.New("job is in a terminal status")
 
-// ErrStaleClaim is returned by AsyncSearchStore write methods
-// (UpdateJobStatus, SaveResults, Heartbeat) when the caller's epoch does not
-// match the job's current Epoch — another claimant has since taken over.
+// ErrStaleClaim is returned by a fenced write whose caller no longer holds
+// the claim it names:
+//
+//   - AsyncSearchStore (UpdateJobStatus, SaveResults, Heartbeat, Release):
+//     the caller's epoch does not match the job's current Epoch — another
+//     claimant has since taken over.
+//   - ScheduledTaskStore (StampSegment, MarkUnsafe, RecordAttempt, Fail):
+//     the task is missing, or its current arm token or claim token is not
+//     the one in the TaskRef — the task was re-armed, reclaimed, recorded,
+//     failed or removed since the caller claimed it.
 var ErrStaleClaim = errors.New("write fenced: stale claim epoch")
+
+// ErrMarkedByAnotherClaim is returned by ScheduledTaskStore.MarkUnsafe when
+// an earlier claim of the same life already wrote a mark. Work that is not
+// safe to repeat may already have been handed off for this life, so the
+// caller must not dispatch it again.
+var ErrMarkedByAnotherClaim = errors.New("scheduled task: marked by another claim of this life")
+
+// ErrTaskBusy is returned by ScheduledTaskStore.MarkUnsafe when an open
+// transaction has written the task row. The mark is not written. The
+// caller treats it as a failure that is safe to retry.
+var ErrTaskBusy = errors.New("scheduled task: row is being written by an open transaction")
+
+// ErrStoreRejected marks a deterministic rejection by the store: the same
+// write with the same input fails the same way every time, so retrying it
+// cannot succeed. Examples: input that breaks a documented precondition
+// (such as Attempt.Error over 1024 bytes, not valid UTF-8, or holding a
+// NUL), or a constraint or data error from the database (on PostgreSQL,
+// SQLSTATE classes 22, 23 and 42). A store wraps such an error so that
+//
+//	errors.Is(err, spi.ErrStoreRejected)
+//
+// holds. This applies to every method of every store in this SPI, and to a
+// transaction's Commit — including StateMachineAuditStore.Record, which the
+// engine calls in the same transaction as ScheduledTaskStore.Fail. Every
+// other failure — outage, timeout, lock wait, pool exhaustion, conflict —
+// must NOT carry it: callers retry those.
+var ErrStoreRejected = errors.New("store rejected the write deterministically")
 
 // ErrUnknownOperator is returned by ConditionToFilter for a condition leaf
 // whose operatorType is not in the closed set OperatorNames reports.

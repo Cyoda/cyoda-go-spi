@@ -153,3 +153,44 @@ func TestTxSentinelsHaveNonEmptyMessages(t *testing.T) {
 		}
 	}
 }
+
+// TestScheduledTaskSentinels pins the three scheduled-task sentinels: each
+// is distinct from the others and from the sentinels a caller classifies
+// alongside them, each survives wrapping, and the messages are the
+// documented ones.
+func TestScheduledTaskSentinels(t *testing.T) {
+	all := map[string]error{
+		"ErrStaleClaim":           ErrStaleClaim,
+		"ErrMarkedByAnotherClaim": ErrMarkedByAnotherClaim,
+		"ErrTaskBusy":             ErrTaskBusy,
+		"ErrStoreRejected":        ErrStoreRejected,
+		"ErrConflict":             ErrConflict,
+		"ErrNotFound":             ErrNotFound,
+	}
+	for an, a := range all {
+		for bn, b := range all {
+			if an != bn && errors.Is(a, b) {
+				t.Errorf("%s must not match %s", an, bn)
+			}
+		}
+	}
+	for name, err := range map[string]error{
+		"ErrMarkedByAnotherClaim": ErrMarkedByAnotherClaim,
+		"ErrTaskBusy":             ErrTaskBusy,
+		"ErrStoreRejected":        ErrStoreRejected,
+	} {
+		if !errors.Is(fmt.Errorf("store layer: %w", err), err) {
+			t.Errorf("wrapped %s must match via errors.Is", name)
+		}
+	}
+	want := map[error]string{
+		ErrMarkedByAnotherClaim: "scheduled task: marked by another claim of this life",
+		ErrTaskBusy:             "scheduled task: row is being written by an open transaction",
+		ErrStoreRejected:        "store rejected the write deterministically",
+	}
+	for err, msg := range want {
+		if err.Error() != msg {
+			t.Errorf("message = %q, want %q", err.Error(), msg)
+		}
+	}
+}

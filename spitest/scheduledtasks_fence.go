@@ -114,6 +114,8 @@ func testSTFenceGiveBackRefused(t *testing.T, h Harness) {
 	got := f.mustGet(task.ID)
 	require.Equal(t, spi.ScheduledTaskWaiting, got.Status)
 	require.Nil(t, got.Claim)
+	require.Zero(t, got.Attempts)
+	require.Empty(t, got.LastError)
 }
 
 // RemoveLife then a re-arm of the same id starts a new life; the
@@ -467,6 +469,9 @@ func testSTFailUnknownReasonRejected(t *testing.T, h Harness) {
 		err := f.sts.Fail(f.ctx, stRef(c), spi.Failure{Reason: reason, Error: "E", AtMs: stNow})
 		require.ErrorIs(t, err, spi.ErrStoreRejected, "Fail with a %s reason", why)
 		requireUnchangedClaim(t, c, f.mustGet(task.ID))
+		got := f.mustGet(task.ID)
+		require.Empty(t, got.LastError, "a refused Fail changes nothing, %s reason", why)
+		require.Nil(t, got.FailedTime, "a refused Fail changes nothing, %s reason", why)
 	}
 }
 
@@ -519,7 +524,11 @@ func testSTErrorTextStoreRejected(t *testing.T, h Harness) {
 		"invalid UTF-8":        "a\xffb",
 		"more than 1024 bytes": stMaxErrorText() + "x",
 	} {
-		err := f.sts.RecordAttempt(f.ctx, stRef(c), spi.Attempt{Error: text, AtMs: stNow, NextAttemptTime: stNow})
+		// NextAttemptTime: stFuture, distinct from the task's current
+		// NextAttemptTime (stNow, from the accepted attempt above): a store
+		// that applied a refused write despite the error would otherwise
+		// leave NextAttemptTime looking unchanged by coincidence.
+		err := f.sts.RecordAttempt(f.ctx, stRef(c), spi.Attempt{Error: text, AtMs: stNow, NextAttemptTime: stFuture})
 		require.ErrorIs(t, err, spi.ErrStoreRejected, "RecordAttempt with %s", why)
 		err = f.sts.Fail(f.ctx, stRef(c), spi.Failure{Reason: spi.FailureRunPanicked, Error: text, AtMs: stNow})
 		require.ErrorIs(t, err, spi.ErrStoreRejected, "Fail with %s", why)
@@ -527,6 +536,7 @@ func testSTErrorTextStoreRejected(t *testing.T, h Harness) {
 
 		got := f.mustGet(task.ID)
 		require.Equal(t, before.LastError, got.LastError, "a refused write changes nothing, %s", why)
+		require.NotNil(t, got.LastAttemptTime, "a refused write changes nothing, %s", why)
 		require.Equal(t, *before.LastAttemptTime, *got.LastAttemptTime, "a refused write changes nothing, %s", why)
 		require.Equal(t, before.Attempts, got.Attempts, "a refused write changes nothing, %s", why)
 		require.Equal(t, before.NextAttemptTime, got.NextAttemptTime, "a refused write changes nothing, %s", why)

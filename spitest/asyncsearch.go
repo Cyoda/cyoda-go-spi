@@ -34,6 +34,7 @@ func runAsyncSearchSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Claim/TerminalNeverClaimed", testASClaimTerminalNeverClaimed)
 	runSubtest(t, h, tracker, "ClearResults/Idempotent", testASClearResultsIdempotent)
 	runSubtest(t, h, tracker, "ClearResults/Fenced", testASClearResultsFenced)
+	runSubtest(t, h, tracker, "ClearResults/TenantScoped", testASClearResultsTenantScoped)
 	runSubtest(t, h, tracker, "SaveResults/ChunkSeqContinuity", testASSaveResultsChunkSeqContinuity)
 	runSubtest(t, h, tracker, "SaveResults/CtxCancelObserved", testASSaveResultsCtxCancelObserved)
 	runSubtest(t, h, tracker, "SaveResults/EmptySequenceFences", testASSaveResultsEmptySequenceFences)
@@ -566,6 +567,36 @@ func testASClearResultsFenced(t *testing.T, h Harness) {
 	_, total, err = as.GetResultIDs(ctx, done, 0, 10)
 	require.NoError(t, err)
 	require.Equal(t, len(ids), total, "a terminal job's results must survive a refused clear")
+}
+
+// testASClearResultsTenantScoped: a job id is unique only within its tenant.
+// A clear in one tenant deletes that tenant's rows and never the rows another
+// tenant saved under the same job id.
+func testASClearResultsTenantScoped(t *testing.T, h Harness) {
+	tA, tB := h.NewTenant(), h.NewTenant()
+	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
+	asA, err := h.Factory.AsyncSearchStore(ctxA)
+	require.NoError(t, err)
+	asB, err := h.Factory.AsyncSearchStore(ctxB)
+	require.NoError(t, err)
+
+	id := newID()
+	require.NoError(t, asA.CreateJob(ctxA, newSearchJob(h, tA, id)))
+	require.NoError(t, asB.CreateJob(ctxB, newSearchJob(h, tB, id)))
+	idsA := []string{newID(), newID()}
+	idsB := []string{newID(), newID(), newID()}
+	require.NoError(t, asA.SaveResults(ctxA, id, 1, slices.Values(idsA)))
+	require.NoError(t, asB.SaveResults(ctxB, id, 1, slices.Values(idsB)))
+
+	require.NoError(t, asA.ClearResults(ctxA, id, 1), "clear in tenant A at its current epoch")
+
+	_, total, err := asA.GetResultIDs(ctxA, id, 0, 10)
+	require.NoError(t, err)
+	require.Equal(t, 0, total, "tenant A's clear deletes tenant A's rows")
+	page, total, err := asB.GetResultIDs(ctxB, id, 0, 10)
+	require.NoError(t, err)
+	require.Equal(t, len(idsB), total, "tenant A's clear must not delete tenant B's rows under the same job id")
+	require.Equal(t, idsB, page)
 }
 
 // testASSaveResultsChunkSeqContinuity guards against a store that keys

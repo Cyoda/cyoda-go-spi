@@ -64,6 +64,14 @@ func runTransactionSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "DeleteThenCompareAndSave", testTxDeleteThenCompareAndSave)
 	runSubtest(t, h, tracker, "DeleteThenSave", testTxDeleteThenSave)
 	runSubtest(t, h, tracker, "SaveThenCompareAndSave", testTxSaveThenCompareAndSave)
+	runSubtest(t, h, tracker, "LostRace/WriteLost", testTxLostRaceWriteLost)
+	runSubtest(t, h, tracker, "LostRace/NoRival", testTxLostRaceNoRival)
+	runSubtest(t, h, tracker, "LostRace/RivalBeforeBegin", testTxLostRaceRivalBeforeBegin)
+	runSubtest(t, h, tracker, "LostRace/RivalNotCommitted", testTxLostRaceRivalNotCommitted)
+	runSubtest(t, h, tracker, "LostRace/AfterSavepointRollback", testTxLostRaceAfterSavepointRollback)
+	runSubtest(t, h, tracker, "LostRace/DiscardedRivalAfter", testTxLostRaceDiscardedRivalAfter)
+	runSubtest(t, h, tracker, "LostRace/TenantMismatch", testTxLostRaceTenantMismatch)
+	runSubtest(t, h, tracker, "LostRace/NotFound", testTxLostRaceNotFound)
 }
 
 // Writes in an open tx are invisible to outside readers; after Commit

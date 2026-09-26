@@ -46,6 +46,32 @@ MAINTAINING.md.
   deterministic rejection (bad input, SQL data or constraint errors) so that
   `errors.Is(err, spi.ErrStoreRejected)` holds, and no other error.
 
+- **`TransactionManager.LostRace`: a required method that says whether a
+  transaction has already lost a write race.** `LostRace(ctx, txID)` answers
+  true when a transaction that committed after this one's snapshot wrote an
+  entity or task row this transaction writes, so `Commit` will refuse it with
+  `ErrConflict`. The answer is the same whether the backend refused the
+  losing write (and aborted the transaction) or accepted it and detects the
+  conflict at commit, and it survives a rollback to a savepoint. A rival that
+  has not committed, or that committed before the snapshot, has not won. It
+  changes nothing, issues no statement an aborted transaction would refuse,
+  and refuses another tenant's transaction with `ErrTxTenantMismatch` and an
+  unknown one with `ErrTxNotFound`. A caller that sees a failure inside a
+  transaction uses it to tell that the conflict is what happened.
+
+  Migration: implement it. A backend that aborts the transaction on a
+  conflict answers from the conflict it recorded; one that detects conflicts
+  at commit runs the write half of its commit-time check — the entity write
+  set and the staged task-row writes against the commits after the snapshot —
+  plus any lost write a savepoint rollback discarded. The `spitest`
+  Transaction group gains `LostRace/WriteLost`, `LostRace/NoRival`,
+  `LostRace/RivalBeforeBegin`, `LostRace/RivalNotCommitted`,
+  `LostRace/AfterSavepointRollback`, `LostRace/DiscardedRivalAfter`,
+  `LostRace/TenantMismatch` and `LostRace/NotFound`. The ScheduledTasks group
+  gains `LostRace/WriteLost`, `LostRace/NoRival`, `LostRace/ClaimBeforeBegin`,
+  `LostRace/AfterSavepointRollback` and `LostRace/DiscardedRivalAfter`, each
+  for a `DeleteForEntities` and a `ReconcileForEntity` write.
+
 - **`AsyncSearchStore.ClearResults` takes the claim epoch and is fenced.**
   `ClearResults(ctx, jobID, epoch)` refuses a clear whose epoch is not the
   job's current `Epoch` with `ErrStaleClaim`, a terminal job with

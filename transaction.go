@@ -117,4 +117,40 @@ type TransactionManager interface {
 	// Tenant isolation: implementations must reject mismatched-tenant
 	// callers — manager-side savepoint state is tenant-scoped.
 	ReleaseSavepoint(ctx context.Context, txID string, savepointID string) error
+
+	// LostRace reports whether the transaction has already lost a write
+	// race: another transaction committed, after this transaction's
+	// snapshot, an entity or task row that this transaction writes. Such a
+	// transaction cannot commit — Commit refuses it with ErrConflict — so a
+	// caller that sees a failure inside it can tell, before it commits, that
+	// the conflict is what happened and the failure is only a consequence.
+	// The answer is the same on every backend:
+	//
+	//   - A backend whose engine aborts the transaction at the losing write
+	//     (see ErrTxAborted) answers true once that conflict is recorded,
+	//     including after a rollback to a savepoint taken before it.
+	//   - A backend that detects conflicts at commit answers true when a
+	//     transaction that committed after this one's snapshot wrote an
+	//     entity or task row this transaction writes, or when a savepoint
+	//     rollback discarded a write that had already lost (see
+	//     RollbackToSavepoint). It is the check Commit makes on writes.
+	//
+	// It answers false when no rival has committed: a rival that has written
+	// but not committed has not won, and whichever transaction commits first
+	// wins. A rival that committed before this transaction's snapshot raced
+	// nothing. A change committed to an entity the transaction only read is
+	// not a lost write race; Commit's read-set validation refuses it. Once
+	// true, the answer stays true until the transaction ends.
+	//
+	// LostRace changes nothing, and it must answer on a transaction whose
+	// engine has aborted it, without error: it issues no statement that the
+	// aborted transaction would refuse.
+	//
+	// Locking discipline: read-only on tx state. Implementations that read
+	// tx.WriteSet acquire tx.OpMu.RLock, as Savepoint does.
+	//
+	// Tenant isolation: implementations must reject calls whose UserContext
+	// tenant does not match tx.TenantID with ErrTxTenantMismatch, and answer
+	// ErrTxNotFound for a transaction they do not know.
+	LostRace(ctx context.Context, txID string) (bool, error)
 }

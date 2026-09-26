@@ -242,9 +242,13 @@ type ScheduledTaskStore interface {
 	// SelectClaims over that set chooses what it would over every
 	// candidate. A claim's work may grow with the number of tenants with a
 	// due task (or, with AllowLostOwner, a RUNNING task), with n, with
-	// the RUNNING tasks, and with the busy rows (C6) and the tasks of
+	// the RUNNING tasks, with the busy rows (C6) and the tasks of
 	// entities with a RUNNING task that it passes over on the way to a
-	// tenant's n-th candidate — never with the tenant's other due tasks.
+	// tenant's n-th candidate, and with the later due tasks of the
+	// entities already met on that way — at most n times the tasks one
+	// entity can hold, which ReconcileForEntity bounds by the scheduled
+	// transitions of the entity's current state — never with the number
+	// of the tenant's due entities.
 	//
 	// A returned task carries UnsafeMarked as of the claim (C3), and
 	// ClaimedFromLostOwner when this claim took it from a stale or

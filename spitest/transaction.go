@@ -68,6 +68,7 @@ func runTransactionSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "LostRace/NoRival", testTxLostRaceNoRival)
 	runSubtest(t, h, tracker, "LostRace/RivalBeforeBegin", testTxLostRaceRivalBeforeBegin)
 	runSubtest(t, h, tracker, "LostRace/RivalNotCommitted", testTxLostRaceRivalNotCommitted)
+	runSubtest(t, h, tracker, "LostRace/ReadOnlyRival", testTxLostRaceReadOnlyRival)
 	runSubtest(t, h, tracker, "LostRace/AfterSavepointRollback", testTxLostRaceAfterSavepointRollback)
 	runSubtest(t, h, tracker, "LostRace/DiscardedRivalAfter", testTxLostRaceDiscardedRivalAfter)
 	runSubtest(t, h, tracker, "LostRace/TenantMismatch", testTxLostRaceTenantMismatch)

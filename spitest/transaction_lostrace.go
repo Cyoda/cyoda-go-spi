@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -16,6 +17,11 @@ import (
 // the write or accepted it. The fixture is savepointRace's: the transaction
 // has written another entity first, so every backend has taken its snapshot
 // before any rival commits.
+
+// rivalWriteWait bounds how long RivalNotCommitted waits for the rival's write
+// to return before it asks LostRace. A write that buffers returns at once; one
+// held on a row lock never returns in time.
+const rivalWriteWait = time.Second
 
 // requireLostRace asserts LostRace answers want without error.
 func requireLostRace(t *testing.T, tm spi.TransactionManager, txCtx spiCtx, txID string, want bool, msg string) {
@@ -75,9 +81,15 @@ func testTxLostRaceRivalBeforeBegin(t *testing.T, h Harness) {
 
 // Control: a rival that writes the target after the transaction wrote it,
 // and has not committed, has not won. LostRace answers false; the
-// transaction commits first and the rival loses. A backend that locks the
-// row at the write holds the rival's write until the transaction ends, so
-// the rival writes from its own goroutine.
+// transaction commits first and the rival loses.
+//
+// The rival writes from its own goroutine and signals when its write has
+// returned; LostRace is asked after that signal. A backend that locks the row
+// at the write (PostgreSQL) holds the rival's write until the transaction
+// ends, so the signal never comes before the transaction commits: after
+// rivalWriteWait the case asks anyway. On such a backend the case cannot tell
+// whether the rival's statement had reached the server when LostRace was
+// asked — only that it had not committed, which is what the answer depends on.
 func testTxLostRaceRivalNotCommitted(t *testing.T, h Harness) {
 	r := newSavepointRace(t, h)
 	r.writeTarget(t)
@@ -93,19 +105,38 @@ func testTxLostRaceRivalNotCommitted(t *testing.T, h Harness) {
 	release := func() { once.Do(func() { close(proceed) }) }
 	t.Cleanup(release) // a failed assertion must not strand the rival
 	rivalDone := make(chan error, 1)
+	rivalWrote := make(chan struct{})
 	go func() {
-		if _, err := rivalES.Save(rivalCtx, rivalWrite); err != nil {
+		_, err := rivalES.Save(rivalCtx, rivalWrite)
+		close(rivalWrote)
+		if err != nil {
 			rivalDone <- err
 			return
 		}
 		<-proceed
 		rivalDone <- r.tm.Commit(rivalCtx, rivalID)
 	}()
+	select {
+	case <-rivalWrote: // the rival's uncommitted write is in place
+	case <-time.After(rivalWriteWait): // held on the row lock; see the doc
+	}
 
 	requireLostRace(t, r.tm, r.txCtx, r.txID, false, "a rival that has not committed has not won")
 	r.requireCommitApplies(t, h, `{"v":"mine"}`)
 	release()
 	require.ErrorIs(t, <-rivalDone, spi.ErrConflict, "the rival lost: the transaction committed first")
+}
+
+// Control: a rival commits an entity the transaction only read. That is not
+// a lost write race, so LostRace answers false; Commit's read-set validation
+// still refuses the transaction.
+func testTxLostRaceReadOnlyRival(t *testing.T, h Harness) {
+	r := newSavepointRace(t, h)
+	_, err := r.es.Get(r.txCtx, r.target)
+	require.NoError(t, err)
+	r.rivalCommit(t, h)
+	requireLostRace(t, r.tm, r.txCtx, r.txID, false, "a change to an entity the transaction only read is not a lost write race")
+	r.requireCommitConflict(t, h)
 }
 
 // A savepoint rollback that discards a write which had already lost keeps the

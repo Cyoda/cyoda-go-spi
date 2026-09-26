@@ -60,7 +60,9 @@ var ErrTxNotFound = &sentinelErr{msg: "transaction not found", parent: ErrNotFou
 var ErrSavepointNotFound = &sentinelErr{msg: "savepoint not found", parent: ErrNotFound}
 
 // ErrTxAborted indicates the transaction was aborted by an earlier conflict;
-// every later statement fails with this error until the transaction ends.
+// every later statement other than Commit fails with this error, until the
+// transaction ends or rolls back to a savepoint taken before the conflict.
+// Commit returns the recorded cause.
 // It wraps ErrConflict, so a caller that answers a conflict keeps doing so.
 //
 // It exists for the caller that must tell a conflict about its own statement

@@ -74,21 +74,27 @@ MAINTAINING.md.
 
 - **A savepoint rollback keeps a lost write race on every backend.**
   `RollbackToSavepoint` documents that a write it discards which has already
-  lost first-committer-wins (another transaction committed that entity after
-  the snapshot and before the rollback) makes `Commit` refuse the transaction
-  with `ErrConflict`, whether the backend detects conflicts at the write or
-  at commit. A commit to that entity after the rollback does not conflict,
-  and discarded read-set entries are dropped. The `spitest` Transaction
-  group gains `Savepoint/RollbackKeepsLostWriteRace`,
+  lost first-committer-wins (another transaction committed that entity or
+  task row after the snapshot and before the rollback) makes `Commit` refuse
+  the transaction with `ErrConflict`, whether the backend detects conflicts
+  at the write or at commit. A commit to that entity or task row after the
+  rollback does not conflict, and discarded read-set entries are dropped.
+  The `spitest` Transaction group gains
+  `Savepoint/RollbackKeepsLostWriteRace`,
   `Savepoint/RollbackDiscardedWriteNoRival`,
   `Savepoint/RollbackDiscardedWriteRivalAfter`,
   `Savepoint/NestedRollbacksKeepLostWriteRace` and
-  `Savepoint/ReleasedThenRolledBackKeepsLostWriteRace`.
+  `Savepoint/ReleasedThenRolledBackKeepsLostWriteRace`. The ScheduledTasks
+  group gains `Savepoint/RollbackKeepsLostWriteRace`,
+  `Savepoint/RollbackDiscardedWriteRivalAfter` and
+  `Savepoint/RollbackDiscardedWriteNoRival`, each for a discarded
+  `DeleteForEntities` and a discarded `ReconcileForEntity`.
 
-  Migration: a backend that validates a read and write set at commit and
-  restores them from the savepoint snapshot must, at the rollback, remember
-  that a discarded write's entity was committed by another transaction since
-  the snapshot, and refuse `Commit` for it.
+  Migration: a backend that validates a read and write set, or staged
+  task-row writes, at commit and restores them from the savepoint snapshot
+  must, at the rollback, remember that a discarded write's entity or task
+  row was committed by another transaction since the snapshot, and refuse
+  `Commit` for it.
 
 - **`ErrMarkedByAnotherClaim`, `ErrTaskBusy`, `ErrStoreRejected`.**
   `ErrMarkedByAnotherClaim` is `ScheduledTaskStore.MarkUnsafe`'s refusal when

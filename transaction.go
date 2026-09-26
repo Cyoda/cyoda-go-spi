@@ -137,7 +137,10 @@ type TransactionManager interface {
 	//
 	// It answers false when no rival has committed: a rival that has written
 	// but not committed has not won, and whichever transaction commits first
-	// wins. A rival that committed before this transaction's snapshot raced
+	// wins. The one exception is a deadlock: a backend whose engine aborts
+	// the victim of a deadlock between two open transactions (PostgreSQL's
+	// 40P01) answers true for the victim, whose rival has not committed,
+	// because Commit refuses the victim with ErrConflict all the same. A rival that committed before this transaction's snapshot raced
 	// nothing. A change committed to an entity the transaction only read is
 	// not a lost write race; Commit's read-set validation refuses it. Once
 	// true, the answer stays true until the transaction ends.

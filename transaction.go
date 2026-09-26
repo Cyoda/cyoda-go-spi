@@ -88,7 +88,13 @@ type TransactionManager interface {
 	//
 	// It does not undo a conflict the backend already detected after the
 	// savepoint: the transaction lost a race, and Commit refuses it with that
-	// conflict (see ErrTxAborted).
+	// conflict (see ErrTxAborted). The same holds for a backend that detects
+	// conflicts at commit: a write the rollback discards that has already
+	// lost first-committer-wins — another transaction committed that entity
+	// after this transaction's snapshot and before the rollback — makes
+	// Commit refuse the transaction with ErrConflict. A commit to that entity
+	// after the rollback does not, because the transaction no longer writes
+	// it. Read-set entries the rollback discards are dropped.
 	//
 	// Locking discipline: write on tx state — exclusive against every
 	// other tx-path op. Implementations must acquire tx.OpMu.Lock (write

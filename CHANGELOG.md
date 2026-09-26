@@ -72,6 +72,24 @@ MAINTAINING.md.
   that never ran from one whose precondition was false. Backends that detect
   conflicts at commit never return it.
 
+- **A savepoint rollback keeps a lost write race on every backend.**
+  `RollbackToSavepoint` documents that a write it discards which has already
+  lost first-committer-wins (another transaction committed that entity after
+  the snapshot and before the rollback) makes `Commit` refuse the transaction
+  with `ErrConflict`, whether the backend detects conflicts at the write or
+  at commit. A commit to that entity after the rollback does not conflict,
+  and discarded read-set entries are dropped. The `spitest` Transaction
+  group gains `Savepoint/RollbackKeepsLostWriteRace`,
+  `Savepoint/RollbackDiscardedWriteNoRival`,
+  `Savepoint/RollbackDiscardedWriteRivalAfter`,
+  `Savepoint/NestedRollbacksKeepLostWriteRace` and
+  `Savepoint/ReleasedThenRolledBackKeepsLostWriteRace`.
+
+  Migration: a backend that validates a read and write set at commit and
+  restores them from the savepoint snapshot must, at the rollback, remember
+  that a discarded write's entity was committed by another transaction since
+  the snapshot, and refuse `Commit` for it.
+
 - **`ErrMarkedByAnotherClaim`, `ErrTaskBusy`, `ErrStoreRejected`.**
   `ErrMarkedByAnotherClaim` is `ScheduledTaskStore.MarkUnsafe`'s refusal when
   an earlier claim of the same life already wrote the mark. `ErrTaskBusy` is

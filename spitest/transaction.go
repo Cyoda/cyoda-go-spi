@@ -41,6 +41,11 @@ func runTransactionSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "SubmitTime", testTxSubmitTime)
 	runSubtest(t, h, tracker, "Savepoint/ReleaseMergesWork", testTxSavepointRelease)
 	runSubtest(t, h, tracker, "Savepoint/RollbackToDiscards", testTxSavepointRollback)
+	runSubtest(t, h, tracker, "Savepoint/RollbackKeepsLostWriteRace", testTxSavepointRollbackKeepsLostRace)
+	runSubtest(t, h, tracker, "Savepoint/RollbackDiscardedWriteNoRival", testTxSavepointRollbackDiscardedNoRival)
+	runSubtest(t, h, tracker, "Savepoint/RollbackDiscardedWriteRivalAfter", testTxSavepointRollbackDiscardedRivalAfter)
+	runSubtest(t, h, tracker, "Savepoint/NestedRollbacksKeepLostWriteRace", testTxSavepointNestedRollbacksKeepLostRace)
+	runSubtest(t, h, tracker, "Savepoint/ReleasedThenRolledBackKeepsLostWriteRace", testTxSavepointReleasedThenRolledBackKeepsLostRace)
 	runSubtest(t, h, tracker, "BeginAfterCommit", testTxBeginAfterCommit)
 	runSubtest(t, h, tracker, "TxStateErrors/JoinAfterCommit", testTxStateJoinAfterCommit)
 	runSubtest(t, h, tracker, "TxStateErrors/CommitAfterCommit", testTxStateCommitAfterCommit)
@@ -225,6 +230,168 @@ func testTxSavepointRollback(t *testing.T, h Harness) {
 	require.NoError(t, err, "pre-savepoint write must survive rollback-to-savepoint")
 	_, err = esOut.Get(ctx, idPost)
 	require.ErrorIs(t, err, spi.ErrNotFound, "post-savepoint write must be discarded")
+}
+
+// savepointRace is the fixture of the lost-write-race savepoint cases: a
+// committed entity the race is about, and a transaction that has already
+// written another entity, so every backend has taken its snapshot before any
+// rival commits.
+type savepointRace struct {
+	ctx    spiCtx
+	tm     spi.TransactionManager
+	txID   string
+	txCtx  spiCtx
+	es     spi.EntityStore
+	model  string
+	target string // committed before the transaction began
+	pre    string // written by the transaction before any savepoint
+}
+
+func newSavepointRace(t *testing.T, h Harness) *savepointRace {
+	t.Helper()
+	r := &savepointRace{ctx: tenantContext(h.NewTenant()), model: "m-sp-race", target: newID(), pre: newID()}
+	withTx(t, h, r.ctx, func(txCtx spiCtx) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = es.Save(txCtx, newEntity(t, r.model, r.target, map[string]any{"v": "seed"}))
+		require.NoError(t, err)
+	})
+	var err error
+	r.tm, err = h.Factory.TransactionManager(r.ctx)
+	require.NoError(t, err)
+	r.txID, r.txCtx = beginGuarded(t, r.tm, r.ctx)
+	r.es, err = h.Factory.EntityStore(r.txCtx)
+	require.NoError(t, err)
+	_, err = r.es.Save(r.txCtx, newEntity(t, r.model, r.pre, map[string]any{"v": "pre"}))
+	require.NoError(t, err)
+	return r
+}
+
+// rivalCommit writes the target in a transaction of its own and commits it.
+func (r *savepointRace) rivalCommit(t *testing.T, h Harness) {
+	t.Helper()
+	withTx(t, h, r.ctx, func(txCtx spiCtx) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = es.Save(txCtx, newEntity(t, r.model, r.target, map[string]any{"v": "rival"}))
+		require.NoError(t, err)
+	})
+}
+
+// writeTarget writes the target inside the transaction. A backend that
+// detects the conflict at the write refuses it with ErrConflict; one that
+// detects it at commit accepts it. Both are conforming.
+func (r *savepointRace) writeTarget(t *testing.T) {
+	t.Helper()
+	_, err := r.es.Save(r.txCtx, newEntity(t, r.model, r.target, map[string]any{"v": "mine"}))
+	if err != nil {
+		require.ErrorIs(t, err, spi.ErrConflict, "a write that loses the race may only be refused as a conflict")
+	}
+}
+
+// requireCommitConflict asserts Commit refuses the transaction as a conflict
+// and that nothing it wrote became visible.
+func (r *savepointRace) requireCommitConflict(t *testing.T, h Harness) {
+	t.Helper()
+	err := r.tm.Commit(r.txCtx, r.txID)
+	require.ErrorIs(t, err, spi.ErrConflict,
+		"a write that lost a race stays lost when a savepoint rollback discards it: Commit must refuse the transaction")
+	out, err := h.Factory.EntityStore(r.ctx)
+	require.NoError(t, err)
+	_, err = out.Get(r.ctx, r.pre)
+	require.ErrorIs(t, err, spi.ErrNotFound, "a refused commit must apply nothing")
+	got, err := out.Get(r.ctx, r.target)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"v":"rival"}`, string(got.Data), "the rival's committed write must stand")
+}
+
+// requireCommitApplies asserts Commit succeeds, the pre-savepoint write is
+// visible, and the target holds wantTarget.
+func (r *savepointRace) requireCommitApplies(t *testing.T, h Harness, wantTarget string) {
+	t.Helper()
+	require.NoError(t, r.tm.Commit(r.txCtx, r.txID),
+		"a write discarded by a savepoint rollback before any rival committed must not make Commit conflict")
+	out, err := h.Factory.EntityStore(r.ctx)
+	require.NoError(t, err)
+	_, err = out.Get(r.ctx, r.pre)
+	require.NoError(t, err, "the pre-savepoint write must commit")
+	got, err := out.Get(r.ctx, r.target)
+	require.NoError(t, err)
+	require.JSONEq(t, wantTarget, string(got.Data))
+}
+
+// A rival commits the target after the transaction's snapshot; the
+// transaction then writes the target inside a savepoint and rolls the
+// savepoint back. The discarded write lost first-committer-wins, and the
+// rollback does not undo that: Commit refuses the transaction with
+// ErrConflict. Read-set entries the rollback discards are not kept.
+func testTxSavepointRollbackKeepsLostRace(t *testing.T, h Harness) {
+	r := newSavepointRace(t, h)
+	sp, err := r.tm.Savepoint(r.txCtx, r.txID)
+	require.NoError(t, err)
+	r.rivalCommit(t, h)
+	r.writeTarget(t)
+	require.NoError(t, r.tm.RollbackToSavepoint(r.txCtx, r.txID, sp))
+	r.requireCommitConflict(t, h)
+}
+
+// Control: a discarded write to an entity nobody else changed does not
+// conflict.
+func testTxSavepointRollbackDiscardedNoRival(t *testing.T, h Harness) {
+	r := newSavepointRace(t, h)
+	sp, err := r.tm.Savepoint(r.txCtx, r.txID)
+	require.NoError(t, err)
+	r.writeTarget(t)
+	require.NoError(t, r.tm.RollbackToSavepoint(r.txCtx, r.txID, sp))
+	r.requireCommitApplies(t, h, `{"v":"seed"}`)
+}
+
+// Control: a rival that commits the target after the savepoint rollback
+// discarded the transaction's write did not race that write, so Commit
+// succeeds. The transaction no longer writes the target.
+func testTxSavepointRollbackDiscardedRivalAfter(t *testing.T, h Harness) {
+	r := newSavepointRace(t, h)
+	sp, err := r.tm.Savepoint(r.txCtx, r.txID)
+	require.NoError(t, err)
+	r.writeTarget(t)
+	require.NoError(t, r.tm.RollbackToSavepoint(r.txCtx, r.txID, sp))
+	r.rivalCommit(t, h)
+	r.requireCommitApplies(t, h, `{"v":"rival"}`)
+}
+
+// The lost write sits in an inner savepoint. Rolling back the inner one and
+// then the outer one leaves the conflict in place.
+func testTxSavepointNestedRollbacksKeepLostRace(t *testing.T, h Harness) {
+	r := newSavepointRace(t, h)
+	outer, err := r.tm.Savepoint(r.txCtx, r.txID)
+	require.NoError(t, err)
+	inner, err := r.tm.Savepoint(r.txCtx, r.txID)
+	require.NoError(t, err)
+	r.rivalCommit(t, h)
+	r.writeTarget(t)
+	require.NoError(t, r.tm.RollbackToSavepoint(r.txCtx, r.txID, inner))
+	require.NoError(t, r.tm.RollbackToSavepoint(r.txCtx, r.txID, outer))
+	r.requireCommitConflict(t, h)
+}
+
+// The lost write sits in an inner savepoint that is released, which merges it
+// into the outer one; rolling back the outer savepoint discards it, and the
+// conflict stays. A backend that aborts the transaction at the lost write
+// refuses the release as a conflict; one that detects conflicts at commit
+// releases it.
+func testTxSavepointReleasedThenRolledBackKeepsLostRace(t *testing.T, h Harness) {
+	r := newSavepointRace(t, h)
+	outer, err := r.tm.Savepoint(r.txCtx, r.txID)
+	require.NoError(t, err)
+	inner, err := r.tm.Savepoint(r.txCtx, r.txID)
+	require.NoError(t, err)
+	r.rivalCommit(t, h)
+	r.writeTarget(t)
+	if err := r.tm.ReleaseSavepoint(r.txCtx, r.txID, inner); err != nil {
+		require.ErrorIs(t, err, spi.ErrConflict, "a release after a lost race may only be refused as a conflict")
+	}
+	require.NoError(t, r.tm.RollbackToSavepoint(r.txCtx, r.txID, outer))
+	r.requireCommitConflict(t, h)
 }
 
 func testTxBeginAfterCommit(t *testing.T, h Harness) {

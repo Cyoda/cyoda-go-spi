@@ -86,10 +86,7 @@ func testSTSavepointRollbackKeepsLostRace(t *testing.T, h Harness) {
 			c := r.f.claimTask(uuid.New(), r.target.ID)
 			r.write(t, w.write)
 			r.rollback(t)
-			require.ErrorIs(t, r.f.tm.Commit(r.txCtx, r.txID), spi.ErrConflict,
-				"a task-row write that lost a race stays lost when a savepoint rollback discards it: Commit must refuse the transaction")
-			r.f.requireGone(r.pre.ID)
-			requireUnchangedClaim(t, c, r.f.mustGet(r.target.ID))
+			r.requireLostRaceRefused(t, c)
 		})
 	}
 }
@@ -126,6 +123,55 @@ func testSTSavepointRollbackDiscardedNoRival(t *testing.T, h Harness) {
 			got := r.f.mustGet(r.target.ID)
 			require.Equal(t, r.target.ArmToken, got.ArmToken, "the discarded write must not apply")
 			require.Equal(t, spi.ScheduledTaskWaiting, got.Status)
+		})
+	}
+}
+
+// requireLostRaceRefused asserts Commit refuses the transaction, nothing it
+// wrote is applied, and the claim c stands.
+func (r *stSavepointRace) requireLostRaceRefused(t *testing.T, c spi.ScheduledTask) {
+	t.Helper()
+	require.ErrorIs(t, r.f.tm.Commit(r.txCtx, r.txID), spi.ErrConflict,
+		"a task-row write that lost a race stays lost when a savepoint rollback discards it: Commit must refuse the transaction")
+	r.f.requireGone(r.pre.ID)
+	requireUnchangedClaim(t, c, r.f.mustGet(r.target.ID))
+}
+
+// The lost task-row write sits in an inner savepoint. Rolling back the inner
+// one and then the outer one leaves the conflict in place.
+func testSTSavepointNestedRollbacksKeepLostRace(t *testing.T, h Harness) {
+	for _, w := range stSavepointWrites {
+		t.Run(w.name, func(t *testing.T) {
+			r := newSTSavepointRace(t, h)
+			inner, err := r.f.tm.Savepoint(r.txCtx, r.txID)
+			require.NoError(t, err)
+			c := r.f.claimTask(uuid.New(), r.target.ID)
+			r.write(t, w.write)
+			require.NoError(t, r.f.tm.RollbackToSavepoint(r.txCtx, r.txID, inner))
+			r.rollback(t)
+			r.requireLostRaceRefused(t, c)
+		})
+	}
+}
+
+// The lost task-row write sits in an inner savepoint that is released, which
+// merges it into the outer one; rolling back the outer savepoint discards it,
+// and the conflict stays. A backend that aborts the transaction at the lost
+// write refuses the release as a conflict; one that detects conflicts at
+// commit releases it.
+func testSTSavepointReleasedThenRolledBackKeepsLostRace(t *testing.T, h Harness) {
+	for _, w := range stSavepointWrites {
+		t.Run(w.name, func(t *testing.T) {
+			r := newSTSavepointRace(t, h)
+			inner, err := r.f.tm.Savepoint(r.txCtx, r.txID)
+			require.NoError(t, err)
+			c := r.f.claimTask(uuid.New(), r.target.ID)
+			r.write(t, w.write)
+			if err := r.f.tm.ReleaseSavepoint(r.txCtx, r.txID, inner); err != nil {
+				require.ErrorIs(t, err, spi.ErrConflict, "a release after a lost race may only be refused as a conflict")
+			}
+			r.rollback(t)
+			r.requireLostRaceRefused(t, c)
 		})
 	}
 }

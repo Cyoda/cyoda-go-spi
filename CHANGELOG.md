@@ -86,8 +86,10 @@ MAINTAINING.md.
   `Savepoint/NestedRollbacksKeepLostWriteRace` and
   `Savepoint/ReleasedThenRolledBackKeepsLostWriteRace`. The ScheduledTasks
   group gains `Savepoint/RollbackKeepsLostWriteRace`,
-  `Savepoint/RollbackDiscardedWriteRivalAfter` and
-  `Savepoint/RollbackDiscardedWriteNoRival`, each for a discarded
+  `Savepoint/RollbackDiscardedWriteRivalAfter`,
+  `Savepoint/RollbackDiscardedWriteNoRival`,
+  `Savepoint/NestedRollbacksKeepLostWriteRace` and
+  `Savepoint/ReleasedThenRolledBackKeepsLostWriteRace`, each for a discarded
   `DeleteForEntities` and a discarded `ReconcileForEntity`.
 
   Migration: a backend that validates a read and write set, or staged

@@ -158,6 +158,8 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Savepoint/RollbackKeepsLostWriteRace", testSTSavepointRollbackKeepsLostRace)
 	runSubtest(t, h, tracker, "Savepoint/RollbackDiscardedWriteRivalAfter", testSTSavepointRollbackDiscardedRivalAfter)
 	runSubtest(t, h, tracker, "Savepoint/RollbackDiscardedWriteNoRival", testSTSavepointRollbackDiscardedNoRival)
+	runSubtest(t, h, tracker, "Savepoint/NestedRollbacksKeepLostWriteRace", testSTSavepointNestedRollbacksKeepLostRace)
+	runSubtest(t, h, tracker, "Savepoint/ReleasedThenRolledBackKeepsLostWriteRace", testSTSavepointReleasedThenRolledBackKeepsLostRace)
 
 	// Query and tenant isolation (S-8).
 	runSubtest(t, h, tracker, "Query/PagesInOrder", testSTQueryPagesInOrder)

@@ -154,6 +154,11 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "C6/NeverJoiningWriteBounded", testSTC6NeverJoiningWriteBounded)
 	runSubtest(t, h, tracker, "C6/GiveBackSkipsBusy", testSTC6GiveBackSkipsBusy)
 
+	// A task-row write a savepoint rollback discards after it lost a race.
+	runSubtest(t, h, tracker, "Savepoint/RollbackKeepsLostWriteRace", testSTSavepointRollbackKeepsLostRace)
+	runSubtest(t, h, tracker, "Savepoint/RollbackDiscardedWriteRivalAfter", testSTSavepointRollbackDiscardedRivalAfter)
+	runSubtest(t, h, tracker, "Savepoint/RollbackDiscardedWriteNoRival", testSTSavepointRollbackDiscardedNoRival)
+
 	// Query and tenant isolation (S-8).
 	runSubtest(t, h, tracker, "Query/PagesInOrder", testSTQueryPagesInOrder)
 	runSubtest(t, h, tracker, "Query/FilterPagesAcrossNonMatchingRows", testSTQueryFilterPagesAcrossNonMatchingRows)

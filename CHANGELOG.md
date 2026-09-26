@@ -50,13 +50,15 @@ MAINTAINING.md.
   `ClearResults(ctx, jobID, epoch)` refuses a clear whose epoch is not the
   job's current `Epoch` with `ErrStaleClaim`, a terminal job with
   `ErrAlreadyTerminal`, and a missing job with `ErrNotFound`; a refused clear
-  deletes nothing. The fence check and the delete are atomic. Before, a clear
+  deletes nothing. A missing job, formerly a nil no-op, now answers
+  `ErrNotFound`. The fence check and the delete are atomic. Before, a clear
   from an executor the job had been reclaimed from could delete the rows the
   new owner had saved.
 
   Migration: add the `epoch int64` parameter and fence it as `Release` is
   fenced, in the same statement or transaction as the delete. The `spitest`
-  AsyncSearch group gains `ClearResults/Fenced`.
+  AsyncSearch group gains `ClearResults/Fenced` and
+  `ClearResults/TenantScoped`.
 
 ### Added
 

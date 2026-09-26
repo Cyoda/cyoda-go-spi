@@ -131,3 +131,25 @@ func ValidateArm(req ReconcileRequest) error {
 	}
 	return nil
 }
+
+// ValidateClaimRequest refuses a ClaimRequest whose Limit or PerTenantLimit
+// is below 1, with an error that satisfies errors.Is(err, ErrStoreRejected).
+// Every ScheduledTaskStore.ClaimDue calls it before it claims anything.
+func ValidateClaimRequest(req ClaimRequest) error {
+	if req.Limit < 1 || req.PerTenantLimit < 1 {
+		return fmt.Errorf("claim due scheduled tasks: Limit and PerTenantLimit must be >= 1, got %d and %d: %w",
+			req.Limit, req.PerTenantLimit, ErrStoreRejected)
+	}
+	return nil
+}
+
+// ValidateScheduledTaskQuery refuses a ScheduledTaskQuery whose Limit is
+// below 1, with an error that satisfies errors.Is(err, ErrStoreRejected).
+// Every ScheduledTaskStore.Query calls it before it reads a page. The upper
+// bound of Limit is the caller's to enforce (see ScheduledTaskQuery.Limit).
+func ValidateScheduledTaskQuery(q ScheduledTaskQuery) error {
+	if q.Limit < 1 {
+		return fmt.Errorf("query scheduled tasks: Limit must be >= 1, got %d: %w", q.Limit, ErrStoreRejected)
+	}
+	return nil
+}

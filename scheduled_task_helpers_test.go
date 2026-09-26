@@ -161,3 +161,31 @@ func TestValidateArm_RejectsIDInBothArmAndCancel(t *testing.T) {
 		t.Fatalf("an id in both Arm and Cancel: err = %v, want ErrStoreRejected", err)
 	}
 }
+
+func TestValidateClaimRequest(t *testing.T) {
+	if err := ValidateClaimRequest(ClaimRequest{Limit: 1, PerTenantLimit: 1}); err != nil {
+		t.Fatalf("limits of 1: %v", err)
+	}
+	for name, req := range map[string]ClaimRequest{
+		"zero limit":              {Limit: 0, PerTenantLimit: 1},
+		"negative limit":          {Limit: -1, PerTenantLimit: 1},
+		"zero per-tenant limit":   {Limit: 1, PerTenantLimit: 0},
+		"negative per-tenant":     {Limit: 1, PerTenantLimit: -3},
+		"both zero (zero values)": {},
+	} {
+		if err := ValidateClaimRequest(req); !errors.Is(err, ErrStoreRejected) {
+			t.Errorf("%s: err = %v, want ErrStoreRejected", name, err)
+		}
+	}
+}
+
+func TestValidateScheduledTaskQuery(t *testing.T) {
+	if err := ValidateScheduledTaskQuery(ScheduledTaskQuery{Limit: 1}); err != nil {
+		t.Fatalf("limit 1: %v", err)
+	}
+	for _, limit := range []int{0, -1} {
+		if err := ValidateScheduledTaskQuery(ScheduledTaskQuery{Limit: limit}); !errors.Is(err, ErrStoreRejected) {
+			t.Errorf("limit %d: err = %v, want ErrStoreRejected", limit, err)
+		}
+	}
+}

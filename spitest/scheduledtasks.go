@@ -46,7 +46,7 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	}
 	require.NoError(t, err)
 
-	// Arm, remove, delete, get (S-4).
+	// Arm, remove, delete, get.
 	runSubtest(t, h, tracker, "Arm/NewLife", testSTArmNewLife)
 	runSubtest(t, h, tracker, "Arm/TenantAndEntityFromRequest", testSTArmTenantAndEntityFromRequest)
 	runSubtest(t, h, tracker, "Arm/EveryArmIsNewLife", testSTArmEveryArmIsNewLife)
@@ -71,7 +71,7 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Get/OtherTenantTransaction", testSTGetOtherTenantTransaction)
 	runSubtest(t, h, tracker, "Get/OtherTenantTransactionSeesCommitted", testSTGetOtherTenantTransactionSeesCommitted)
 
-	// Claims, liveness, give-back (S-5).
+	// Claims, liveness, give-back.
 	runSubtest(t, h, tracker, "Claim/DueWaiting", testSTClaimDueWaiting)
 	runSubtest(t, h, tracker, "Claim/NewTokenPerClaim", testSTClaimNewTokenPerClaim)
 	runSubtest(t, h, tracker, "Claim/FailedNeverClaimed", testSTClaimFailedNeverClaimed)
@@ -108,7 +108,7 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Claim/EntityKeyIsPerTenant", testSTClaimEntityKeyIsPerTenant)
 	runSubtest(t, h, tracker, "GiveBack/KeepsCounters", testSTGiveBackKeepsCounters)
 
-	// Fenced writes, marks, recorded outcomes, error text (S-6).
+	// Fenced writes, marks, recorded outcomes, error text.
 	runSubtest(t, h, tracker, "Fence/StaleTokensRefused", testSTFenceStaleTokensRefused)
 	runSubtest(t, h, tracker, "Fence/WaitingRefused", testSTFenceWaitingRefused)
 	runSubtest(t, h, tracker, "Fence/OldLifeRefused", testSTFenceOldLifeRefused)
@@ -135,7 +135,7 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "ErrorText/StoreRejected", testSTErrorTextStoreRejected)
 	runSubtest(t, h, tracker, "SweepMarks/KeepsCurrentLife", testSTSweepMarksKeepsCurrentLife)
 
-	// Clauses C1, C2, C3, C6 (S-7).
+	// Clauses C1, C2, C3, C6.
 	runSubtest(t, h, tracker, "C1/ReclaimFailsOldCommit", testSTC1ReclaimFailsOldCommit)
 	runSubtest(t, h, tracker, "C1/RearmFailsOldCommit", testSTC1RearmFailsOldCommit)
 	runSubtest(t, h, tracker, "C1/StaleRemoveLifeIsNoWrite", testSTC1StaleRemoveLifeIsNoWrite)
@@ -166,7 +166,7 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "LostRace/AfterSavepointRollback", testSTLostRaceAfterSavepointRollback)
 	runSubtest(t, h, tracker, "LostRace/DiscardedRivalAfter", testSTLostRaceDiscardedRivalAfter)
 
-	// Query and tenant isolation (S-8).
+	// Query and tenant isolation.
 	runSubtest(t, h, tracker, "Query/PagesInOrder", testSTQueryPagesInOrder)
 	runSubtest(t, h, tracker, "Query/FilterPagesAcrossNonMatchingRows", testSTQueryFilterPagesAcrossNonMatchingRows)
 	runSubtest(t, h, tracker, "Query/Filters", testSTQueryFilters)

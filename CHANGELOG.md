@@ -51,11 +51,12 @@ MAINTAINING.md.
 - **`ErrTxAborted`: a statement refused because an earlier conflict aborted
   the transaction.** It wraps `ErrConflict`. A backend whose engine aborts the
   whole transaction on a conflict returns it for every later statement other
-  than Commit, until the transaction ends or rolls back to a savepoint taken
-  before the conflict; Commit returns the recorded cause. A caller can tell a
-  compare-and-save that never ran
-  from one whose precondition was false. Backends that detect conflicts at
-  commit never return it.
+  than Commit that the engine refuses, until the transaction ends. A rollback
+  to a savepoint taken before the conflict lets statements run again but does
+  not undo the conflict: Commit refuses the transaction with the recorded
+  cause, which is also `ErrConflict`. A caller can tell a compare-and-save
+  that never ran from one whose precondition was false. Backends that detect
+  conflicts at commit never return it.
 
 - **`ErrMarkedByAnotherClaim`, `ErrTaskBusy`, `ErrStoreRejected`.**
   `ErrMarkedByAnotherClaim` is `ScheduledTaskStore.MarkUnsafe`'s refusal when

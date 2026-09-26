@@ -86,6 +86,10 @@ type TransactionManager interface {
 	// tx.Deletes with the snapshot taken at Savepoint time, restoring
 	// tx.DeleteAttribution paired with tx.Deletes.
 	//
+	// It does not undo a conflict the backend already detected after the
+	// savepoint: the transaction lost a race, and Commit refuses it with that
+	// conflict (see ErrTxAborted).
+	//
 	// Locking discipline: write on tx state — exclusive against every
 	// other tx-path op. Implementations must acquire tx.OpMu.Lock (write
 	// lock, not RLock) for the duration of the field replacement.

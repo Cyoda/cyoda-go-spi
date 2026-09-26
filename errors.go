@@ -59,14 +59,27 @@ var ErrTxNotFound = &sentinelErr{msg: "transaction not found", parent: ErrNotFou
 // Wraps ErrNotFound.
 var ErrSavepointNotFound = &sentinelErr{msg: "savepoint not found", parent: ErrNotFound}
 
+// ErrTxAborted indicates the transaction was aborted by an earlier conflict;
+// every later statement fails with this error until the transaction ends.
+// It wraps ErrConflict, so a caller that answers a conflict keeps doing so.
+//
+// It exists for the caller that must tell a conflict about its own statement
+// apart from one that happened earlier: a compare-and-save that fails with
+// ErrTxAborted did not find its precondition false — it never ran, because a
+// concurrent writer had already won against this transaction. Returned only
+// by backends whose engine aborts the whole transaction on a conflict; a
+// backend that detects conflicts at commit never returns it.
+var ErrTxAborted = &sentinelErr{msg: "transaction aborted by an earlier conflict", parent: ErrConflict}
+
 // ErrTxTerminated is the umbrella sentinel for any operation on a
 // transaction that has reached a terminal state (committed or rolled
 // back). Callers that do not need to distinguish rollback from commit
 // can match this directly.
 //
 // NOTE: Backends that delegate transaction state to an external engine
-// may surface mid-op rollback as ErrConflict (e.g. via a SQLSTATE
-// 25P02 from a SQL engine) instead of ErrTxRolledBack, where the
+// may surface mid-op rollback as ErrConflict — ErrTxAborted when the abort
+// was a conflict (e.g. a SQLSTATE 25P02 from a SQL engine after a 40001) —
+// instead of ErrTxRolledBack, where the
 // engine's abort code is already semantically meaningful. The
 // ErrTxTerminated sentinel is required only on plugins that own their
 // own in-process tx-state buffer. Consumers writing backend-agnostic

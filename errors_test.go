@@ -194,3 +194,22 @@ func TestScheduledTaskSentinels(t *testing.T) {
 		}
 	}
 }
+
+// TestErrTxAborted_IsAConflict: a statement refused because an earlier
+// conflict aborted the transaction is itself a conflict to every caller that
+// matches ErrConflict, and is distinguishable from one by matching ErrTxAborted.
+func TestErrTxAborted_IsAConflict(t *testing.T) {
+	wrapped := fmt.Errorf("store: %w", ErrTxAborted)
+	if !errors.Is(wrapped, ErrTxAborted) {
+		t.Error("wrapped ErrTxAborted must match ErrTxAborted")
+	}
+	if !errors.Is(wrapped, ErrConflict) {
+		t.Error("ErrTxAborted must match ErrConflict")
+	}
+	if errors.Is(ErrConflict, ErrTxAborted) {
+		t.Error("a plain ErrConflict must not match ErrTxAborted")
+	}
+	if errors.Is(ErrTxAborted, ErrTxTerminated) {
+		t.Error("an aborted transaction has not ended; ErrTxAborted must not match ErrTxTerminated")
+	}
+}

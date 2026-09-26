@@ -231,6 +231,17 @@ type ScheduledTaskStore interface {
 	// tasks in that same order — the order SelectClaims produces — never
 	// resorted or reversed afterward.
 	//
+	// Cost: every node calls ClaimDue across all tenants at a short
+	// interval, so its work must not grow with the size of any tenant's
+	// backlog, or one tenant's backlog slows every tenant's claims. A
+	// tenant can take at most n = min(PerTenantLimit -
+	// TenantInProgress[tenant], Limit) tasks, each its entity's first
+	// candidate, and the tenant order depends only on each tenant's first
+	// candidate; so a backend reads, per tenant, the first candidate of
+	// each of the n entities whose first candidate comes earliest, and
+	// SelectClaims over that set chooses what it would over every
+	// candidate.
+	//
 	// A returned task carries UnsafeMarked as of the claim (C3), and
 	// ClaimedFromLostOwner when this claim took it from a stale or
 	// missing owner. Losing a race to another caller is not an error:

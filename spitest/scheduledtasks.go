@@ -108,6 +108,12 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Claim/EntityKeyIsPerTenant", testSTClaimEntityKeyIsPerTenant)
 	runSubtest(t, h, tracker, "GiveBack/KeepsCounters", testSTGiveBackKeepsCounters)
 
+	// Claims over a large or uneven backlog.
+	runSubtest(t, h, tracker, "Claim/BacklogTenantNotStarved", testSTClaimBacklogTenantNotStarved)
+	runSubtest(t, h, tracker, "Claim/BacklogEntityDoesNotFillQuota", testSTClaimBacklogEntityDoesNotFillQuota)
+	runSubtest(t, h, tracker, "Claim/BacklogBusyOldestSiblingPassesOn", testSTClaimBacklogBusyOldestSiblingPassesOn)
+	runSubtest(t, h, tracker, "Claim/BacklogLostOwnerSharesQuota", testSTClaimBacklogLostOwnerSharesQuota)
+
 	// Fenced writes, marks, recorded outcomes, error text.
 	runSubtest(t, h, tracker, "Fence/StaleTokensRefused", testSTFenceStaleTokensRefused)
 	runSubtest(t, h, tracker, "Fence/WaitingRefused", testSTFenceWaitingRefused)

@@ -172,17 +172,17 @@ var ErrUniqueViolation = errors.New("composite unique key violation")
 var ErrPartialUniqueKey = errors.New("invalid composite unique key value")
 
 // ErrAlreadyTerminal is returned by AsyncSearchStore write methods
-// (UpdateJobStatus, Heartbeat, SaveResults) called against a job already in
-// a terminal status (SUCCESSFUL/FAILED/CANCELLED). Cancel is the sole
-// idempotent-nil exception.
+// (UpdateJobStatus, Heartbeat, SaveResults, Release, ClearResults) called
+// against a job already in a terminal status (SUCCESSFUL/FAILED/CANCELLED).
+// Cancel is the sole idempotent-nil exception.
 var ErrAlreadyTerminal = errors.New("job is in a terminal status")
 
 // ErrStaleClaim is returned by a fenced write whose caller no longer holds
 // the claim it names:
 //
-//   - AsyncSearchStore (UpdateJobStatus, SaveResults, Heartbeat, Release):
-//     the caller's epoch does not match the job's current Epoch — another
-//     claimant has since taken over.
+//   - AsyncSearchStore (UpdateJobStatus, SaveResults, Heartbeat, Release,
+//     ClearResults): the caller's epoch does not match the job's current
+//     Epoch — another claimant has since taken over.
 //   - ScheduledTaskStore (StampSegment, MarkUnsafe, RecordAttempt, Fail):
 //     the task is missing, or its current arm token or claim token is not
 //     the one in the TaskRef — the task was re-armed, reclaimed, recorded,

@@ -133,12 +133,21 @@ func ValidateArm(req ReconcileRequest) error {
 }
 
 // ValidateClaimRequest refuses a ClaimRequest whose Limit or PerTenantLimit
-// is below 1, with an error that satisfies errors.Is(err, ErrStoreRejected).
-// Every ScheduledTaskStore.ClaimDue calls it before it claims anything.
+// is below 1, or whose TenantInProgress holds a negative count, with an error
+// that satisfies errors.Is(err, ErrStoreRejected). Every
+// ScheduledTaskStore.ClaimDue calls it before it claims anything, so a
+// tenant's quota, PerTenantLimit - TenantInProgress[tenant], is never above
+// PerTenantLimit.
 func ValidateClaimRequest(req ClaimRequest) error {
 	if req.Limit < 1 || req.PerTenantLimit < 1 {
 		return fmt.Errorf("claim due scheduled tasks: Limit and PerTenantLimit must be >= 1, got %d and %d: %w",
 			req.Limit, req.PerTenantLimit, ErrStoreRejected)
+	}
+	for tenant, n := range req.TenantInProgress {
+		if n < 0 {
+			return fmt.Errorf("claim due scheduled tasks: TenantInProgress for tenant %s is %d, below 0: %w",
+				tenant, n, ErrStoreRejected)
+		}
 	}
 	return nil
 }

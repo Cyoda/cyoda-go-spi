@@ -240,7 +240,11 @@ type ScheduledTaskStore interface {
 	// candidate; so a backend reads, per tenant, the first candidate of
 	// each of the n entities whose first candidate comes earliest, and
 	// SelectClaims over that set chooses what it would over every
-	// candidate.
+	// candidate. A claim's work may grow with the number of tenants with a
+	// due task (or, with AllowLostOwner, a RUNNING task), with n, with
+	// the RUNNING tasks, and with the busy rows (C6) and the tasks of
+	// entities with a RUNNING task that it passes over on the way to a
+	// tenant's n-th candidate — never with the tenant's other due tasks.
 	//
 	// A returned task carries UnsafeMarked as of the claim (C3), and
 	// ClaimedFromLostOwner when this claim took it from a stale or

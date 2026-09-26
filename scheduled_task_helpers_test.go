@@ -166,12 +166,18 @@ func TestValidateClaimRequest(t *testing.T) {
 	if err := ValidateClaimRequest(ClaimRequest{Limit: 1, PerTenantLimit: 1}); err != nil {
 		t.Fatalf("limits of 1: %v", err)
 	}
+	if err := ValidateClaimRequest(ClaimRequest{Limit: 1, PerTenantLimit: 1,
+		TenantInProgress: map[TenantID]int{"A": 0, "B": 5}}); err != nil {
+		t.Fatalf("counts of 0 and above the limit: %v", err)
+	}
 	for name, req := range map[string]ClaimRequest{
 		"zero limit":              {Limit: 0, PerTenantLimit: 1},
 		"negative limit":          {Limit: -1, PerTenantLimit: 1},
 		"zero per-tenant limit":   {Limit: 1, PerTenantLimit: 0},
 		"negative per-tenant":     {Limit: 1, PerTenantLimit: -3},
 		"both zero (zero values)": {},
+		"negative in progress": {Limit: 1, PerTenantLimit: 1,
+			TenantInProgress: map[TenantID]int{"A": 0, "B": -1}},
 	} {
 		if err := ValidateClaimRequest(req); !errors.Is(err, ErrStoreRejected) {
 			t.Errorf("%s: err = %v, want ErrStoreRejected", name, err)

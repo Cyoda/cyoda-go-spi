@@ -207,7 +207,8 @@ func testSTClaimBusyRowTurnPassesOn(t *testing.T, h Harness) {
 		"non-vacuous: once the transaction ends, the same ClaimDue claims a1")
 }
 
-// Limit and PerTenantLimit below 1 are caller errors, not "claim nothing".
+// Limit and PerTenantLimit below 1, and a negative TenantInProgress count,
+// are caller errors, not "claim nothing".
 func testSTClaimInvalidLimits(t *testing.T, h Harness) {
 	f := newSTFixture(t, h)
 	task := f.armDue()
@@ -216,6 +217,9 @@ func testSTClaimInvalidLimits(t *testing.T, h Harness) {
 		"Limit -1":          func(r *spi.ClaimRequest) { r.Limit = -1 },
 		"PerTenantLimit 0":  func(r *spi.ClaimRequest) { r.PerTenantLimit = 0 },
 		"PerTenantLimit -1": func(r *spi.ClaimRequest) { r.PerTenantLimit = -1 },
+		"TenantInProgress -1": func(r *spi.ClaimRequest) {
+			r.TenantInProgress = map[spi.TenantID]int{f.tenant: -1}
+		},
 	} {
 		req := f.claimReq(uuid.New(), false)
 		mutate(&req)

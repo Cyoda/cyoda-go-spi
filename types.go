@@ -488,7 +488,9 @@ type ClaimRequest struct {
 	// otherwise.
 	PerTenantLimit int
 	// TenantInProgress is the caller's count of runs in progress per
-	// tenant. A missing tenant counts as 0.
+	// tenant. A missing tenant counts as 0. A negative count is a caller
+	// error: ClaimDue returns an error satisfying errors.Is(err,
+	// ErrStoreRejected).
 	TenantInProgress map[TenantID]int
 	// AllowLostOwner lets the call claim RUNNING tasks whose owner's
 	// liveness record is missing or older than StaleAfter.

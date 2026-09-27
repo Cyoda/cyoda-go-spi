@@ -409,7 +409,7 @@ func testSTFailFields(t *testing.T, h Harness) {
 	task := f.armDue()
 	c := f.claimTask(uuid.New(), task.ID)
 	require.NoError(t, f.sts.RecordAttempt(f.ctx, stRef(c), spi.Attempt{Error: "E1", AtMs: stNow - 3, NextAttemptTime: stNow}))
-	c = f.claimTask(uuid.New(), task.ID) // this owner never heartbeats: lost at once
+	f.claimTask(uuid.New(), task.ID) // this owner never heartbeats: lost at once
 	c = f.reclaim(uuid.New(), task.ID)
 	require.Equal(t, 1, c.LostOwners, "the reclaim above was really a lost-owner claim")
 	require.NoError(t, f.sts.Fail(f.ctx, stRef(c), spi.Failure{Reason: spi.FailureRunPanicked, Error: "E2", AtMs: stNow + 7}))

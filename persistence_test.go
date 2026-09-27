@@ -13,24 +13,24 @@ import (
 // build of this test.
 func TestScheduledTaskStore_InterfaceShape(t *testing.T) {
 	var _ = (StoreFactory)(nil)
-	var _ func(StoreFactory, context.Context) (ScheduledTaskStore, error) = StoreFactory.ScheduledTaskStore
+	_ = (func(StoreFactory, context.Context) (ScheduledTaskStore, error))(StoreFactory.ScheduledTaskStore)
 
-	var _ func(ScheduledTaskStore, context.Context, ReconcileRequest) ([]ScheduledTask, error) = ScheduledTaskStore.ReconcileForEntity
-	var _ func(ScheduledTaskStore, context.Context, TenantID, string, uuid.UUID) error = ScheduledTaskStore.RemoveLife
-	var _ func(ScheduledTaskStore, context.Context, TaskRef, bool) error = ScheduledTaskStore.StampSegment
-	var _ func(ScheduledTaskStore, context.Context, TenantID, []string) error = ScheduledTaskStore.DeleteForEntities
-	var _ func(ScheduledTaskStore, context.Context, TenantID, string, int, func(string, string) bool) error = ScheduledTaskStore.DeleteForModel
-	var _ func(ScheduledTaskStore, context.Context, TenantID, string) (*ScheduledTask, bool, error) = ScheduledTaskStore.Get
-	var _ func(ScheduledTaskStore, context.Context, TenantID, ScheduledTaskQuery) (ScheduledTaskPage, error) = ScheduledTaskStore.Query
-	var _ func(ScheduledTaskStore, context.Context, ClaimRequest) ([]ScheduledTask, error) = ScheduledTaskStore.ClaimDue
-	var _ func(ScheduledTaskStore, context.Context, uuid.UUID) error = ScheduledTaskStore.Heartbeat
-	var _ func(ScheduledTaskStore, context.Context, uuid.UUID) error = ScheduledTaskStore.RetireOwner
-	var _ func(ScheduledTaskStore, context.Context, time.Duration) error = ScheduledTaskStore.SweepOwners
-	var _ func(ScheduledTaskStore, context.Context, uuid.UUID, []uuid.UUID) (int, error) = ScheduledTaskStore.GiveBackIdle
-	var _ func(ScheduledTaskStore, context.Context, TaskRef) error = ScheduledTaskStore.MarkUnsafe
-	var _ func(ScheduledTaskStore, context.Context, TaskRef, Attempt) error = ScheduledTaskStore.RecordAttempt
-	var _ func(ScheduledTaskStore, context.Context, TaskRef, Failure) error = ScheduledTaskStore.Fail
-	var _ func(ScheduledTaskStore, context.Context) error = ScheduledTaskStore.SweepMarks
+	_ = (func(ScheduledTaskStore, context.Context, ReconcileRequest) ([]ScheduledTask, error))(ScheduledTaskStore.ReconcileForEntity)
+	_ = (func(ScheduledTaskStore, context.Context, TenantID, string, uuid.UUID) error)(ScheduledTaskStore.RemoveLife)
+	_ = (func(ScheduledTaskStore, context.Context, TaskRef, bool) error)(ScheduledTaskStore.StampSegment)
+	_ = (func(ScheduledTaskStore, context.Context, TenantID, []string) error)(ScheduledTaskStore.DeleteForEntities)
+	_ = (func(ScheduledTaskStore, context.Context, TenantID, string, int, func(string, string) bool) error)(ScheduledTaskStore.DeleteForModel)
+	_ = (func(ScheduledTaskStore, context.Context, TenantID, string) (*ScheduledTask, bool, error))(ScheduledTaskStore.Get)
+	_ = (func(ScheduledTaskStore, context.Context, TenantID, ScheduledTaskQuery) (ScheduledTaskPage, error))(ScheduledTaskStore.Query)
+	_ = (func(ScheduledTaskStore, context.Context, ClaimRequest) ([]ScheduledTask, error))(ScheduledTaskStore.ClaimDue)
+	_ = (func(ScheduledTaskStore, context.Context, uuid.UUID) error)(ScheduledTaskStore.Heartbeat)
+	_ = (func(ScheduledTaskStore, context.Context, uuid.UUID) error)(ScheduledTaskStore.RetireOwner)
+	_ = (func(ScheduledTaskStore, context.Context, time.Duration) error)(ScheduledTaskStore.SweepOwners)
+	_ = (func(ScheduledTaskStore, context.Context, uuid.UUID, []uuid.UUID) (int, error))(ScheduledTaskStore.GiveBackIdle)
+	_ = (func(ScheduledTaskStore, context.Context, TaskRef) error)(ScheduledTaskStore.MarkUnsafe)
+	_ = (func(ScheduledTaskStore, context.Context, TaskRef, Attempt) error)(ScheduledTaskStore.RecordAttempt)
+	_ = (func(ScheduledTaskStore, context.Context, TaskRef, Failure) error)(ScheduledTaskStore.Fail)
+	_ = (func(ScheduledTaskStore, context.Context) error)(ScheduledTaskStore.SweepMarks)
 }
 
 // TestScheduledTaskStore_MethodSet pins that nothing else is on the

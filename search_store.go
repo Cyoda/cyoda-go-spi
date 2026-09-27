@@ -115,10 +115,11 @@ type SelfExecutingSearchStore interface {
 // job returns nil and leaves it unchanged. ClaimStale never claims a terminal
 // job.
 //
-// Epoch fencing: UpdateJobStatus, SaveResults, Heartbeat, and Release each take the
-// epoch the caller was claimed under and MUST refuse a call whose epoch does
-// not match the job's current Epoch with ErrStaleClaim — this is how a
-// reclaimed job fences off writes from the executor it was taken from.
+// Epoch fencing: UpdateJobStatus, SaveResults, Heartbeat, Release, and
+// ClearResults each take the epoch the caller was claimed under and MUST
+// refuse a call whose epoch does not match the job's current Epoch with
+// ErrStaleClaim — this is how a reclaimed job fences off writes from the
+// executor it was taken from.
 type AsyncSearchStore interface {
 	// CreateJob persists a new job row. Epoch is always persisted as 1,
 	// regardless of the value set on job.Epoch by the caller.
@@ -160,8 +161,7 @@ type AsyncSearchStore interface {
 	DeleteJob(ctx context.Context, jobID string) error
 
 	// ReapExpired deletes eligible expired jobs. Cross-tenant: obtain with a
-	// background/tenant-less context, as with ScheduledTaskStore.ScanDue
-	// (persistence.go:19-24).
+	// background/tenant-less context, as with ScheduledTaskStore.ClaimDue.
 	ReapExpired(ctx context.Context, ttl time.Duration) (int, error)
 
 	// Cancel marks the job CANCELLED and stamps the given finishTime on the
@@ -175,6 +175,14 @@ type AsyncSearchStore interface {
 	// Heartbeat stamps HeartbeatTime, fenced by epoch. Returns ErrStaleClaim
 	// if epoch does not match the job's current Epoch, ErrAlreadyTerminal if
 	// the job is already terminal, and ErrNotFound if the job does not exist.
+	//
+	// A backend may instead answer errors.Is(err, ErrTaskBusy) when the
+	// job's row is held by an open write of the same job — for example a
+	// SaveResults chunk's fencing transaction. Postgres may return this;
+	// memory and SQLite never lock-wait there. Heartbeat does not wait and
+	// makes no write in this case; the caller treats the answer as a missed
+	// tick, not a lost claim — ErrStaleClaim, not ErrTaskBusy, is what means
+	// the claim was lost.
 	Heartbeat(ctx context.Context, jobID string, epoch int64) error
 
 	// ClaimStale atomically claims up to limit RUNNING jobs whose heartbeat
@@ -190,11 +198,19 @@ type AsyncSearchStore interface {
 	// StaleClaims. A job claimed because its heartbeat went stale has
 	// StaleClaims incremented, atomically with the claim.
 	// Cross-tenant, like ReapExpired: obtain with a background/tenant-less
-	// context, as with ScheduledTaskStore.ScanDue (persistence.go:19-24).
+	// context, as with ScheduledTaskStore.ClaimDue.
 	ClaimStale(ctx context.Context, staleAfter time.Duration, limit int) ([]*SearchJob, error)
 
-	// ClearResults deletes the job's persisted result IDs. Idempotent.
-	ClearResults(ctx context.Context, jobID string) error
+	// ClearResults deletes the job's persisted result IDs, fenced by epoch
+	// like Heartbeat and Release: it returns ErrStaleClaim if epoch is not
+	// the job's current Epoch, ErrAlreadyTerminal if the job is terminal (a
+	// terminal job's results are its answer), and ErrNotFound if the job does
+	// not exist. A refused clear deletes nothing. The fence check and the
+	// delete are atomic: a ClaimStale or terminal write that lands between
+	// them must not let a clear from the superseded epoch delete rows the
+	// current epoch saved. Idempotent at the current epoch. Tenant-scoped,
+	// like Heartbeat.
+	ClearResults(ctx context.Context, jobID string, epoch int64) error
 
 	// Release relinquishes the caller's claim on a RUNNING job without
 	// finishing it: the job stays RUNNING and becomes eligible for

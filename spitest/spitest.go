@@ -2,6 +2,7 @@ package spitest
 
 import (
 	"context"
+	"flag"
 	"strings"
 	"sync"
 	"testing"
@@ -61,37 +62,68 @@ type Harness struct {
 	// Backends with known structural incompatibilities populate this to
 	// prevent false failures while documenting the open issues.
 	//
-	// StoreFactoryConformance fails the test if any key in Skip was never
-	// matched — this catches typos in key names.
+	// StoreFactoryConformance fails an UNFILTERED run (the `test.run` flag
+	// empty) if any key in Skip was never matched — this catches typos and
+	// stale entries by exact string equality, at any segment depth.
+	//
+	// The check does not run at all under any `-run` filter, at any
+	// depth. This package documents focused invocations that filter below
+	// the group level (e.g. `go test -run
+	// 'TestConformance/Transaction/TxStateErrors/JoinAfterCommit'`), and
+	// `-run` can filter at any segment depth — there is no fixed grain
+	// (the whole key, its top-level group, ...) that tells "this key's
+	// subtest was excluded by the filter" apart from "this key is a real
+	// typo" in every case; matching at one grain mis-reports the other. A
+	// full, unfiltered run (`make test`, CI) still catches every typo, at
+	// every segment depth. See shouldCheckSkipKeys.
 	Skip map[string]string
 }
 
-// skipTracker is a run-scoped set of which Skip keys were actually hit.
-// It is populated by runSubtest / skipIfRegistered and validated at the
-// end of StoreFactoryConformance.
+// skipTracker is a run-scoped set of which Skip keys were actually matched
+// by a subtest (recordMatch). It is populated by skipIfRegistered and
+// validated, on an unfiltered run only, at the end of
+// StoreFactoryConformance. See shouldCheckSkipKeys.
 type skipTracker struct {
-	mu   sync.Mutex
-	used map[string]bool
+	mu      sync.Mutex
+	matched map[string]bool
 }
 
-func newSkipTracker() *skipTracker { return &skipTracker{used: make(map[string]bool)} }
+func newSkipTracker() *skipTracker { return &skipTracker{matched: make(map[string]bool)} }
 
-func (st *skipTracker) record(key string) {
+// recordMatch marks that the subtest at path name matched a Skip key and
+// was skipped by it.
+func (st *skipTracker) recordMatch(name string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	st.used[key] = true
+	st.matched[name] = true
 }
 
+// unusedKeys returns the Skip keys that were never matched by any
+// subtest. Callers gate this on shouldCheckSkipKeys: under a `-run`
+// filter, a key can go unmatched simply because its subtest never ran, so
+// the result is only meaningful for an unfiltered run.
 func (st *skipTracker) unusedKeys(skip map[string]string) []string {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	var out []string
 	for k := range skip {
-		if !st.used[k] {
+		if !st.matched[k] {
 			out = append(out, k)
 		}
 	}
 	return out
+}
+
+// shouldCheckSkipKeys reports whether the unmatched-Skip-key check should
+// run, given the current value of the `test.run` flag (from
+// flag.Lookup("test.run").Value.String()). It is true only for an
+// unfiltered run (runFlag == ""). `-run` can filter at any segment depth,
+// and no fixed grain of comparison can tell "excluded by the filter" apart
+// from "a real typo" for every possible filter depth — see the Skip
+// field's doc comment — so the check simply does not run under any
+// filter, and always runs when there is none.
+func shouldCheckSkipKeys(runFlag string) bool {
+	return runFlag == ""
 }
 
 // skipIfRegistered calls t.Skipf if the current subtest's path suffix
@@ -104,7 +136,7 @@ func skipIfRegistered(t *testing.T, h Harness, tracker *skipTracker) {
 		name = name[idx+1:]
 	}
 	if reason, ok := h.Skip[name]; ok {
-		tracker.record(name)
+		tracker.recordMatch(name)
 		t.Skipf("skipped by plugin: %s", reason)
 	}
 }
@@ -138,13 +170,23 @@ func StoreFactoryConformance(t *testing.T, h Harness) {
 
 	tracker := newSkipTracker()
 
-	// Validate that every registered Skip key was actually hit during the run.
-	// Unmatched keys indicate typos or stale entries.
-	t.Cleanup(func() {
-		for _, key := range tracker.unusedKeys(h.Skip) {
-			t.Errorf("Harness.Skip key %q was never matched — possible typo or stale entry", key)
-		}
-	})
+	// Validate that every registered Skip key was actually hit — but only
+	// on an unfiltered run. `-run` can filter this suite at any segment
+	// depth (this package documents invocations filtering below the group
+	// level), and no fixed grain of "did this key's subtest have a chance
+	// to run" comparison is correct at every depth: it either fails a
+	// focused run over a key excluded by the filter, or lets a real typo
+	// pass. So the check is skipped entirely under any `-run` filter and
+	// only runs unfiltered, where every subtest ran and an unmatched key
+	// is unambiguously a typo or a stale entry. Full runs (`make test`,
+	// CI) are always unfiltered, so this loses no coverage.
+	if runFlag := flag.Lookup("test.run"); runFlag == nil || shouldCheckSkipKeys(runFlag.Value.String()) {
+		t.Cleanup(func() {
+			for _, key := range tracker.unusedKeys(h.Skip) {
+				t.Errorf("Harness.Skip key %q was never matched — possible typo or stale entry", key)
+			}
+		})
+	}
 
 	t.Run("Transaction", func(t *testing.T) { runTransactionSuite(t, h, tracker) })
 	t.Run("Entity", func(t *testing.T) { runEntitySuite(t, h, tracker) })
@@ -154,6 +196,7 @@ func StoreFactoryConformance(t *testing.T, h Harness) {
 	t.Run("Workflow", func(t *testing.T) { runWorkflowSuite(t, h, tracker) })
 	t.Run("Audit", func(t *testing.T) { runAuditSuite(t, h, tracker) })
 	t.Run("AsyncSearch", func(t *testing.T) { runAsyncSearchSuite(t, h, tracker) })
+	t.Run("ScheduledTasks", func(t *testing.T) { runScheduledTasksSuite(t, h, tracker) })
 	t.Run("Searcher", func(t *testing.T) { runSearcherSuite(t, h, tracker) })
 	t.Run("Iterable", func(t *testing.T) { runIterableSuite(t, h, tracker) })
 	t.Run("GroupedAggregator", func(t *testing.T) { runGroupedAggregatorSuite(t, h, tracker) })

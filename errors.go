@@ -59,14 +59,32 @@ var ErrTxNotFound = &sentinelErr{msg: "transaction not found", parent: ErrNotFou
 // Wraps ErrNotFound.
 var ErrSavepointNotFound = &sentinelErr{msg: "savepoint not found", parent: ErrNotFound}
 
+// ErrTxAborted indicates the transaction was aborted by an earlier conflict;
+// every later statement other than Commit that the engine refuses fails with
+// this error, until the transaction ends. A rollback to a savepoint taken
+// before the conflict makes statements run again but does not undo the
+// conflict: a conflict anywhere in the transaction is a conflict of the
+// transaction, and Commit refuses it with the recorded cause, which is also
+// ErrConflict.
+// It wraps ErrConflict, so a caller that answers a conflict keeps doing so.
+//
+// It exists for the caller that must tell a conflict about its own statement
+// apart from one that happened earlier: a compare-and-save that fails with
+// ErrTxAborted did not find its precondition false — it never ran, because a
+// concurrent writer had already won against this transaction. Returned only
+// by backends whose engine aborts the whole transaction on a conflict; a
+// backend that detects conflicts at commit never returns it.
+var ErrTxAborted = &sentinelErr{msg: "transaction aborted by an earlier conflict", parent: ErrConflict}
+
 // ErrTxTerminated is the umbrella sentinel for any operation on a
 // transaction that has reached a terminal state (committed or rolled
 // back). Callers that do not need to distinguish rollback from commit
 // can match this directly.
 //
 // NOTE: Backends that delegate transaction state to an external engine
-// may surface mid-op rollback as ErrConflict (e.g. via a SQLSTATE
-// 25P02 from a SQL engine) instead of ErrTxRolledBack, where the
+// may surface mid-op rollback as ErrConflict — ErrTxAborted when the abort
+// was a conflict (e.g. a SQLSTATE 25P02 from a SQL engine after a 40001) —
+// instead of ErrTxRolledBack, where the
 // engine's abort code is already semantically meaningful. The
 // ErrTxTerminated sentinel is required only on plugins that own their
 // own in-process tx-state buffer. Consumers writing backend-agnostic
@@ -114,10 +132,17 @@ var ErrTxCommitInProgress = errors.New("transaction commit in progress")
 // answer to a cross-tenant lookup, or it becomes an existence oracle.
 var ErrTxNotCommitted = errors.New("transaction not yet committed")
 
-// ErrTxTenantMismatch indicates a transaction-lifecycle operation
-// (Join, Commit, Rollback, Savepoint, etc.) was attempted with a
-// UserContext whose tenant does not match the transaction's tenant.
-// Tenant-isolation invariant — distinct from data-op tenant checks.
+// ErrTxTenantMismatch indicates a tenant mismatch against the transaction
+// on ctx:
+//
+//   - A transaction-lifecycle operation (Join, Commit, Rollback,
+//     Savepoint, etc.) was attempted with a UserContext whose tenant does
+//     not match the transaction's tenant.
+//   - A JOINING ScheduledTaskStore write (see ScheduledTaskStore's doc)
+//     was called with a transaction on ctx whose tenant is not the
+//     method's own tenant argument (or req.TenantID / ref.TenantID).
+//
+// Tenant-isolation invariant in both cases.
 var ErrTxTenantMismatch = errors.New("transaction tenant mismatch")
 
 // ErrGroupCardinalityExceeded is returned by GroupedAggregator
@@ -147,15 +172,65 @@ var ErrUniqueViolation = errors.New("composite unique key violation")
 var ErrPartialUniqueKey = errors.New("invalid composite unique key value")
 
 // ErrAlreadyTerminal is returned by AsyncSearchStore write methods
-// (UpdateJobStatus, Heartbeat, SaveResults) called against a job already in
-// a terminal status (SUCCESSFUL/FAILED/CANCELLED). Cancel is the sole
-// idempotent-nil exception.
+// (UpdateJobStatus, Heartbeat, SaveResults, Release, ClearResults) called
+// against a job already in a terminal status (SUCCESSFUL/FAILED/CANCELLED).
+// Cancel is the sole idempotent-nil exception.
 var ErrAlreadyTerminal = errors.New("job is in a terminal status")
 
-// ErrStaleClaim is returned by AsyncSearchStore write methods
-// (UpdateJobStatus, SaveResults, Heartbeat) when the caller's epoch does not
-// match the job's current Epoch — another claimant has since taken over.
+// ErrStaleClaim is returned by a fenced write whose caller no longer holds
+// the claim it names:
+//
+//   - AsyncSearchStore (UpdateJobStatus, SaveResults, Heartbeat, Release,
+//     ClearResults): the caller's epoch does not match the job's current
+//     Epoch — another claimant has since taken over.
+//   - ScheduledTaskStore (StampSegment, MarkUnsafe, RecordAttempt, Fail):
+//     the task is missing, or its current arm token or claim token is not
+//     the one in the TaskRef — the task was re-armed, reclaimed, recorded,
+//     failed or removed since the caller claimed it.
 var ErrStaleClaim = errors.New("write fenced: stale claim epoch")
+
+// ErrMarkedByAnotherClaim is returned by ScheduledTaskStore.MarkUnsafe when
+// an earlier claim of the same life already wrote a mark. Work that is not
+// safe to repeat may already have been handed off for this life, so the
+// caller must not dispatch it again.
+var ErrMarkedByAnotherClaim = errors.New("scheduled task: marked by another claim of this life")
+
+// ErrTaskBusy is returned by ScheduledTaskStore.MarkUnsafe and
+// ScheduledTaskStore.RecordAttempt when an open transaction has written the
+// task row. The write is not made. The caller treats it as a failure that
+// is safe to retry.
+//
+// AsyncSearchStore.Heartbeat may answer it too, when the job's row is held
+// by an open write of the same job (for example a SaveResults chunk's
+// fencing transaction); Heartbeat does not wait and makes no write, and the
+// caller treats the answer as a missed tick, not a lost claim.
+//
+// ScheduledTaskStore.ClaimDue may answer it too, on a backend that
+// lock-waits rather than selecting candidates without blocking: a bounded
+// wait for a lock unrelated to the MarkUnsafe/ClaimDue race (C3) that gives
+// up is reported this way for the call, instead of blocking indefinitely.
+// This is distinct from a row an open transaction has written (C6), which
+// ClaimDue always just skips, never waiting and never erroring for it.
+//
+// The sentinel is store-neutral: it names no store because more than one
+// now returns it.
+var ErrTaskBusy = errors.New("row is being written by an open transaction")
+
+// ErrStoreRejected marks a deterministic rejection by the store: the same
+// write with the same input fails the same way every time, so retrying it
+// cannot succeed. Examples: input that breaks a documented precondition
+// (such as Attempt.Error over 1024 bytes, not valid UTF-8, or holding a
+// NUL), or a constraint or data error from the database (on PostgreSQL,
+// SQLSTATE classes 22, 23 and 42). A store wraps such an error so that
+//
+//	errors.Is(err, spi.ErrStoreRejected)
+//
+// holds. This applies to every method of every store in this SPI, and to a
+// transaction's Commit — including StateMachineAuditStore.Record, which the
+// engine calls in the same transaction as ScheduledTaskStore.Fail. Every
+// other failure — outage, timeout, lock wait, pool exhaustion, conflict —
+// must NOT carry it: callers retry those.
+var ErrStoreRejected = errors.New("store rejected the write deterministically")
 
 // ErrUnknownOperator is returned by ConditionToFilter for a condition leaf
 // whose operatorType is not in the closed set OperatorNames reports.

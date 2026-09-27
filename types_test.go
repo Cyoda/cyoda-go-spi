@@ -2,8 +2,11 @@ package spi
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 func TestValidateChangeLevel(t *testing.T) {
@@ -311,21 +314,18 @@ func TestProcessorConfig_AsyncResultAndCrossover_RoundTrips(t *testing.T) {
 
 func TestScheduledTask_RoundTrips(t *testing.T) {
 	to := int64(5000)
-	rd := int64(1_700_000_030_000)
 	task := ScheduledTask{
-		ID:              "e1:S:T",
-		TenantID:        "t1",
-		Type:            ScheduledTaskFireTransition,
-		ScheduledTime:   1_700_000_000_000,
-		TimeoutMs:       &to,
-		RedispatchAfter: &rd,
-		EntityID:        "e1",
-		ModelName:       "order",
-		ModelVersion:    2,
-		Transition:      "AutoClose",
-		SourceState:     "OPEN",
-		ArmedAt:         1_699_999_999_000,
-		AttemptCount:    1,
+		ID:            "e1:S:T",
+		TenantID:      "t1",
+		Type:          ScheduledTaskFireTransition,
+		ScheduledTime: 1_700_000_000_000,
+		TimeoutMs:     &to,
+		EntityID:      "e1",
+		ModelName:     "order",
+		ModelVersion:  2,
+		Transition:    "AutoClose",
+		SourceState:   "OPEN",
+		ArmedAt:       1_699_999_999_000,
 	}
 	b, err := json.Marshal(task)
 	if err != nil {
@@ -339,11 +339,100 @@ func TestScheduledTask_RoundTrips(t *testing.T) {
 		back.TimeoutMs == nil || *back.TimeoutMs != 5000 || back.SourceState != "OPEN" {
 		t.Fatalf("round-trip lost fields: %+v", back)
 	}
+	// The throttle and its counter are gone: a claim replaces the first, and
+	// Attempts and LostOwners replace the second. A document that still
+	// carries them does not bring them back.
+	var old ScheduledTask
+	if err := json.Unmarshal([]byte(`{"id":"x","redispatchAfter":5,"attemptCount":2}`), &old); err != nil {
+		t.Fatal(err)
+	}
+	b3, _ := json.Marshal(old)
+	for _, gone := range []string{"redispatchAfter", "attemptCount"} {
+		if strings.Contains(string(b3), gone) {
+			t.Errorf("%s must not be a field of ScheduledTask: %s", gone, b3)
+		}
+	}
 	// nil TimeoutMs (no timeout) must round-trip as absent.
 	task.TimeoutMs = nil
 	b2, _ := json.Marshal(task)
 	if strings.Contains(string(b2), "timeoutMs") {
 		t.Errorf("nil TimeoutMs must be omitted: %s", b2)
+	}
+}
+
+func TestScheduledTask_LifeFields_RoundTrip(t *testing.T) {
+	last, failed := int64(1_700_000_001_000), int64(1_700_000_002_000)
+	in := ScheduledTask{
+		ID: "e1:S:T", TenantID: "t1", Type: ScheduledTaskFireTransition,
+		ScheduledTime:   1_700_000_000_000,
+		Status:          ScheduledTaskFailed,
+		ArmToken:        uuid.New(),
+		NextAttemptTime: 1_700_000_000_500,
+		Attempts:        2,
+		LostOwners:      1,
+		LastAttemptTime: &last,
+		LastError:       "CONFLICT: a concurrent write changed the entity or its task",
+		FailureReason:   FailureExpiredAfterFailedAttempts,
+		FailedTime:      &failed,
+		PartialCommit:   true,
+		Claim:           &TaskClaim{Token: uuid.New(), Owner: uuid.New()},
+		UnsafeMarked:    true,
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out ScheduledTask
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(in, out) {
+		t.Fatalf("round-trip mismatch:\n in: %+v\nout: %+v", in, out)
+	}
+
+	// A WAITING task has no claim and no failure: those keys are omitted.
+	b2, _ := json.Marshal(ScheduledTask{ID: "x", Status: ScheduledTaskWaiting})
+	for _, absent := range []string{`"claim"`, `"failureReason"`, `"failedTime"`, `"lastAttemptTime"`, `"lastError"`} {
+		if strings.Contains(string(b2), absent) {
+			t.Errorf("%s must be omitted when unset: %s", absent, b2)
+		}
+	}
+}
+
+func TestScheduledTask_StatusAndReasonValues(t *testing.T) {
+	cases := map[string]string{
+		string(ScheduledTaskWaiting):              "WAITING",
+		string(ScheduledTaskRunning):              "RUNNING",
+		string(ScheduledTaskFailed):               "FAILED",
+		string(FailureUnsafeWorkNotCompleted):     "UNSAFE_WORK_NOT_COMPLETED",
+		string(FailureOwnerLostRepeatedly):        "OWNER_LOST_REPEATEDLY",
+		string(FailureExpiredAfterFailedAttempts): "EXPIRED_AFTER_FAILED_ATTEMPTS",
+		string(FailureRunPanicked):                "RUN_PANICKED",
+		string(FailureStoppedAfterPartialCommit):  "STOPPED_AFTER_PARTIAL_COMMIT",
+	}
+	for got, want := range cases {
+		if got != want {
+			t.Errorf("got %q want %q", got, want)
+		}
+	}
+}
+
+// ClaimedFromLostOwner is read-only and exists only on a ClaimDue result: it is
+// never serialised, so no stored or returned JSON document carries it.
+func TestScheduledTask_ClaimedFromLostOwnerIsNotSerialised(t *testing.T) {
+	b, err := json.Marshal(ScheduledTask{ID: "x", Status: ScheduledTaskRunning, ClaimedFromLostOwner: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.ToLower(string(b)), "claimedfromlostowner") {
+		t.Fatalf("ClaimedFromLostOwner must not be serialised: %s", b)
+	}
+	var back ScheduledTask
+	if err := json.Unmarshal([]byte(`{"id":"x","claimedFromLostOwner":true,"ClaimedFromLostOwner":true}`), &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.ClaimedFromLostOwner {
+		t.Fatal("a JSON document must not set ClaimedFromLostOwner")
 	}
 }
 
@@ -353,6 +442,7 @@ func TestScheduledTransitionEventTypes(t *testing.T) {
 		SMEventScheduledTransitionFired:     "SCHEDULED_TRANSITION_FIRE",
 		SMEventScheduledTransitionExpired:   "SCHEDULED_TRANSITION_EXPIRE",
 		SMEventScheduledTransitionCancelled: "SCHEDULED_TRANSITION_CANCEL",
+		SMEventScheduledTransitionFailed:    "SCHEDULED_TRANSITION_FAIL",
 	}
 	for got, want := range cases {
 		if string(got) != want {

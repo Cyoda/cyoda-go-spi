@@ -12,8 +12,205 @@ MAINTAINING.md.
 
 ## [Unreleased]
 
+### Breaking
+
+- **`ScheduledTaskStore` is replaced: every scheduled run has one owner.**
+  A task now has lives. `ReconcileForEntity` arms each task as a new life
+  with a store-drawn `ArmToken` and removes every other task of the entity.
+  A pnode claims due tasks with `ClaimDue` (cross-tenant, disjoint across
+  callers, at most one RUNNING task per entity, per-tenant limits, tenants
+  taking turns, lost-owner claims against `Heartbeat` liveness records) and
+  every write it makes as the owner is fenced by a `TaskRef` (`StampSegment`,
+  `MarkUnsafe`, `RecordAttempt`, `Fail`; `ErrStaleClaim` otherwise). A
+  joining write whose transaction belongs to another tenant is refused with
+  `ErrTxTenantMismatch`. `GiveBackIdle`, `RetireOwner`, `SweepOwners`,
+  `SweepMarks`, `RemoveLife`, `DeleteForEntities`, `DeleteForModel`, and a
+  tenant-scoped `Query` complete the interface; `Get` takes the tenant.
+  Clauses C1-C6 on the interface doc bind every backend: first-committer-wins
+  on task rows, joining reads that see staged writes, a mark and a claim that
+  serialise, own connections for heartbeats and claims, recognisable
+  refusals, and rows written by an open transaction that are neither
+  claimable nor markable. `ScheduledTask` gains `Status`, `ArmToken`,
+  `NextAttemptTime`, `Attempts`, `LostOwners`, `LastAttemptTime`,
+  `LastError`, `FailureReason`, `FailedTime`, `PartialCommit`, `Claim` and
+  `UnsafeMarked`, and loses the redispatch throttle and its counter.
+  `Upsert`, `ScanDue`, `MarkRedispatch`, `Delete` and the root-package
+  `RunScheduledTaskStoreConformance` are removed.
+
+  Migration: implement the interface as documented on
+  `persistence.go`'s `ScheduledTaskStore`, and run the new `spitest`
+  ScheduledTasks group through `StoreFactoryConformance` instead of
+  `RunScheduledTaskStoreConformance`. A backend that has no scheduled-task
+  store returns an error satisfying `errors.Is(err, errors.ErrUnsupported)`
+  from `StoreFactory.ScheduledTaskStore`; the group then skips. Wrap every
+  deterministic rejection (bad input, SQL data or constraint errors) so that
+  `errors.Is(err, spi.ErrStoreRejected)` holds, and no other error.
+
+- **`TransactionManager.LostRace`: a required method that says whether a
+  transaction has already lost a write race.** `LostRace(ctx, txID)` answers
+  true when a transaction that committed after this one's snapshot wrote an
+  entity or task row this transaction writes, so `Commit` will refuse it with
+  `ErrConflict`. The answer is the same whether the backend refused the losing
+  write (and aborted the transaction) or accepted it and detects the conflict
+  at commit, and it survives a rollback to a savepoint. A rival that has not
+  committed, or that committed before the snapshot, has not won; the one
+  exception is the victim of a deadlock the engine aborted (PostgreSQL's
+  40P01), which Commit refuses all the same. A change to an entity the
+  transaction only read is not a lost write race. It changes nothing, issues
+  no statement an aborted transaction would refuse, and refuses another
+  tenant's transaction with `ErrTxTenantMismatch` and an unknown one with
+  `ErrTxNotFound`. A caller that sees a failure inside a transaction uses it
+  to tell that the conflict is what happened.
+
+  Migration: implement it. A backend that aborts the transaction on a conflict
+  answers from the conflict it recorded; one that detects conflicts at commit
+  runs the write half of its commit-time check — the entity write set and the
+  staged task-row writes against the commits after the snapshot — plus any
+  lost write a savepoint rollback discarded. The `spitest` Transaction group
+  gains `LostRace/WriteLost`, `LostRace/NoRival`, `LostRace/RivalBeforeBegin`,
+  `LostRace/RivalNotCommitted`, `LostRace/ReadOnlyRival`,
+  `LostRace/AfterSavepointRollback`, `LostRace/DiscardedRivalAfter`,
+  `LostRace/TenantMismatch` and `LostRace/NotFound`. The ScheduledTasks group
+  gains `LostRace/WriteLost`, `LostRace/NoRival`, `LostRace/ClaimBeforeBegin`,
+  `LostRace/AfterSavepointRollback` and `LostRace/DiscardedRivalAfter`, each
+  for a `DeleteForEntities` and a `ReconcileForEntity` write.
+
+- **`AsyncSearchStore.ClearResults` takes the claim epoch and is fenced.**
+  `ClearResults(ctx, jobID, epoch)` refuses a clear whose epoch is not the
+  job's current `Epoch` with `ErrStaleClaim`, a terminal job with
+  `ErrAlreadyTerminal`, and a missing job with `ErrNotFound`; a refused clear
+  deletes nothing. A missing job, formerly a nil no-op, now answers
+  `ErrNotFound`. The fence check and the delete are atomic. Before, a clear
+  from an executor the job had been reclaimed from could delete the rows the
+  new owner had saved.
+
+  Migration: add the `epoch int64` parameter and fence it as `Release` is
+  fenced, in the same statement or transaction as the delete. The `spitest`
+  AsyncSearch group gains `ClearResults/Fenced` and
+  `ClearResults/TenantScoped`.
+
 ### Added
 
+- **`ErrTxAborted`: a statement refused because an earlier conflict aborted
+  the transaction.** It wraps `ErrConflict`. A backend whose engine aborts the
+  whole transaction on a conflict returns it for every later statement other
+  than Commit that the engine refuses, until the transaction ends. A rollback
+  to a savepoint taken before the conflict lets statements run again but does
+  not undo the conflict: Commit refuses the transaction with the recorded
+  cause, which is also `ErrConflict`. A caller can tell a compare-and-save
+  that never ran from one whose precondition was false. Backends that detect
+  conflicts at commit never return it.
+
+- **A savepoint rollback keeps a lost write race on every backend.**
+  `RollbackToSavepoint` documents that a write it discards which has already
+  lost first-committer-wins (another transaction committed that entity or
+  task row after the snapshot and before the rollback) makes `Commit` refuse
+  the transaction with `ErrConflict`, whether the backend detects conflicts
+  at the write or at commit. A commit to that entity or task row after the
+  rollback does not conflict, and discarded read-set entries are dropped.
+  The `spitest` Transaction group gains
+  `Savepoint/RollbackKeepsLostWriteRace`,
+  `Savepoint/RollbackDiscardedWriteNoRival`,
+  `Savepoint/RollbackDiscardedWriteRivalAfter`,
+  `Savepoint/NestedRollbacksKeepLostWriteRace` and
+  `Savepoint/ReleasedThenRolledBackKeepsLostWriteRace`. The ScheduledTasks
+  group gains `Savepoint/RollbackKeepsLostWriteRace`,
+  `Savepoint/RollbackDiscardedWriteRivalAfter`,
+  `Savepoint/RollbackDiscardedWriteNoRival`,
+  `Savepoint/NestedRollbacksKeepLostWriteRace` and
+  `Savepoint/ReleasedThenRolledBackKeepsLostWriteRace`, each for a discarded
+  `DeleteForEntities` and a discarded `ReconcileForEntity`.
+
+  Migration: a backend that validates a read and write set, or staged
+  task-row writes, at commit and restores them from the savepoint snapshot
+  must, at the rollback, remember that a discarded write's entity or task
+  row was committed by another transaction since the snapshot, and refuse
+  `Commit` for it.
+
+- **`ErrMarkedByAnotherClaim`, `ErrTaskBusy`, `ErrStoreRejected`.**
+  `ErrMarkedByAnotherClaim` is `ScheduledTaskStore.MarkUnsafe`'s refusal when
+  an earlier claim of the same life already wrote the mark. `ErrTaskBusy` is
+  returned by both `MarkUnsafe` and `RecordAttempt` when an open transaction
+  has written the task row (C6); the write is not made and the caller
+  retries — a store may never instead apply the write and let the open
+  transaction's commit fail. `GiveBackIdle` meets the same row by skipping
+  it: uncounted, unchanged, still RUNNING under its claim, and without
+  waiting for the transaction to end. `ErrStoreRejected` is the marker a
+  store puts on a deterministic rejection — bad input, or a constraint/data
+  error from the database — so a
+  caller can tell "retrying cannot help" from an outage; it applies to every
+  method of every store in this SPI, including a transaction's `Commit`.
+  `ErrStaleClaim`'s comment now also names the scheduled-task fence
+  (`StampSegment`, `MarkUnsafe`, `RecordAttempt`, `Fail`) alongside
+  `AsyncSearchStore.Release`; its value and message are unchanged.
+  `ErrTaskBusy` is now store-neutral: its message drops the "scheduled
+  task:" prefix (`"row is being written by an open transaction"`), because
+  it is no longer scheduled-task-only. `AsyncSearchStore.Heartbeat` may
+  answer it when the job's row is held by an open write of the same job
+  (for example a `SaveResults` chunk) — Postgres may return this, memory
+  and SQLite never lock-wait there; Heartbeat does not wait and makes no
+  write, and the caller treats the answer as a missed tick, not
+  `ErrStaleClaim`'s lost claim. `ScheduledTaskStore.ClaimDue` may also
+  answer it, on a backend that lock-waits rather than selecting candidates
+  without blocking, for contention unrelated to the MarkUnsafe/ClaimDue
+  race (C3); a row an open transaction has written (C6) is still always
+  just skipped by `ClaimDue`, never waited on and never an error.
+- **`SMEventScheduledTransitionFailed` (`SCHEDULED_TRANSITION_FAIL`).** The
+  audit event recorded with a task that ends FAILED.
+- **`ScheduledTask.ClaimedFromLostOwner`.** Read-only, not serialised, set
+  only on a `ClaimDue` result that took the task from a stale or missing
+  owner.
+- **Shared scheduled-task helpers for backends.** `SelectClaims` picks one
+  `ClaimDue` call's tasks (one per entity, per-tenant limits, tenants taking
+  turns); `ValidateTaskErrorText` refuses an error text over
+  `MaxTaskErrorBytes` (1024) bytes, not valid UTF-8, or holding a NUL;
+  `ValidateFailureReason` refuses a `Failure.Reason` that is not one of the
+  five known reasons, including an empty one; `ValidateArm` refuses an Arm
+  item with no id and an id that names both an Arm and a Cancel. All four
+  report `errors.Is(err, ErrStoreRejected)`. A backend calls them, or meets
+  the same rules in its own query language; no backend keeps its own copy.
+- **`spitest` `Audit/RolledBackEventNotKept`.** An audit event recorded in a
+  transaction that rolls back is not kept, on every backend.
+- **`spitest` ScheduledTasks group.** Covers every `ScheduledTaskStore`
+  method, every refusal and clauses C1, C2, C3, C5 and C6, including a mark
+  that survives the rollback of the transaction on ctx, the refusal of every
+  fenced write of a re-armed life, one claim for two due siblings, a row
+  written by an open transaction that is not claimed, a `GiveBackIdle` that
+  skips such a row rather than waiting for it, a lost-owner claim that
+  is flagged, a joining write of another tenant that is refused, `Query` and
+  `ClaimDue` refusing a Limit below 1 (`ErrStoreRejected`) even when the
+  tenant has matching rows, a `ReconcileForEntity` Cancel id that names
+  another entity's task being left untouched, and a `RemoveLife` naming a
+  life the transaction's snapshot already shows replaced or missing: a
+  no-op that is no C1 write, does not make the row busy under C6, and
+  commits even when the row changes after Begin. The interface doc now also
+  states, once each: `ReconcileForEntity` returns its removed tasks sorted
+  by task ID byte-wise (`Arm/RemovedOrderByID`); `ClaimDue` returns claims
+  in the order `SelectClaims` produces, not just selects them in that order
+  (`Claim/OrderEarliestTenantFirst` now checks the returned sequence
+  itself); any method returning a slice may answer nil or an empty slice
+  for "nothing", callers use `len`; and refusal precedence is the same on
+  every backend — input validation (`ErrStoreRejected`), then the
+  transaction-tenant check (`ErrTxTenantMismatch`), then fencing and busy
+  (`ErrStaleClaim`/`ErrTaskBusy`) — pinned by new case
+  `Precedence/RejectedBeforeTenantMismatch`. New case
+  `Claim/BusyRowTurnPassesOn`: a row an open transaction has made busy is
+  skipped rather than waited on, its turn passing to the next due task,
+  proven non-vacuous by claiming the same row once the transaction rolls
+  back. Two more cases close the RemoveLife no-op edges a review raised:
+  `C1/StaleRemoveLifeAfterFurtherChange` (the outside change committing
+  again before, not after, the no-op call gives the identical verdict) and
+  `C1/RemoveLifeOfALifeArmedAfterBegin` (naming a life armed after Begin,
+  which the snapshot never saw at all, is a no-op too). The interface doc
+  now states this last point once: a life armed by another transaction
+  after Begin is not seen.
+  New case `Get/OtherTenantTransactionSeesCommitted`: another tenant's
+  transaction never changes what `Get` returns — it must answer the
+  tenant's current committed life, not the one that transaction's own
+  snapshot saw at `Begin`.
+  `Harness.AdvanceClock`'s contract now covers a capped real-clock harness:
+  it moves the store clock forward by at least `min(d, cap)`, never less,
+  and the strict-dominance guarantee holds for the smaller amount.
 - **`ProcessorConfig.Idempotent` and `ScheduleFunction.RetryPolicy`.** Two
   optional workflow-configuration fields. `idempotent` (bool, default false,
   omitted when false) is the author's declaration that a processor may be run
@@ -137,6 +334,20 @@ MAINTAINING.md.
   `omitempty`: a fixed delay is written as before, an absent one is left out.
   Reading is unchanged — an absent key and `0` decode alike — so stored
   workflows need no migration.
+
+- **`spitest.StoreFactoryConformance` failed a `-run`-filtered invocation
+  over `Harness.Skip` keys the filter excluded from running.** `-run` can
+  filter this suite at any segment depth — this package documents
+  invocations that filter below the group level, e.g. `go test -run
+  'TestConformance/Transaction/TxStateErrors/JoinAfterCommit'` — so no
+  fixed grain of "did this key's subtest have a chance to run" comparison
+  (the whole key, its top-level group, its parent path) is correct for
+  every filter depth: each either lets some real typo pass or false-flags
+  some excluded key. The unmatched-key check now runs only on a fully
+  unfiltered invocation (the `test.run` flag empty); under any `-run`
+  filter it does not run at all. A full run (`make test`, CI) is always
+  unfiltered and still catches every typo or stale entry, at any segment
+  depth, exactly as before.
 
 ## [0.8.4] - 2026-09-09
 

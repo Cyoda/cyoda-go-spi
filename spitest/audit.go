@@ -17,6 +17,7 @@ func runAuditSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "GetEvents/NotFound", testAuditGetEventsNotFound)
 	runSubtest(t, h, tracker, "GetEventsByTransaction", testAuditGetByTx)
 	runSubtest(t, h, tracker, "TenantIsolation", testAuditTenantIsolation)
+	runSubtest(t, h, tracker, "RolledBackEventNotKept", testAuditRolledBackEventNotKept)
 }
 
 func newSMEvent(txID, state, details string) spi.StateMachineEvent {
@@ -133,4 +134,37 @@ func testAuditTenantIsolation(t *testing.T, h Harness) {
 	byTx, err := asB.GetEventsByTransaction(tenantContext(tB), "e1", "tx")
 	require.NoError(t, err)
 	require.Len(t, byTx, 0)
+}
+
+// testAuditRolledBackEventNotKept pins that audit events are bound to the
+// transaction on every backend: an event recorded in a transaction that
+// rolls back is not kept, and one recorded in a transaction that commits is.
+func testAuditRolledBackEventNotKept(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	as, err := h.Factory.StateMachineAuditStore(ctx)
+	require.NoError(t, err)
+	entityID := newID()
+
+	txID, txCtx, err := tm.Begin(ctx)
+	require.NoError(t, err)
+	require.NoError(t, as.Record(txCtx, entityID, newSMEvent(txID, "B", "A->B")))
+	require.NoError(t, tm.Rollback(txCtx, txID))
+
+	events, err := as.GetEvents(ctx, entityID)
+	require.NoError(t, err)
+	require.Empty(t, events, "an event recorded in a rolled-back transaction must not be kept")
+	byTx, err := as.GetEventsByTransaction(ctx, entityID, txID)
+	require.NoError(t, err)
+	require.Empty(t, byTx, "an event recorded in a rolled-back transaction must not be kept")
+
+	txID2, txCtx2, err := tm.Begin(ctx)
+	require.NoError(t, err)
+	require.NoError(t, as.Record(txCtx2, entityID, newSMEvent(txID2, "C", "B->C")))
+	require.NoError(t, tm.Commit(txCtx2, txID2))
+	events, err = as.GetEvents(ctx, entityID)
+	require.NoError(t, err)
+	require.Len(t, events, 1, "an event recorded in a committed transaction is kept")
+	require.Equal(t, "C", events[0].State)
 }

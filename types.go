@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type ModelRef struct {
@@ -285,15 +287,16 @@ type ProcessorConfig struct {
 // transition. Presence of this struct on a TransitionDefinition marks
 // the transition as scheduled.
 //
-// Semantics. The scheduled execution time of the transition is
-// scheduledTime = stateEntryTime + DelayMs. When the scheduler picks
-// the task up at executionTime, it computes
-// lateness = executionTime - scheduledTime.
-//   - If TimeoutMs is nil, the task is always attempted (no timeout).
-//   - If TimeoutMs is non-nil and lateness > *TimeoutMs, the task is
-//     dropped and the transition is NOT attempted.
-//   - If TimeoutMs is non-nil and lateness <= *TimeoutMs (including
-//     *TimeoutMs == 0 when lateness is 0), the transition fires.
+// Semantics. The transition is due at scheduledTime = stateEntryTime +
+// DelayMs, or at the time Function computes. TimeoutMs, when set, bounds
+// how late it may fire: deadline = scheduledTime + *TimeoutMs.
+//   - If TimeoutMs is nil, the task is attempted until it fires. A failed
+//     attempt is retried without end.
+//   - If a first attempt would start after the deadline, it is not made:
+//     the task expires.
+//   - A failed attempt is retried until the deadline. A task that has not
+//     fired by then ends FAILED instead of expiring. The consuming engine
+//     sets the retry delay.
 //
 // TimeoutMs gives operators control over how the system handles
 // backlog and intermittent-offline conditions. Short positive values
@@ -304,11 +307,7 @@ type ProcessorConfig struct {
 //
 // Scheduled transitions are a special case of a generic ScheduledTask
 // abstraction. The lateness-tolerance concept (TimeoutMs) applies
-// uniformly across all ScheduledTask variants. The generic
-// abstraction and the runtime that implements it ship in a later
-// release; until then, consuming engines silently skip scheduled
-// transitions during automated cascade selection and reject explicit
-// fires by name with a transition-not-found error.
+// uniformly across all ScheduledTask variants.
 type TransitionSchedule struct {
 	// DelayMs is the delay between source-state entry and the
 	// scheduled execution time, in milliseconds. Must be > 0 for a
@@ -318,11 +317,11 @@ type TransitionSchedule struct {
 
 	// TimeoutMs is the late-tolerance window past the scheduled
 	// execution time, in milliseconds. Nil means no timeout — the
-	// task fires whenever the scheduler eventually picks it up.
-	// Non-nil zero is the strictest setting — drop on any lateness.
-	// Non-nil positive N drops the task if it picks up more than N
-	// milliseconds after scheduledTime. Independent of DelayMs; the
-	// two measure different quantities.
+	// task is attempted until it fires. Non-nil zero is the strictest
+	// setting — a first attempt that starts late expires the task.
+	// Non-nil positive N sets the deadline N milliseconds after
+	// scheduledTime (see the type's Semantics). Independent of DelayMs;
+	// the two measure different quantities.
 	TimeoutMs *int64 `json:"timeoutMs,omitempty"`
 
 	// Function configures a Function callout that computes the firing
@@ -348,6 +347,39 @@ type ScheduleFunction struct {
 	RetryPolicy string `json:"retryPolicy,omitempty"`
 }
 
+// ScheduledTaskStatus is where a scheduled task is in its life.
+type ScheduledTaskStatus string
+
+const (
+	// ScheduledTaskWaiting: armed, not claimed. Claimable once
+	// NextAttemptTime has passed.
+	ScheduledTaskWaiting ScheduledTaskStatus = "WAITING"
+	// ScheduledTaskRunning: claimed. Claim names the owner and the claim.
+	ScheduledTaskRunning ScheduledTaskStatus = "RUNNING"
+	// ScheduledTaskFailed: ended without firing. Never claimed. Kept until
+	// the entity is written again, leaves the state, or is deleted.
+	ScheduledTaskFailed ScheduledTaskStatus = "FAILED"
+)
+
+// ScheduledTaskFailureReason says why a task is FAILED.
+type ScheduledTaskFailureReason string
+
+const (
+	FailureUnsafeWorkNotCompleted     ScheduledTaskFailureReason = "UNSAFE_WORK_NOT_COMPLETED"
+	FailureOwnerLostRepeatedly        ScheduledTaskFailureReason = "OWNER_LOST_REPEATEDLY"
+	FailureExpiredAfterFailedAttempts ScheduledTaskFailureReason = "EXPIRED_AFTER_FAILED_ATTEMPTS"
+	FailureRunPanicked                ScheduledTaskFailureReason = "RUN_PANICKED"
+	FailureStoppedAfterPartialCommit  ScheduledTaskFailureReason = "STOPPED_AFTER_PARTIAL_COMMIT"
+)
+
+// TaskClaim is the claim a RUNNING task is held under. Token is drawn by
+// the store on every claim and never reused. Owner is the incarnation of
+// the consuming engine's process that holds the claim.
+type TaskClaim struct {
+	Token uuid.UUID `json:"token"`
+	Owner uuid.UUID `json:"owner"`
+}
+
 // ScheduledTaskType discriminates ScheduledTask variants. Only
 // fire-transition is implemented today; the runtime is generic so
 // future variants (delayed export, async-result crossover) reuse it.
@@ -357,17 +389,21 @@ const ScheduledTaskFireTransition ScheduledTaskType = "fire-transition"
 
 // ScheduledTask is a durable "do something at ScheduledTime, with
 // TimeoutMs lateness tolerance" record. For fire-transition, the
-// payload fields identify the entity+transition to fire. See the
-// cyoda-go scheduled-transition-runtime design for semantics.
+// payload fields identify the entity+transition to fire.
+//
+// A task has lives. Every arm (ScheduledTaskStore.ReconcileForEntity)
+// starts a new life with a new ArmToken, whatever the status it replaces.
+// The fields from Status on are the store's: the store sets them on arm
+// and on each state change, and ignores whatever a caller puts in them.
 type ScheduledTask struct {
 	// ID is deterministic and engine-defined: the same
 	// (tenant, entity, source state, transition) always derives the same
-	// ID, so re-arming a still-scheduled transition upserts the existing
-	// row in place instead of creating a duplicate. Tenant and entity are
-	// incorporated so IDs can never collide across tenants or entities.
-	// The exact derivation (hash inputs, encoding) is an engine-internal
-	// detail, not part of this SPI's contract — stores must treat ID as
-	// an opaque, stable key.
+	// ID, so re-arming a still-scheduled transition replaces the existing
+	// row, as a new life, instead of creating a duplicate. Tenant and
+	// entity are incorporated so IDs can never collide across tenants or
+	// entities. The exact derivation (hash inputs, encoding) is an
+	// engine-internal detail, not part of this SPI's contract — stores
+	// must treat ID as an opaque, stable key.
 	ID       string            `json:"id"`
 	TenantID TenantID          `json:"tenantId"`
 	Type     ScheduledTaskType `json:"type"`
@@ -375,9 +411,6 @@ type ScheduledTask struct {
 	ScheduledTime int64 `json:"scheduledTime"`
 	// TimeoutMs is the lateness tolerance in ms; nil = never expires.
 	TimeoutMs *int64 `json:"timeoutMs,omitempty"`
-	// RedispatchAfter is a unix-millis best-effort throttle; the scan
-	// excludes rows still inside it. Not a lease, not conditional.
-	RedispatchAfter *int64 `json:"redispatchAfter,omitempty"`
 
 	// --- fire-transition payload ---
 	EntityID     string `json:"entityId,omitempty"`
@@ -386,14 +419,139 @@ type ScheduledTask struct {
 	Transition   string `json:"transition,omitempty"`
 	SourceState  string `json:"sourceState,omitempty"`
 
-	ArmedAt      int64 `json:"armedAt,omitempty"`
-	AttemptCount int   `json:"attemptCount,omitempty"`
+	ArmedAt int64 `json:"armedAt,omitempty"`
 
 	// ArmedBy is the arming principal (chain origin at arm time, per the
 	// follow-on-action attribution design); zero on legacy rows — fire
 	// treats zero as the system principal. omitempty does not omit a zero
 	// struct; readers rely on the zero-value check, never field absence.
 	ArmedBy Principal `json:"armedBy,omitempty"`
+
+	// --- life: set by the store only ---
+
+	Status ScheduledTaskStatus `json:"status"`
+	// ArmToken names the current life. Drawn by the store on every arm.
+	ArmToken uuid.UUID `json:"armToken"`
+	// NextAttemptTime is unix-millis on the consuming engine's clock; a
+	// WAITING task is claimable when NextAttemptTime <= ClaimRequest.NowMs.
+	// Equals ScheduledTime on arm.
+	NextAttemptTime int64 `json:"nextAttemptTime"`
+	// Attempts counts the attempts recorded as failed in this life.
+	Attempts int `json:"attempts"`
+	// LostOwners counts the claims of this life taken from an owner that
+	// stopped heartbeating.
+	LostOwners      int                        `json:"lostOwners"`
+	LastAttemptTime *int64                     `json:"lastAttemptTime,omitempty"`
+	LastError       string                     `json:"lastError,omitempty"`
+	FailureReason   ScheduledTaskFailureReason `json:"failureReason,omitempty"`
+	FailedTime      *int64                     `json:"failedTime,omitempty"`
+	// PartialCommit is set when a run of this life committed the entity
+	// into a state other than the task's source state.
+	PartialCommit bool `json:"partialCommit"`
+	// Claim is set while the task is RUNNING, and nil otherwise.
+	Claim *TaskClaim `json:"claim,omitempty"`
+	// UnsafeMarked is read-only: a mark (ScheduledTaskStore.MarkUnsafe)
+	// exists for this life.
+	UnsafeMarked bool `json:"unsafeMarked"`
+	// ClaimedFromLostOwner is read-only and set only on a task returned by
+	// ScheduledTaskStore.ClaimDue: this claim took the task from an owner
+	// whose liveness record was missing or stale. Never stored, never
+	// serialised; every other read returns false.
+	ClaimedFromLostOwner bool `json:"-"`
+}
+
+// TaskRef names one claim of one life. Every fenced ScheduledTaskStore
+// method takes it.
+type TaskRef struct {
+	TenantID   TenantID
+	ID         string
+	ArmToken   uuid.UUID
+	ClaimToken uuid.UUID
+}
+
+// ClaimRequest is the input of ScheduledTaskStore.ClaimDue.
+type ClaimRequest struct {
+	// Owner is the claiming incarnation.
+	Owner uuid.UUID
+	// NowMs is the caller's clock, compared with NextAttemptTime.
+	NowMs int64
+	// StaleAfter is how old an owner's liveness record may be, on the
+	// store clock, before its RUNNING tasks count as lost.
+	StaleAfter time.Duration
+	// Limit caps the number of tasks claimed by this call. Must be >= 1;
+	// ClaimDue returns an error satisfying errors.Is(err, ErrStoreRejected)
+	// otherwise.
+	Limit int
+	// PerTenantLimit caps, per tenant, TenantInProgress[tenant] plus the
+	// tasks of that tenant claimed by this call. Must be >= 1; ClaimDue
+	// returns an error satisfying errors.Is(err, ErrStoreRejected)
+	// otherwise.
+	PerTenantLimit int
+	// TenantInProgress is the caller's count of runs in progress per
+	// tenant. A missing tenant counts as 0. A negative count is a caller
+	// error: ClaimDue returns an error satisfying errors.Is(err,
+	// ErrStoreRejected).
+	TenantInProgress map[TenantID]int
+	// AllowLostOwner lets the call claim RUNNING tasks whose owner's
+	// liveness record is missing or older than StaleAfter.
+	AllowLostOwner bool
+}
+
+// Attempt is the input of ScheduledTaskStore.RecordAttempt.
+type Attempt struct {
+	// Error is the recorded error text. The caller sanitises it: at most
+	// 1024 bytes, valid UTF-8, no NUL. A store refuses any other text with
+	// an error that satisfies errors.Is(err, ErrStoreRejected).
+	Error string
+	// AtMs is when the attempt ended, unix-millis.
+	AtMs int64
+	// NextAttemptTime is when the task is claimable again, unix-millis.
+	NextAttemptTime int64
+	// NotCounted leaves Attempts unchanged. Error and AtMs are recorded
+	// all the same.
+	NotCounted bool
+	// ClearOwnMark removes the mark this claim wrote, in the same write.
+	ClearOwnMark bool
+}
+
+// Failure is the input of ScheduledTaskStore.Fail.
+type Failure struct {
+	// Reason must be one of the ScheduledTaskFailureReason constants. An
+	// unknown or empty Reason is rejected on every backend, with an error
+	// that satisfies errors.Is(err, ErrStoreRejected), and changes nothing.
+	// See ValidateFailureReason (scheduled_task_helpers.go).
+	Reason ScheduledTaskFailureReason
+	// Error follows the same rules as Attempt.Error. It always replaces
+	// LastError, even when it is empty.
+	Error string
+	// AtMs is the failure time, unix-millis. Stored as FailedTime.
+	AtMs int64
+}
+
+// ScheduledTaskCursor is a position in the (ScheduledTime, ID) order of
+// ScheduledTaskStore.Query. IDs compare byte-wise.
+type ScheduledTaskCursor struct {
+	ScheduledTime int64
+	ID            string
+}
+
+// ScheduledTaskQuery filters ScheduledTaskStore.Query.
+type ScheduledTaskQuery struct {
+	Statuses     []ScheduledTaskStatus // empty = all
+	ModelName    string                // "" = any
+	ModelVersion int                   // 0 = any; only with ModelName
+	EntityID     string                // "" = any
+	After        *ScheduledTaskCursor  // exclusive
+	// Limit caps the page size: 1..1000, validated by the caller. Limit < 1
+	// is a caller error; ScheduledTaskStore.Query returns an error
+	// satisfying errors.Is(err, ErrStoreRejected) and no page.
+	Limit int
+}
+
+// ScheduledTaskPage is one page of ScheduledTaskStore.Query.
+type ScheduledTaskPage struct {
+	Items []ScheduledTask
+	Next  *ScheduledTaskCursor // nil when there is no further page
 }
 
 // --- State machine event types ---
@@ -420,6 +578,7 @@ const (
 	SMEventScheduledTransitionFired     StateMachineEventType = "SCHEDULED_TRANSITION_FIRE"
 	SMEventScheduledTransitionExpired   StateMachineEventType = "SCHEDULED_TRANSITION_EXPIRE"
 	SMEventScheduledTransitionCancelled StateMachineEventType = "SCHEDULED_TRANSITION_CANCEL"
+	SMEventScheduledTransitionFailed    StateMachineEventType = "SCHEDULED_TRANSITION_FAIL"
 )
 
 // StateMachineEvent represents a single event in a state machine execution.

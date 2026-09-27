@@ -5,6 +5,8 @@ import (
 	"io"
 	"iter"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type StoreFactory interface {
@@ -15,52 +17,297 @@ type StoreFactory interface {
 	WorkflowStore(ctx context.Context) (WorkflowStore, error)
 	StateMachineAuditStore(ctx context.Context) (StateMachineAuditStore, error)
 	AsyncSearchStore(ctx context.Context) (AsyncSearchStore, error)
-	// ScheduledTaskStore accesses durable scheduled tasks. Unlike the
-	// per-tenant stores, its ScanDue is cross-tenant (obtain with a
-	// background/tenant-less context); Upsert/Delete/Reconcile carry the
-	// tenant on the task/request. Participates in the entity write's
-	// transaction so arm/cancel are atomic with the state change.
+	// ScheduledTaskStore accesses durable scheduled tasks. Every
+	// tenant-facing method takes its tenant as an argument; the
+	// cross-tenant methods are named on the interface. The store resolves
+	// the transaction from each call's ctx, not from the ctx it was
+	// obtained with. A backend that does not implement it returns an error
+	// satisfying errors.Is(err, errors.ErrUnsupported); the spitest suite
+	// then skips the ScheduledTasks group.
 	ScheduledTaskStore(ctx context.Context) (ScheduledTaskStore, error)
 	TransactionManager(ctx context.Context) (TransactionManager, error)
 	Close() error
 }
 
-// ReconcileForEntity input: arm the CurrentState's scheduled transitions,
-// cancel (delete) any pending task for this entity whose SourceState !=
-// CurrentState, and additionally delete the tasks explicitly listed in
-// Cancel. Returns the cancelled tasks (for audit); the Cancel-driven
-// deletions are reported distinctly from the SourceState-mismatch cancels.
+// ReconcileRequest is the input of ScheduledTaskStore.ReconcileForEntity.
 type ReconcileRequest struct {
 	TenantID     TenantID
 	EntityID     string
 	CurrentState string
-	Arm          []ScheduledTask // tasks to Upsert (current state's schedules)
-	// Cancel lists task IDs to delete for this transaction regardless of
-	// SourceState, e.g. born-expired scheduled transitions computed by a
-	// ScheduleFunction whose result already lies in the past. Audited
-	// separately from the SourceState-mismatch cancels.
+	// Arm lists the tasks to arm: the scheduled transitions of the
+	// entity's current state. Each is armed as a new life. The store takes
+	// the tenant and the entity from TenantID and EntityID above, never
+	// from an Arm item, sets every life field (see ScheduledTask), and
+	// ignores the caller's values for all of them.
+	Arm []ScheduledTask
+	// Cancel lists task IDs to remove, whether or not they are in Arm's
+	// state, e.g. born-expired scheduled transitions computed by a
+	// ScheduleFunction whose result already lies in the past. Only a task
+	// of THIS entity (TenantID, EntityID above) is removed: an id in
+	// Cancel that belongs to another entity is left untouched, the same
+	// as an id with no task at all — both are a no-op. Removed Cancel
+	// tasks are not reported in ReconcileForEntity's result: the caller
+	// audits them separately.
+	//
+	// An id in both Arm and Cancel is a caller defect: Arm means the
+	// task's life continues, Cancel means it is removed, and a request
+	// cannot mean both for the same id. ValidateArm (scheduled_task_helpers.go)
+	// refuses it with an error satisfying errors.Is(err, ErrStoreRejected).
 	Cancel []string
 }
 
-// ScheduledTaskStore persists ScheduledTasks. Arm/Delete/Reconcile MUST
-// participate in the caller's transaction (atomic with the entity write).
-// ScanDue is a read across all tenants and is called outside any tenant tx.
+// ScheduledTaskStore persists ScheduledTasks and the claims, marks and
+// owner liveness records that fence their runs.
+//
+// A method returning a slice may return nil or an empty slice when there is
+// nothing to return; callers use len, never a nil check, to tell "nothing"
+// from "something".
+//
+// Transactions. A JOINING method takes part in the transaction on ctx when
+// there is one, so its effect commits or rolls back with the entity write;
+// without one it applies at once. A NEVER-JOINING method ignores any
+// transaction on ctx and commits on its own — that is how a mark survives
+// the rollback of the run's transaction. Joining: ReconcileForEntity,
+// RemoveLife, StampSegment, DeleteForEntities, DeleteForModel, Fail, and
+// Get for reads (C2). Never joining: Query, ClaimDue, Heartbeat,
+// RetireOwner, SweepOwners, GiveBackIdle, MarkUnsafe, RecordAttempt,
+// SweepMarks.
+//
+// Fenced methods (StampSegment, MarkUnsafe, RecordAttempt, Fail) are
+// accepted only if the task's current arm token and claim token are the
+// ones in the TaskRef, in the TaskRef's tenant. Otherwise, or when the
+// task is missing, they return ErrStaleClaim and change nothing.
+//
+// A joining WRITE called with a transaction on ctx whose tenant is not
+// the method's tenant (its tenant argument, req.TenantID or ref.TenantID)
+// is refused with ErrTxTenantMismatch and changes nothing. Get carries no
+// such refusal: it is tenant-filtered like every read, so a transaction on
+// ctx from another tenant does not change what it returns — it still
+// answers only from the tenant argument, and never reveals whether another
+// tenant's task exists.
+//
+// Refusal precedence is the same on every backend, for any call that could
+// otherwise raise more than one of these: input validation (ErrStoreRejected)
+// is checked first, then the transaction-tenant check (ErrTxTenantMismatch),
+// then fencing and busy (ErrStaleClaim, ErrTaskBusy). A joining write with
+// invalid input — an Arm item without an id, an unknown Failure.Reason — made
+// under another tenant's transaction answers ErrStoreRejected, never
+// ErrTxTenantMismatch.
+//
+// Clauses every implementation meets:
+//
+//	C1  First-committer-wins covers task rows. A transaction that writes a
+//	    task row fails if another transaction, joining or not, committed a
+//	    write to that row after this one began. RemoveLife is a write
+//	    exactly when the life it names is the one the transaction sees as
+//	    current: the life its snapshot shows, after its own staged writes
+//	    (C2). The snapshot is the transaction's view as of Begin, for
+//	    backends whose transactions see a snapshot taken at Begin; other
+//	    backends judge RemoveLife as if they did. A RemoveLife naming a
+//	    life the snapshot shows replaced or missing is a no-op: not a
+//	    write, and no conflict at commit, even if the row changes later. A
+//	    life armed by another transaction after Begin is not seen: naming
+//	    it is a no-op too, the same as naming a life the snapshot shows
+//	    already replaced.
+//	C2  A joining read sees the operations staged earlier in the same
+//	    transaction.
+//	C3  A mark and a claim serialise: when MarkUnsafe and ClaimDue race on
+//	    one task, either the mark is refused or the claim returns the task
+//	    with UnsafeMarked set.
+//	C4  Heartbeat and ClaimDue have connections of their own; entity
+//	    transactions cannot starve them.
+//	C5  A C1 refusal satisfies errors.Is(err, ErrConflict), whether a
+//	    statement or the commit raises it. A fenced refusal is
+//	    ErrStaleClaim.
+//	C6  A task row written by an open transaction is not claimable until
+//	    that transaction ends. MarkUnsafe and RecordAttempt answer
+//	    ErrTaskBusy for it and make no write. GiveBackIdle leaves the row
+//	    as it is: the row is not counted, and it stays under its claim. A
+//	    no-op RemoveLife (C1) writes nothing, so it does not make the row
+//	    busy, even while its transaction stays open.
+//
+// Tenant scoping: every method that takes a tenant, or a TaskRef, reads
+// and writes that tenant's tasks only. ClaimDue, GiveBackIdle, Heartbeat,
+// RetireOwner, SweepOwners and SweepMarks are cross-tenant; obtain the
+// store for them with a background, tenant-less context.
+//
+// A deterministic rejection by the store, from any method, satisfies
+// errors.Is(err, ErrStoreRejected); no other error does (see
+// ErrStoreRejected).
 type ScheduledTaskStore interface {
-	Upsert(ctx context.Context, task ScheduledTask) error
-	Get(ctx context.Context, id string) (task *ScheduledTask, found bool, err error)
-	// ScanDue returns up to limit tasks with ScheduledTime <= nowMs AND
-	// (RedispatchAfter is null OR <= nowMs), ordered by ScheduledTime, across tenants.
-	ScanDue(ctx context.Context, nowMs int64, limit int) ([]ScheduledTask, error)
-	// MarkRedispatch sets RedispatchAfter = redispatchAfterMs (plain write) and bumps AttemptCount.
-	MarkRedispatch(ctx context.Context, id string, redispatchAfterMs int64) error
-	// Delete removes the task, returning whether a row was actually removed
-	// (delete-gated terminal audit relies on this).
-	Delete(ctx context.Context, id string) (removed bool, err error)
-	// ReconcileForEntity upserts req.Arm, deletes the entity's other-state
-	// pending tasks, and additionally deletes the tasks listed in req.Cancel
-	// (audited distinctly from the SourceState-mismatch cancels); returns
-	// the deleted (cancelled) tasks.
-	ReconcileForEntity(ctx context.Context, req ReconcileRequest) (cancelled []ScheduledTask, err error)
+	// ReconcileForEntity arms req.Arm, each as a new life, whatever
+	// status, claim or mark the row had before:
+	//
+	//	Status          = WAITING
+	//	ArmToken        = a new token
+	//	NextAttemptTime = ScheduledTime
+	//	Claim           = nil
+	//	Attempts        = 0
+	//	LostOwners      = 0
+	//	LastAttemptTime = nil
+	//	LastError       = ""
+	//	FailureReason   = ""
+	//	FailedTime      = nil
+	//	PartialCommit   = false
+	//
+	// and no mark exists for the new life (UnsafeMarked reads false). It
+	// removes every other task of the entity, and every task of the entity
+	// named in req.Cancel — an id in req.Cancel that belongs to another
+	// entity is not touched. It returns the removed tasks, except those
+	// named in req.Cancel, sorted by task ID byte-wise. Joining.
+	ReconcileForEntity(ctx context.Context, req ReconcileRequest) (removed []ScheduledTask, err error)
+
+	// RemoveLife removes the task, in any status, if armToken is the life
+	// the transaction sees as current (C1) — without a transaction, the
+	// committed life. Otherwise — the task is missing, or was replaced or
+	// removed before the snapshot or by this same transaction — it is a
+	// no-op and returns nil. A no-op writes nothing: it is not a C1 write
+	// and does not make the row busy (C6). Joining.
+	RemoveLife(ctx context.Context, tenant TenantID, id string, armToken uuid.UUID) error
+
+	// StampSegment writes the task row, fenced. With partial it sets
+	// PartialCommit; without it, PartialCommit keeps its value. Status and
+	// claim are unchanged. Joining.
+	StampSegment(ctx context.Context, ref TaskRef, partial bool) error
+
+	// DeleteForEntities removes every task, in any status, of the listed
+	// entities. An empty list is a no-op. Joining.
+	DeleteForEntities(ctx context.Context, tenant TenantID, entityIDs []string) error
+
+	// DeleteForModel removes every task, in any status, of the model
+	// version, except those for which keep(sourceState, transition) is
+	// true. A nil keep keeps none: every task of that model version is
+	// removed. keep must not call the store: a store may run it while
+	// holding its own locks, and a reentrant call can deadlock. Joining.
+	DeleteForModel(ctx context.Context, tenant TenantID, modelName string, modelVersion int,
+		keep func(sourceState, transition string) bool) error
+
+	// Get returns the task, with found false and a nil error when it does
+	// not exist in tenant. With a transaction on ctx it sees that
+	// transaction's staged operations (C2). Joining, for reads: it never
+	// takes part in a commit or rollback, and a tenant mismatch against
+	// the transaction on ctx never refuses the call — tenant filters the
+	// read, so it simply answers from tenant, same as with no transaction
+	// on ctx at all.
+	Get(ctx context.Context, tenant TenantID, id string) (task *ScheduledTask, found bool, err error)
+
+	// Query returns one page of tenant's tasks matching q, in
+	// (ScheduledTime, ID) order ascending, IDs compared byte-wise. Next is
+	// nil when no task follows the page. q.Limit < 1 is a caller error:
+	// Query returns an error satisfying errors.Is(err, ErrStoreRejected)
+	// and no page. Never joining.
+	Query(ctx context.Context, tenant TenantID, q ScheduledTaskQuery) (ScheduledTaskPage, error)
+
+	// ClaimDue atomically claims up to req.Limit tasks across tenants and
+	// returns them RUNNING, each with a new claim token and Claim.Owner =
+	// req.Owner. Claimable: WAITING with NextAttemptTime <= req.NowMs; with
+	// req.AllowLostOwner, also RUNNING whose owner's liveness record is
+	// missing or older than req.StaleAfter on the store clock — such a
+	// claim adds 1 to LostOwners. FAILED is never claimable. A task is
+	// not claimed while another task of its entity is RUNNING, and at
+	// most one task per entity is claimed per call; concurrent callers
+	// obtain disjoint sets and never two tasks of one entity. Per tenant
+	// at most req.PerTenantLimit - req.TenantInProgress[tenant] tasks are
+	// claimed.
+	//
+	// A row an open transaction has written (C6) is never a claim
+	// candidate: it is skipped, exactly like GiveBackIdle (C6) — never
+	// waited on, never reported as an error. Separately, a backend that
+	// serialises the claim itself with blocking locks, rather than
+	// selecting candidates without blocking, may bound that wait; on
+	// giving up it may instead answer an error satisfying
+	// errors.Is(err, ErrTaskBusy) for the call. That is a signal to retry
+	// the call, not a lost claim, and it is distinct from the
+	// MarkUnsafe/ClaimDue race (C3), which resolves without an error.
+	//
+	// Order: within a tenant, candidates are ordered by (NextAttemptTime,
+	// ID byte-wise); a lost-owner RUNNING task is claimable whatever its
+	// NextAttemptTime. Tenants take turns, one task per turn, so each
+	// tenant's first task comes before any tenant's second: the tenant
+	// with the earliest candidate goes first, ties broken by tenant id
+	// byte-wise. SelectClaims (scheduled_task_helpers.go) implements this
+	// order; every backend follows it, in Go via SelectClaims or
+	// equivalently in its own query language. ClaimDue returns the claimed
+	// tasks in that same order — the order SelectClaims produces — never
+	// resorted or reversed afterward.
+	//
+	// Cost: every node calls ClaimDue across all tenants at a short
+	// interval, so its work must not grow with the size of any tenant's
+	// backlog, or one tenant's backlog slows every tenant's claims. A
+	// tenant can take at most n = min(PerTenantLimit -
+	// TenantInProgress[tenant], Limit) tasks, each its entity's first
+	// candidate, and the tenant order depends only on each tenant's first
+	// candidate; so a backend reads, per tenant, the first candidate of
+	// each of the n entities whose first candidate comes earliest, and
+	// SelectClaims over that set chooses what it would over every
+	// candidate. A claim's work may grow with the number of tenants with a
+	// due task (or, with AllowLostOwner, a RUNNING task), with n, with
+	// the RUNNING tasks, with the busy rows (C6) and the tasks of
+	// entities with a RUNNING task that it passes over on the way to a
+	// tenant's n-th candidate, and with the later due tasks of the
+	// entities already met on that way — at most n times the tasks one
+	// entity can hold, which ReconcileForEntity bounds by the scheduled
+	// transitions of the entity's current state — never with the number
+	// of the tenant's due entities.
+	//
+	// A returned task carries UnsafeMarked as of the claim (C3), and
+	// ClaimedFromLostOwner when this claim took it from a stale or
+	// missing owner. Losing a race to another caller is not an error:
+	// the call returns what it claimed, possibly nothing. req.Limit < 1
+	// or req.PerTenantLimit < 1 is a caller error: ClaimDue returns an
+	// error satisfying errors.Is(err, ErrStoreRejected) and claims
+	// nothing. Never joining.
+	ClaimDue(ctx context.Context, req ClaimRequest) ([]ScheduledTask, error)
+
+	// Heartbeat creates or refreshes owner's liveness record, stamped with
+	// the store clock. Never joining.
+	Heartbeat(ctx context.Context, owner uuid.UUID) error
+
+	// RetireOwner removes owner's liveness record. Never joining.
+	RetireOwner(ctx context.Context, owner uuid.UUID) error
+
+	// SweepOwners removes the liveness records older than deadFor that no
+	// task references. Never joining.
+	SweepOwners(ctx context.Context, deadFor time.Duration) error
+
+	// GiveBackIdle returns every task RUNNING under owner whose claim
+	// token is not in keep to WAITING and reports how many;
+	// NextAttemptTime is unchanged, so the task is claimable at once.
+	// Attempts, LostOwners and marks are unchanged. A row an open
+	// transaction has written is left as it is (C6): it is not counted,
+	// and it stays RUNNING under its claim. GiveBackIdle never waits for
+	// that transaction to end — it skips the row, the same as ClaimDue.
+	// Never joining.
+	GiveBackIdle(ctx context.Context, owner uuid.UUID, keep []uuid.UUID) (int, error)
+
+	// MarkUnsafe writes the mark of ref's life, fenced. Idempotent for the
+	// same claim. ErrMarkedByAnotherClaim when another claim of the life
+	// wrote the mark; ErrTaskBusy when an open transaction has written the
+	// row (C6). Serialised with ClaimDue (C3). Never joining.
+	MarkUnsafe(ctx context.Context, ref TaskRef) error
+
+	// RecordAttempt sets the task WAITING with a.NextAttemptTime, adds 1
+	// to Attempts unless a.NotCounted, records a.Error and a.AtMs as
+	// LastError and LastAttemptTime (with or without NotCounted), and
+	// clears the claim, fenced. With a.ClearOwnMark it also removes the
+	// mark this claim wrote, in the same atomic write; a mark another
+	// claim wrote stays. When it gives up waiting on a row an open
+	// transaction has written (C6), it returns an error satisfying
+	// errors.Is(err, ErrTaskBusy), and the write is not made; the caller
+	// retries it. Never joining.
+	RecordAttempt(ctx context.Context, ref TaskRef, a Attempt) error
+
+	// Fail sets the task FAILED with f.Reason, replaces LastError with
+	// f.Error (even when it is empty), records f.AtMs as FailedTime, and
+	// clears the claim, fenced. LastAttemptTime, Attempts and LostOwners
+	// are unchanged.
+	// Joining, so the failure commits with its audit event.
+	Fail(ctx context.Context, ref TaskRef, f Failure) error
+
+	// SweepMarks removes the marks of lives that have ended: the task was
+	// removed or re-armed. A mark of a task's current life, in any status,
+	// stays. Never joining.
+	SweepMarks(ctx context.Context) error
 }
 
 type EntityStore interface {
@@ -322,6 +569,10 @@ type WorkflowStore interface {
 // GetEvents and GetEventsByTransaction return that id in TimeUUID on every
 // event, and the same value on every read. A store that cannot assign an id
 // fails Record with an error rather than recording the event without one.
+//
+// The store takes the transaction from each call's ctx, not from the ctx it
+// was obtained with. Record joins the transaction on the call's ctx: an
+// event recorded in a transaction that rolls back is not kept.
 type StateMachineAuditStore interface {
 	Record(ctx context.Context, entityID string, event StateMachineEvent) error
 	GetEvents(ctx context.Context, entityID string) ([]StateMachineEvent, error)

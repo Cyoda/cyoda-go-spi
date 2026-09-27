@@ -33,6 +33,8 @@ func runAsyncSearchSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Claim/ConcurrentDisjoint", testASClaimConcurrentDisjoint)
 	runSubtest(t, h, tracker, "Claim/TerminalNeverClaimed", testASClaimTerminalNeverClaimed)
 	runSubtest(t, h, tracker, "ClearResults/Idempotent", testASClearResultsIdempotent)
+	runSubtest(t, h, tracker, "ClearResults/Fenced", testASClearResultsFenced)
+	runSubtest(t, h, tracker, "ClearResults/TenantScoped", testASClearResultsTenantScoped)
 	runSubtest(t, h, tracker, "SaveResults/ChunkSeqContinuity", testASSaveResultsChunkSeqContinuity)
 	runSubtest(t, h, tracker, "SaveResults/CtxCancelObserved", testASSaveResultsCtxCancelObserved)
 	runSubtest(t, h, tracker, "SaveResults/EmptySequenceFences", testASSaveResultsEmptySequenceFences)
@@ -516,12 +518,85 @@ func testASClearResultsIdempotent(t *testing.T, h Harness) {
 	ids := []string{newID(), newID(), newID()}
 	require.NoError(t, as.SaveResults(ctx, id, 1, slices.Values(ids)))
 
-	require.NoError(t, as.ClearResults(ctx, id))
+	require.NoError(t, as.ClearResults(ctx, id, 1))
 	_, total, err := as.GetResultIDs(ctx, id, 0, 10)
 	require.NoError(t, err)
 	require.Equal(t, 0, total, "ClearResults must delete the persisted result ids")
 
-	require.NoError(t, as.ClearResults(ctx, id), "ClearResults on an already-cleared job must be idempotent")
+	require.NoError(t, as.ClearResults(ctx, id, 1), "ClearResults on an already-cleared job must be idempotent")
+}
+
+// testASClearResultsFenced: a clear is fenced like Heartbeat and Release. A
+// clear from a superseded epoch — a late clear from the executor the job was
+// reclaimed from — must delete nothing, or it would wipe the rows the current
+// epoch has saved. A terminal job's results are its answer and are never
+// cleared.
+func testASClearResultsFenced(t *testing.T, h Harness) {
+	tid := h.NewTenant()
+	ctx := tenantContext(tid)
+	as, _ := h.Factory.AsyncSearchStore(ctx)
+
+	require.ErrorIs(t, as.ClearResults(ctx, newID(), 1), spi.ErrNotFound, "clear of a missing job")
+
+	id := newID()
+	require.NoError(t, as.CreateJob(ctx, backdatedJob(h, tid, id, claimJobAge)))
+	claimed, err := as.ClaimStale(ctx, claimStaleAfter, 1000)
+	require.NoError(t, err)
+	job := findClaimed(claimed, id)
+	require.NotNil(t, job, "job must be claimed to advance its epoch for this scenario")
+	require.Equal(t, int64(2), job.Epoch)
+
+	ids := []string{newID(), newID(), newID()}
+	require.NoError(t, as.SaveResults(ctx, id, 2, slices.Values(ids)))
+
+	require.ErrorIs(t, as.ClearResults(ctx, id, 1), spi.ErrStaleClaim, "clear from the superseded epoch")
+	_, total, err := as.GetResultIDs(ctx, id, 0, 10)
+	require.NoError(t, err)
+	require.Equal(t, len(ids), total, "a clear from the superseded epoch must delete nothing")
+
+	require.NoError(t, as.ClearResults(ctx, id, 2), "clear at the current epoch")
+	_, total, err = as.GetResultIDs(ctx, id, 0, 10)
+	require.NoError(t, err)
+	require.Equal(t, 0, total, "a clear at the current epoch deletes the results")
+
+	done := newID()
+	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, done)))
+	require.NoError(t, as.SaveResults(ctx, done, 1, slices.Values(ids)))
+	require.NoError(t, as.UpdateJobStatus(ctx, done, 1, "SUCCESSFUL", len(ids), "", h.Now(), 0))
+	require.ErrorIs(t, as.ClearResults(ctx, done, 1), spi.ErrAlreadyTerminal, "clear of a terminal job")
+	_, total, err = as.GetResultIDs(ctx, done, 0, 10)
+	require.NoError(t, err)
+	require.Equal(t, len(ids), total, "a terminal job's results must survive a refused clear")
+}
+
+// testASClearResultsTenantScoped: a job id is unique only within its tenant.
+// A clear in one tenant deletes that tenant's rows and never the rows another
+// tenant saved under the same job id.
+func testASClearResultsTenantScoped(t *testing.T, h Harness) {
+	tA, tB := h.NewTenant(), h.NewTenant()
+	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
+	asA, err := h.Factory.AsyncSearchStore(ctxA)
+	require.NoError(t, err)
+	asB, err := h.Factory.AsyncSearchStore(ctxB)
+	require.NoError(t, err)
+
+	id := newID()
+	require.NoError(t, asA.CreateJob(ctxA, newSearchJob(h, tA, id)))
+	require.NoError(t, asB.CreateJob(ctxB, newSearchJob(h, tB, id)))
+	idsA := []string{newID(), newID()}
+	idsB := []string{newID(), newID(), newID()}
+	require.NoError(t, asA.SaveResults(ctxA, id, 1, slices.Values(idsA)))
+	require.NoError(t, asB.SaveResults(ctxB, id, 1, slices.Values(idsB)))
+
+	require.NoError(t, asA.ClearResults(ctxA, id, 1), "clear in tenant A at its current epoch")
+
+	_, total, err := asA.GetResultIDs(ctxA, id, 0, 10)
+	require.NoError(t, err)
+	require.Equal(t, 0, total, "tenant A's clear deletes tenant A's rows")
+	page, total, err := asB.GetResultIDs(ctxB, id, 0, 10)
+	require.NoError(t, err)
+	require.Equal(t, len(idsB), total, "tenant A's clear must not delete tenant B's rows under the same job id")
+	require.Equal(t, idsB, page)
 }
 
 // testASSaveResultsChunkSeqContinuity guards against a store that keys
@@ -544,7 +619,7 @@ func testASSaveResultsChunkSeqContinuity(t *testing.T, h Harness) {
 	require.NotNil(t, job, "job must be claimed to advance its epoch for this scenario")
 	require.Equal(t, int64(2), job.Epoch)
 
-	require.NoError(t, as.ClearResults(ctx, id))
+	require.NoError(t, as.ClearResults(ctx, id, 2))
 
 	secondIDs := []string{newID(), newID(), newID(), newID()}
 	require.NoError(t, as.SaveResults(ctx, id, 2, slices.Values(secondIDs)))

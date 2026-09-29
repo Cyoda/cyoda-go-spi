@@ -545,6 +545,8 @@ type ModelStore interface {
 type KeyValueStore interface {
 	Put(ctx context.Context, namespace string, key string, value []byte) error
 	Get(ctx context.Context, namespace string, key string) ([]byte, error)
+	// Delete removes key. Deleting a key that is absent — never written or
+	// already deleted — returns nil.
 	Delete(ctx context.Context, namespace string, key string) error
 	List(ctx context.Context, namespace string) (map[string][]byte, error)
 }
@@ -552,13 +554,19 @@ type KeyValueStore interface {
 type MessageStore interface {
 	Save(ctx context.Context, id string, header MessageHeader, metaData MessageMetaData, payload io.Reader) error
 	Get(ctx context.Context, id string) (MessageHeader, MessageMetaData, io.ReadCloser, error)
+	// Delete removes id. Deleting an id that is absent — never written or
+	// already deleted — returns nil.
 	Delete(ctx context.Context, id string) error
+	// DeleteBatch removes each id in ids. An absent id in ids — never
+	// written or already deleted — is not an error.
 	DeleteBatch(ctx context.Context, ids []string) error
 }
 
 type WorkflowStore interface {
 	Save(ctx context.Context, modelRef ModelRef, workflows []WorkflowDefinition) error
 	Get(ctx context.Context, modelRef ModelRef) ([]WorkflowDefinition, error)
+	// Delete removes modelRef. Deleting a model's workflows that are absent
+	// — never written or already deleted — returns nil.
 	Delete(ctx context.Context, modelRef ModelRef) error
 }
 

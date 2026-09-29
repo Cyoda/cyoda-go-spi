@@ -13,6 +13,7 @@ func runKeyValueSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Get/NotFound", testKVGetNotFound)
 	runSubtest(t, h, tracker, "Overwrite", testKVOverwrite)
 	runSubtest(t, h, tracker, "Delete", testKVDelete)
+	runSubtest(t, h, tracker, "DeleteAbsent", testKVDeleteAbsent)
 	runSubtest(t, h, tracker, "List/Namespace", testKVListNamespace)
 	runSubtest(t, h, tracker, "TenantIsolation", testKVTenantIsolation)
 	runSubtest(t, h, tracker, "Value/BinarySafe", testKVBinarySafe)
@@ -52,6 +53,17 @@ func testKVDelete(t *testing.T, h Harness) {
 	require.NoError(t, kv.Delete(ctx, "ns", "k"))
 	_, err := kv.Get(ctx, "ns", "k")
 	require.ErrorIs(t, err, spi.ErrNotFound)
+}
+
+// Deleting a key that is absent — never written, or already deleted — is
+// not an error.
+func testKVDeleteAbsent(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	kv, _ := h.Factory.KeyValueStore(ctx)
+	require.NoError(t, kv.Delete(ctx, "ns", "never-written"))
+	require.NoError(t, kv.Put(ctx, "ns", "k", []byte("v")))
+	require.NoError(t, kv.Delete(ctx, "ns", "k"))
+	require.NoError(t, kv.Delete(ctx, "ns", "k"))
 }
 
 func testKVListNamespace(t *testing.T, h Harness) {

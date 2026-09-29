@@ -71,6 +71,11 @@ func testWfDeleteAbsent(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	ws, _ := h.Factory.WorkflowStore(ctx)
 	require.NoError(t, ws.Delete(ctx, spi.ModelRef{EntityName: "never", ModelVersion: "1"}))
+
+	mref := spi.ModelRef{EntityName: "m1", ModelVersion: "1"}
+	require.NoError(t, ws.Save(ctx, mref, []spi.WorkflowDefinition{newWorkflowDef("wf1")}))
+	require.NoError(t, ws.Delete(ctx, mref))
+	require.NoError(t, ws.Delete(ctx, mref))
 }
 
 func testWfTenantIsolation(t *testing.T, h Harness) {

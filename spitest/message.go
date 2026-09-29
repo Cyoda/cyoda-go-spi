@@ -85,6 +85,18 @@ func testMsgDeleteAbsent(t *testing.T, h Harness) {
 	ms, _ := h.Factory.MessageStore(ctx)
 	require.NoError(t, ms.Delete(ctx, "never-written"))
 	require.NoError(t, ms.DeleteBatch(ctx, []string{"never-written-1", "never-written-2"}))
+
+	require.NoError(t, ms.Save(ctx, "m1", spi.MessageHeader{Subject: "t", ContentType: "text/plain"}, spi.MessageMetaData{}, strings.NewReader("a")))
+	require.NoError(t, ms.Delete(ctx, "m1"))
+	require.NoError(t, ms.Delete(ctx, "m1"))
+
+	// A batch containing an id already deleted earlier in this test, mixed
+	// with a present id, is not an error and the present id is still
+	// removed.
+	require.NoError(t, ms.Save(ctx, "m2", spi.MessageHeader{Subject: "t", ContentType: "text/plain"}, spi.MessageMetaData{}, strings.NewReader("b")))
+	require.NoError(t, ms.DeleteBatch(ctx, []string{"m1", "m2"}))
+	_, _, _, err := ms.Get(ctx, "m2")
+	require.ErrorIs(t, err, spi.ErrNotFound)
 }
 
 func testMsgPayloadLarge(t *testing.T, h Harness) {

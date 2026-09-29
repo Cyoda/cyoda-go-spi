@@ -309,6 +309,13 @@ MAINTAINING.md.
 
 ### Changed
 
+- **`Delete` of an absent key returns `nil`.** `KeyValueStore.Delete`,
+  `MessageStore.Delete`, `MessageStore.DeleteBatch` and `WorkflowStore.Delete`
+  of a key that is absent — never written, or already deleted — are not an
+  error. `spitest` gains a `DeleteAbsent` case per store and extends the
+  message `DeleteBatch` case with a batch mixing a present and an absent id.
+  Backends that returned `ErrNotFound` for this case must change.
+
 - **The instants behind `CreationDate`, `LastModifiedDate` and
   `GetSubmitTime` are now documented.** No interface changes and no
   behaviour change in this module — these were previously unstated, which

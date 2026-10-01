@@ -20,6 +20,7 @@ func runMessageSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Payload/Large", testMsgPayloadLarge)
 	runSubtest(t, h, tracker, "Payload/StreamClosed", testMsgPayloadStreamClosed)
 	runSubtest(t, h, tracker, "TenantIsolation", testMsgTenantIsolation)
+	runSubtest(t, h, tracker, "AttributionRoundTrip", testMsgAttributionRoundTrip)
 }
 
 func testMsgSaveAndGet(t *testing.T, h Harness) {
@@ -131,4 +132,24 @@ func testMsgTenantIsolation(t *testing.T, h Harness) {
 	require.NoError(t, msA.Save(tenantContext(tA), "shared-id", spi.MessageHeader{Subject: "t", ContentType: "text/plain"}, spi.MessageMetaData{}, strings.NewReader("A")))
 	_, _, _, err := msB.Get(tenantContext(tB), "shared-id")
 	require.ErrorIs(t, err, spi.ErrNotFound)
+}
+
+func testMsgAttributionRoundTrip(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	ms, err := h.Factory.MessageStore(ctx)
+	require.NoError(t, err)
+	header := spi.MessageHeader{
+		Subject:        "type-a",
+		ContentType:    "text/plain",
+		UserID:         "alice",
+		AttributedKind: spi.PrincipalUser,
+		Executor:       spi.Principal{ID: "OBOCLIENT0000001", Kind: spi.PrincipalService},
+	}
+	require.NoError(t, ms.Save(ctx, "msg-attr", header, spi.MessageMetaData{}, strings.NewReader("hello")))
+	gotHeader, _, rc, err := ms.Get(ctx, "msg-attr")
+	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
+	require.Equal(t, header.UserID, gotHeader.UserID)
+	require.Equal(t, header.AttributedKind, gotHeader.AttributedKind)
+	require.Equal(t, header.Executor, gotHeader.Executor)
 }

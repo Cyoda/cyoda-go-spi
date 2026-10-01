@@ -153,8 +153,10 @@ type MessageHeader struct {
 	ContentType     string
 	ContentLength   int64
 	ContentEncoding string
-	MessageID       string // custom message ID from X-Message-ID header
-	UserID          string
+	MessageID       string        // custom message ID from X-Message-ID header
+	UserID          string        // attributed user id
+	AttributedKind  PrincipalKind // kind of UserID
+	Executor        Principal     // the client that sent the message
 	Recipient       string
 	ReplyTo         string
 	CorrelationID   string
@@ -594,6 +596,10 @@ type StateMachineEvent struct {
 	Details       string         `json:"details"`
 	Data          map[string]any `json:"data,omitempty"`
 	Timestamp     time.Time      `json:"timestamp"`
+	// Attributed is who the change is for; Executor is who made it. Both are
+	// stamped by the engine from AttributionFor at record time.
+	Attributed Principal `json:"attributed,omitzero"`
+	Executor   Principal `json:"executor,omitzero"`
 }
 
 // ExecutionResult holds the outcome of a workflow engine execution.

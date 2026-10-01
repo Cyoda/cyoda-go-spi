@@ -18,6 +18,7 @@ func runAuditSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "GetEventsByTransaction", testAuditGetByTx)
 	runSubtest(t, h, tracker, "TenantIsolation", testAuditTenantIsolation)
 	runSubtest(t, h, tracker, "RolledBackEventNotKept", testAuditRolledBackEventNotKept)
+	runSubtest(t, h, tracker, "AttributionRoundTrip", testAuditAttributionRoundTrip)
 }
 
 func newSMEvent(txID, state, details string) spi.StateMachineEvent {
@@ -167,4 +168,19 @@ func testAuditRolledBackEventNotKept(t *testing.T, h Harness) {
 	require.NoError(t, err)
 	require.Len(t, events, 1, "an event recorded in a committed transaction is kept")
 	require.Equal(t, "C", events[0].State)
+}
+
+func testAuditAttributionRoundTrip(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	as, err := h.Factory.StateMachineAuditStore(ctx)
+	require.NoError(t, err)
+	ev := newSMEvent("tx1", "B", "A->B")
+	ev.Attributed = spi.Principal{ID: "alice", Kind: spi.PrincipalUser}
+	ev.Executor = spi.Principal{ID: "OBOCLIENT0000001", Kind: spi.PrincipalService}
+	require.NoError(t, as.Record(ctx, "e1", ev))
+	events, err := as.GetEvents(ctx, "e1")
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	require.Equal(t, ev.Attributed, events[0].Attributed)
+	require.Equal(t, ev.Executor, events[0].Executor)
 }

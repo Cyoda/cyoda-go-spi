@@ -21,6 +21,9 @@ type UserContext struct {
 	Kind     PrincipalKind
 	Tenant   Tenant
 	Roles    []string
+	// Executor is the M2M client that acts for UserID. It is set only for an
+	// on-behalf-of token; nil for every other principal.
+	Executor *Principal
 }
 
 type contextKey string
@@ -105,11 +108,17 @@ func ResolveOrigin(ctx context.Context) Principal {
 }
 
 // AttributionFor returns (attributed, executor) for a durable write staged
-// under ctx. Origin inheritance engages only for service/system executors
-// inside a transaction; a user-kind (or legacy unset-kind) executor records
-// itself. Never elevates a non-joined write to a claimed user.
+// under ctx. An on-behalf-of principal attributes to its user and executes as
+// its client, and never inherits a transaction's origin. Otherwise origin
+// inheritance engages only for service/system executors inside a transaction;
+// a user-kind (or legacy unset-kind) executor records itself. Never elevates
+// a non-joined write to a claimed user.
 func AttributionFor(ctx context.Context) (attributed, executor Principal) {
-	if uc := GetUserContext(ctx); uc != nil {
+	uc := GetUserContext(ctx)
+	if uc != nil && uc.Executor != nil {
+		return Principal{ID: uc.UserID, Kind: uc.Kind}, *uc.Executor
+	}
+	if uc != nil {
 		executor = Principal{ID: uc.UserID, Kind: uc.Kind}
 	}
 	if executor.Kind == PrincipalService || executor.Kind == PrincipalSystem {

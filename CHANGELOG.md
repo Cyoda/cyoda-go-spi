@@ -91,6 +91,31 @@ MAINTAINING.md.
 
 ### Added
 
+- **`UserContext.Executor`: on-behalf-of attribution.** `Executor *Principal`
+  is set only for an on-behalf-of (OBO) token — an M2M client acting for an
+  application user — and nil for every other principal. `AttributionFor`
+  honours it ahead of transaction-origin inheritance: when set, the write is
+  attributed to `(UserContext.UserID, UserContext.Kind)` and executed by
+  `*Executor`, never inheriting a transaction's origin even when the
+  executor's own kind would otherwise qualify for inheritance. `Executor`
+  nil leaves `AttributionFor`'s existing behaviour unchanged.
+
+  `StateMachineEvent` gains `Attributed Principal` and `Executor Principal`
+  (`json:"attributed,omitzero"` / `json:"executor,omitzero"`), stamped by the
+  engine from `AttributionFor` at record time; an event recorded without
+  attribution serialises exactly as before. `MessageHeader` gains
+  `AttributedKind PrincipalKind` and `Executor Principal`, alongside the
+  existing `UserID` (now documented as the attributed user id). The
+  `spitest` Audit group gains `AttributionRoundTrip`; the Message group
+  gains `AttributionRoundTrip`.
+
+  Migration: no backend changes needed on a store that persists
+  `StateMachineEvent` and `MessageHeader` as opaque JSON documents — the new
+  fields round-trip automatically. A backend that projects individual
+  columns from these types must add `attributed`/`executor`
+  (`StateMachineEvent`) and `attributedKind`/`executor`
+  (`MessageHeader`) columns.
+
 - **`ErrTxAborted`: a statement refused because an earlier conflict aborted
   the transaction.** It wraps `ErrConflict`. A backend whose engine aborts the
   whole transaction on a conflict returns it for every later statement other

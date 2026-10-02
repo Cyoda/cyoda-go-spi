@@ -39,3 +39,40 @@ func TestUserContextCarriesTenant(t *testing.T) {
 		t.Errorf("expected Tenant A, got %s", got.Tenant.Name)
 	}
 }
+
+func TestAttributionFor_ExecutorSet_AttributesToUserIgnoringTxOrigin(t *testing.T) {
+	ctx := spi.WithUserContext(context.Background(), &spi.UserContext{
+		UserID: "alice", Kind: spi.PrincipalUser, Tenant: spi.Tenant{ID: "t1"},
+		Executor: &spi.Principal{ID: "OBOCLIENT0000001", Kind: spi.PrincipalService},
+	})
+	ctx = spi.WithTransaction(ctx, &spi.TransactionState{ID: "tx1", TenantID: "t1",
+		Origin: spi.Principal{ID: "bob", Kind: spi.PrincipalUser}})
+
+	att, exe := spi.AttributionFor(ctx)
+	if want := (spi.Principal{ID: "alice", Kind: spi.PrincipalUser}); att != want {
+		t.Fatalf("attributed = %+v, want %+v", att, want)
+	}
+	if want := (spi.Principal{ID: "OBOCLIENT0000001", Kind: spi.PrincipalService}); exe != want {
+		t.Fatalf("executor = %+v, want %+v", exe, want)
+	}
+}
+
+func TestAttributionFor_ExecutorSet_NoTransaction(t *testing.T) {
+	ctx := spi.WithUserContext(context.Background(), &spi.UserContext{
+		UserID: "alice", Kind: spi.PrincipalUser,
+		Executor: &spi.Principal{ID: "OBOCLIENT0000001", Kind: spi.PrincipalService},
+	})
+	att, exe := spi.AttributionFor(ctx)
+	if att.ID != "alice" || exe.ID != "OBOCLIENT0000001" {
+		t.Fatalf("got (%+v, %+v)", att, exe)
+	}
+}
+
+func TestAttributionFor_ExecutorNil_ServiceInTxInheritsOrigin(t *testing.T) {
+	ctx := spi.WithUserContext(context.Background(), &spi.UserContext{UserID: "C1", Kind: spi.PrincipalService})
+	ctx = spi.WithTransaction(ctx, &spi.TransactionState{ID: "tx1", Origin: spi.Principal{ID: "alice", Kind: spi.PrincipalUser}})
+	att, exe := spi.AttributionFor(ctx)
+	if att.ID != "alice" || exe.ID != "C1" {
+		t.Fatalf("got (%+v, %+v)", att, exe)
+	}
+}

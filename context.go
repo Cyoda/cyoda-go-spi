@@ -76,7 +76,11 @@ const ambientOriginKey contextKey = "ambientOrigin"
 
 // WithAmbientOrigin seeds the origin for a causal-chain root that has no
 // transaction yet. Single legitimate seed site: the scheduled fire, from the
-// durable task row. A zero Principal is never seeded.
+// durable task row. A zero Principal is never seeded. ResolveOrigin uses the
+// ambient origin when no transaction carries one, and AttributionFor
+// attributes a service/system executor's work to it on the same terms, so a
+// write or callout made outside a transaction still names the principal the
+// chain started from.
 func WithAmbientOrigin(ctx context.Context, p Principal) context.Context {
 	if p == (Principal{}) {
 		return ctx
@@ -107,12 +111,14 @@ func ResolveOrigin(ctx context.Context) Principal {
 	return Principal{}
 }
 
-// AttributionFor returns (attributed, executor) for a durable write staged
-// under ctx. An on-behalf-of principal attributes to its user and executes as
-// its client, and never inherits a transaction's origin. Otherwise origin
-// inheritance engages only for service/system executors inside a transaction;
-// a user-kind (or legacy unset-kind) executor records itself. Never elevates
-// a non-joined write to a claimed user.
+// AttributionFor returns (attributed, executor) for a durable write or a
+// callout made under ctx. An on-behalf-of principal attributes to its user and
+// executes as its client, and never inherits an origin. A user-kind (or legacy
+// unset-kind) executor records itself. A service/system executor inherits the
+// origin with the precedence of ResolveOrigin: the transaction's origin when a
+// transaction carries one, else the ambient origin when one is seeded, else
+// the executor itself. A write that joins no transaction and has no seeded
+// ambient origin is never attributed to a claimed user.
 func AttributionFor(ctx context.Context) (attributed, executor Principal) {
 	uc := GetUserContext(ctx)
 	if uc != nil && uc.Executor != nil {
@@ -122,9 +128,8 @@ func AttributionFor(ctx context.Context) (attributed, executor Principal) {
 		executor = Principal{ID: uc.UserID, Kind: uc.Kind}
 	}
 	if executor.Kind == PrincipalService || executor.Kind == PrincipalSystem {
-		if tx := GetTransaction(ctx); tx != nil && tx.Origin != (Principal{}) {
-			return tx.Origin, executor
-		}
+		// ResolveOrigin falls back to the UserContext, which is the executor.
+		return ResolveOrigin(ctx), executor
 	}
 	return executor, executor
 }

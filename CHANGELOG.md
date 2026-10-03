@@ -334,6 +334,20 @@ MAINTAINING.md.
 
 ### Changed
 
+- **`AttributionFor` falls back to the ambient origin outside a
+  transaction.** For a service/system executor, the attributed principal is
+  now the transaction's origin when a transaction carries one, else the
+  ambient origin seeded with `WithAmbientOrigin` when one is present, else
+  the executor itself — the same precedence as `ResolveOrigin`
+  (parent-tx > ambient > UserContext). Before, a service/system executor
+  with no transaction recorded itself even when an ambient origin was
+  seeded, so work done outside a transaction on a scheduled firing (for
+  example a callout dispatched after a commit) named the executor instead
+  of the principal that armed the task. The on-behalf-of branch and the
+  user-kind branch are unchanged, and so is every result inside a
+  transaction that carries an origin. No interface changes; backends call
+  `AttributionFor` and need no change.
+
 - **`Delete` of an absent key returns `nil`.** `KeyValueStore.Delete`,
   `MessageStore.Delete`, `MessageStore.DeleteBatch` and `WorkflowStore.Delete`
   of a key that is absent — never written, or already deleted — are not an

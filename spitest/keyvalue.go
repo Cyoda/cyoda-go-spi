@@ -28,6 +28,7 @@ func runKeyValueSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Conditional/AtomicAgainstPlainWrites", testKVConditionalAgainstPlain)
 	runSubtest(t, h, tracker, "Conditional/Isolation", testKVConditionalIsolation)
 	runSubtest(t, h, tracker, "Conditional/EmptyValue", testKVConditionalEmptyValue)
+	runSubtest(t, h, tracker, "Conditional/ByteForByte", testKVConditionalByteForByte)
 	runSubtest(t, h, tracker, "NoTransactionJoin", testKVNoTransactionJoin)
 }
 
@@ -217,8 +218,13 @@ func testKVConcurrentPutIfAbsent(t *testing.T, h Harness) {
 				winner = i
 			}
 		}
+		anyErr := false
+		for _, e := range errs {
+			anyErr = anyErr || e != nil
+		}
 		if winner < 0 {
-			continue // every racer errored: allowed, nothing to assert
+			require.True(t, anyErr, "round %d: no PutIfAbsent applied and none errored", round)
+			continue // a racer errored: outcome unknown, nothing more to assert
 		}
 		want := []byte(fmt.Sprintf("v%d", winner))
 		got, err := kv.Get(ctx, "ns", key)
@@ -256,7 +262,12 @@ func testKVConcurrentCompareAndPut(t *testing.T, h Harness) {
 				winner = i
 			}
 		}
+		anyErr := false
+		for _, e := range errs {
+			anyErr = anyErr || e != nil
+		}
 		if winner < 0 {
+			require.True(t, anyErr, "round %d: no CompareAndPut applied and none errored", round)
 			continue
 		}
 		got, err := kv.Get(ctx, "ns", key)
@@ -275,20 +286,24 @@ func testKVConditionalAgainstPlain(t *testing.T, h Harness) {
 		key := fmt.Sprintf("d%d", round)
 		require.NoError(t, kv.Put(ctx, "ns", key, []byte("prev")))
 		var wg sync.WaitGroup
+		var delErr error
 		wg.Add(2)
-		go func() { defer wg.Done(); _ = kv.Delete(ctx, "ns", key) }()
+		go func() { defer wg.Done(); delErr = kv.Delete(ctx, "ns", key) }()
 		go func() { defer wg.Done(); _, _ = kv.CompareAndPut(ctx, "ns", key, []byte("prev"), []byte("x")) }()
 		wg.Wait()
+		require.NoError(t, delErr, "round %d: Delete", round)
 		_, err := kv.Get(ctx, "ns", key)
 		require.ErrorIs(t, err, spi.ErrNotFound, "round %d: a CompareAndPut outlived a Delete", round)
 	}
 	for round := 0; round < 20; round++ {
 		key := fmt.Sprintf("p%d", round)
 		var wg sync.WaitGroup
+		var putErr error
 		wg.Add(2)
-		go func() { defer wg.Done(); require.NoError(t, kv.Put(ctx, "ns", key, []byte("v"))) }()
+		go func() { defer wg.Done(); putErr = kv.Put(ctx, "ns", key, []byte("v")) }()
 		go func() { defer wg.Done(); _, _ = kv.PutIfAbsent(ctx, "ns", key, []byte("w")) }()
 		wg.Wait()
+		require.NoError(t, putErr, "round %d: Put", round)
 		got, err := kv.Get(ctx, "ns", key)
 		require.NoError(t, err)
 		require.Equal(t, []byte("v"), got, "round %d: PutIfAbsent overwrote a Put", round)
@@ -323,6 +338,45 @@ func testKVConditionalEmptyValue(t *testing.T, h Harness) {
 	applied(t, true, ok, err)
 	ok, err = kv.CompareAndPut(ctx, "ns", "k", []byte{}, []byte("v"))
 	applied(t, true, ok, err)
+
+	// An empty expected value never matches an absent key.
+	for _, expected := range [][]byte{nil, {}} {
+		ok, err = kv.CompareAndPut(ctx, "ns", "absent", expected, []byte("v"))
+		applied(t, false, ok, err)
+		_, err = kv.Get(ctx, "ns", "absent")
+		require.ErrorIs(t, err, spi.ErrNotFound)
+	}
+	ok, err = kv.DeleteIfEqual(ctx, "ns", "absent", nil)
+	applied(t, false, ok, err)
+
+	// A stored empty value reads back as empty, not as absent, and is
+	// deletable by an empty expected value.
+	ok, err = kv.PutIfAbsent(ctx, "ns", "empty", nil)
+	applied(t, true, ok, err)
+	got, err := kv.Get(ctx, "ns", "empty")
+	require.NoError(t, err)
+	require.Len(t, got, 0)
+	ok, err = kv.DeleteIfEqual(ctx, "ns", "empty", []byte{})
+	applied(t, true, ok, err)
+	_, err = kv.Get(ctx, "ns", "empty")
+	require.ErrorIs(t, err, spi.ErrNotFound)
+}
+
+// Values are compared byte for byte: no case folding, no trimming, no prefix
+// match.
+func testKVConditionalByteForByte(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	kv, _ := h.Factory.KeyValueStore(ctx)
+	require.NoError(t, kv.Put(ctx, "ns", "k", []byte("v1")))
+	for _, expected := range []string{"V1", "v1\x00", "v", "v12"} {
+		ok, err := kv.CompareAndPut(ctx, "ns", "k", []byte(expected), []byte("x"))
+		applied(t, false, ok, err)
+	}
+	ok, err := kv.DeleteIfEqual(ctx, "ns", "k", []byte("V1"))
+	applied(t, false, ok, err)
+	got, err := kv.Get(ctx, "ns", "k")
+	require.NoError(t, err)
+	require.Equal(t, []byte("v1"), got)
 }
 
 // No key-value operation joins a transaction: a write made with a context
@@ -353,6 +407,10 @@ func testKVNoTransactionJoin(t *testing.T, h Harness) {
 		got, err := kv.Get(ctx, "ns", k)
 		require.NoError(t, err, k)
 		require.Equal(t, []byte(want), got, k)
+	}
+	for _, k := range []string{"del", "die"} {
+		_, err := kv.Get(ctx, "ns", k)
+		require.ErrorIs(t, err, spi.ErrNotFound, k)
 	}
 	// A read inside sees a value committed after the transaction began.
 	require.NoError(t, kv.Put(ctx, "ns", "late", []byte("late")))

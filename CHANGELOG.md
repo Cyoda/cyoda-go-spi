@@ -14,6 +14,23 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **`KeyValueStore` gains conditional writes, and no key-value operation
+  joins a transaction.** `PutIfAbsent`, `CompareAndPut` and `DeleteIfEqual`
+  each write only if the key's current state is the one the caller states,
+  atomically against every other write to the key from any node. A non-nil
+  error means the outcome is unknown; `applied=false` is returned only when
+  no write of the call landed. Values compare byte for byte, a nil value is
+  the empty value, and a deleted key is absent. Every key-value operation,
+  the existing four included, is applied when it returns and reads committed
+  state, whatever transaction the context carries. New `spitest` cases:
+  `KeyValue/Conditional/*` and `KeyValue/NoTransactionJoin`.
+
+  Migration: implement the three methods atomically (a backend whose
+  conditional write can time out with an unknown outcome returns an error,
+  never `applied=false`), and stop resolving a transaction from the context
+  in the key-value store. Run the `KeyValue` group through
+  `StoreFactoryConformance`.
+
 - **`ScheduledTaskStore` is replaced: every scheduled run has one owner.**
   A task now has lives. `ReconcileForEntity` arms each task as a new life
   with a store-drawn `ArmToken` and removes every other task of the entity.

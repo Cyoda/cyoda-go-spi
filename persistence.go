@@ -542,6 +542,19 @@ type ModelStore interface {
 	ExtendSchema(ctx context.Context, ref ModelRef, delta SchemaDelta) error
 }
 
+// KeyValueStore holds opaque values by (namespace, key), per tenant.
+//
+// No operation joins a transaction: each is applied when it returns, and each
+// read sees committed state, whatever transaction ctx carries.
+//
+// The conditional writes are atomic against every other write to the key,
+// from any node. A non-nil error means the outcome is unknown: the write may
+// or may not have been applied, and applied is meaningful only when err is
+// nil. applied=false is returned only when the implementation knows that no
+// write of this call landed; an attempt whose outcome it cannot tell (a
+// timeout, an internal retry) is an error. Values are compared byte for byte,
+// and a nil value is stored and compared as the empty value. A deleted key is
+// absent.
 type KeyValueStore interface {
 	Put(ctx context.Context, namespace string, key string, value []byte) error
 	Get(ctx context.Context, namespace string, key string) ([]byte, error)
@@ -549,6 +562,15 @@ type KeyValueStore interface {
 	// already deleted — returns nil.
 	Delete(ctx context.Context, namespace string, key string) error
 	List(ctx context.Context, namespace string) (map[string][]byte, error)
+	// PutIfAbsent writes value only if key is absent. applied=false: key
+	// present, nothing written.
+	PutIfAbsent(ctx context.Context, namespace, key string, value []byte) (applied bool, err error)
+	// CompareAndPut writes value only if key is present and its stored bytes
+	// equal expected. applied=false: absent or different, nothing written.
+	CompareAndPut(ctx context.Context, namespace, key string, expected, value []byte) (applied bool, err error)
+	// DeleteIfEqual deletes key only if it is present and its stored bytes
+	// equal expected. applied=false: absent or different, nothing deleted.
+	DeleteIfEqual(ctx context.Context, namespace, key string, expected []byte) (applied bool, err error)
 }
 
 type MessageStore interface {

@@ -34,6 +34,9 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Exists", testEntityExists)
 	runSubtest(t, h, tracker, "Count", testEntityCount)
 	runSubtest(t, h, tracker, "CountByState", testEntityCountByState)
+	runSubtest(t, h, tracker, "Count/AsAt", testEntityCountAsAt)
+	runSubtest(t, h, tracker, "CountByState/AsAt", testEntityCountByStateAsAt)
+	runSubtest(t, h, tracker, "GetVersionMetadata/CommittedOnlyInTx", testEntityVersionMetadataCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "Count/InTxBufferShapes", testEntityCountInTxBufferShapes)
 	runSubtest(t, h, tracker, "JSONFidelity/DeepNesting", testEntityJSONFidelity)
 
@@ -2290,4 +2293,103 @@ func testEntityEmptyTenant(t *testing.T, h Harness) {
 	n, err := es.Count(ctx, mref, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(0), n)
+}
+
+func testEntityCountAsAt(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	mref := spi.ModelRef{EntityName: "m-cnt-at", ModelVersion: "1"}
+	var ids []string
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		for i := 0; i < 3; i++ {
+			id := newID()
+			ids = append(ids, id)
+			_, err := es.Save(txCtx, newEntity(t, "m-cnt-at", id, map[string]any{}))
+			require.NoError(t, err)
+		}
+	})
+	h.AdvanceClock(10 * time.Millisecond)
+	mid := h.Now()
+	h.AdvanceClock(10 * time.Millisecond)
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		require.NoError(t, es.Delete(txCtx, ids[0]))
+		_, err := es.Save(txCtx, newEntity(t, "m-cnt-at", newID(), map[string]any{}))
+		require.NoError(t, err)
+		_, err = es.Save(txCtx, newEntity(t, "m-cnt-at", newID(), map[string]any{}))
+		require.NoError(t, err)
+	})
+	es, _ := h.Factory.EntityStore(ctx)
+	n, err := es.Count(ctx, mref, &mid)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), n, "as at mid: three live entities")
+	n, err = es.Count(ctx, mref, nil)
+	require.NoError(t, err)
+	require.Equal(t, int64(4), n, "now: one deleted, two added")
+
+	// Inside a transaction, asAt is committed-only.
+	tm, _ := h.Factory.TransactionManager(ctx)
+	txID, txCtx := beginGuarded(t, tm, ctx)
+	esTx, _ := h.Factory.EntityStore(txCtx)
+	_, err = esTx.Save(txCtx, newEntity(t, "m-cnt-at", newID(), map[string]any{}))
+	require.NoError(t, err)
+	n, err = esTx.Count(txCtx, mref, &mid)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), n, "asAt inside a tx ignores the tx's own writes")
+	require.NoError(t, tm.Rollback(txCtx, txID))
+}
+
+func testEntityCountByStateAsAt(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	mref := spi.ModelRef{EntityName: "m-cbs-at", ModelVersion: "1"}
+	id := newID()
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		e := newEntity(t, "m-cbs-at", id, map[string]any{})
+		e.Meta.State = "new"
+		_, err := es.Save(txCtx, e)
+		require.NoError(t, err)
+	})
+	h.AdvanceClock(10 * time.Millisecond)
+	mid := h.Now()
+	h.AdvanceClock(10 * time.Millisecond)
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		got, err := es.Get(txCtx, id)
+		require.NoError(t, err)
+		got.Meta.State = "approved"
+		_, err = es.Save(txCtx, got)
+		require.NoError(t, err)
+	})
+	es, _ := h.Factory.EntityStore(ctx)
+	m, err := es.CountByState(ctx, mref, nil, &mid)
+	require.NoError(t, err)
+	require.Equal(t, map[string]int64{"new": 1}, m)
+	m, err = es.CountByState(ctx, mref, []string{"approved"}, &mid)
+	require.NoError(t, err)
+	require.Empty(t, m)
+	m, err = es.CountByState(ctx, mref, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, map[string]int64{"approved": 1}, m)
+}
+
+func testEntityVersionMetadataCommittedOnlyInTx(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	id := newID()
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		_, err := es.Save(txCtx, newEntity(t, "m-vm-tx", id, map[string]any{"v": 1}))
+		require.NoError(t, err)
+	})
+	tm, _ := h.Factory.TransactionManager(ctx)
+	txID, txCtx := beginGuarded(t, tm, ctx)
+	esTx, _ := h.Factory.EntityStore(txCtx)
+	got, err := esTx.Get(txCtx, id)
+	require.NoError(t, err)
+	_, err = esTx.Save(txCtx, got)
+	require.NoError(t, err)
+	vs, err := esTx.GetVersionMetadata(txCtx, id, spi.VersionMetadataOptions{})
+	require.NoError(t, err)
+	require.Len(t, vs, 1, "the transaction's own uncommitted version must not be listed")
+	require.NoError(t, tm.Rollback(txCtx, txID))
 }

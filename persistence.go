@@ -366,7 +366,19 @@ type EntityStore interface {
 	Delete(ctx context.Context, entityID string) error
 	DeleteAll(ctx context.Context, modelRef ModelRef) error
 	Exists(ctx context.Context, entityID string) (bool, error)
-	Count(ctx context.Context, modelRef ModelRef) (int64, error)
+	// Count returns the number of non-deleted entities of modelRef.
+	//
+	// asAt == nil: the current state. Inside a transaction the count reflects
+	// the transactional view (its own uncommitted writes visible, other
+	// in-flight transactions' writes not).
+	//
+	// asAt != nil: the number of entities whose latest revision at or before
+	// asAt is not a deletion — committed data only, ignoring any ambient
+	// transaction and recording nothing in its read set, the same
+	// point-in-time rule as GetPage(asAt) and IterateOptions.PointInTime.
+	//
+	// Unknown model: 0 with no error.
+	Count(ctx context.Context, modelRef ModelRef, asAt *time.Time) (int64, error)
 	// CountByState returns the count of non-deleted entities grouped by state
 	// for the given model. If states is non-nil, only the listed states are
 	// included in the result. If states is nil, all states are returned.
@@ -386,7 +398,11 @@ type EntityStore interface {
 	// returned counts MUST reflect the transactional view (uncommitted writes
 	// from the current tx are visible, writes from other in-flight txs are not),
 	// matching the semantics of Count.
-	CountByState(ctx context.Context, modelRef ModelRef, states []string) (map[string]int64, error)
+	//
+	// asAt follows Count: nil is the current (transactional) view; non-nil
+	// counts committed revisions as at asAt only, ignoring the ambient
+	// transaction and recording nothing in its read set.
+	CountByState(ctx context.Context, modelRef ModelRef, states []string, asAt *time.Time) (map[string]int64, error)
 
 	// GetPage returns a page of modelRef's entities in the engine's
 	// canonical per-engine entity-ID order (see OrderSpec's doc comment —
@@ -442,6 +458,9 @@ type EntityStore interface {
 	//
 	// Deleted is true only on the DELETED tombstone row, and Version is
 	// populated on every returned row, including the tombstone.
+	//
+	// It reads committed versions only, inside a transaction too: a
+	// transaction's own uncommitted versions are never listed.
 	GetVersionMetadata(ctx context.Context, entityID string, opts VersionMetadataOptions) ([]EntityVersionMeta, error)
 
 	// Search is the bounded-or-fail predicate read: SearchOptions.Limit >= 1

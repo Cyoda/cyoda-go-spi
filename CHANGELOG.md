@@ -14,6 +14,15 @@ MAINTAINING.md.
 
 ### Breaking
 
+- `TransactionManager.ConsistencyTime(ctx)` is required. It returns the
+  consistency time: complete, final, monotonic, at the store's read
+  resolution (see its doc). New sentinel `ErrConsistencyTimeUnavailable`.
+  Migration: implement reserve-then-wait; see the in-tree plugins of
+  cyoda-go for reference implementations.
+- `EntityStore.Count` and `CountByState` take `asAt *time.Time`. Pass `nil`
+  for today's behaviour; non-nil counts committed revisions as at that
+  instant, ignoring the ambient transaction.
+- `GetVersionMetadata` is documented as committed-only inside a transaction.
 - **`KeyValueStore` gains conditional writes, and no key-value operation
   joins a transaction.** `PutIfAbsent`, `CompareAndPut` and `DeleteIfEqual`
   each write only if the key's current state is the one the caller states,

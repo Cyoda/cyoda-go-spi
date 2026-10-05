@@ -533,7 +533,7 @@ func testEntityDeleteAll(t *testing.T, h Harness) {
 	})
 
 	es, _ := h.Factory.EntityStore(ctx)
-	n, err := es.Count(ctx, mref)
+	n, err := es.Count(ctx, mref, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(0), n)
 }
@@ -571,7 +571,7 @@ func testEntityCount(t *testing.T, h Harness) {
 		}
 	})
 	es, _ := h.Factory.EntityStore(ctx)
-	n, err := es.Count(ctx, mref)
+	n, err := es.Count(ctx, mref, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(7), n)
 }
@@ -582,12 +582,12 @@ func testEntityCountByState(t *testing.T, h Harness) {
 
 	// Empty model: nil filter -> empty map.
 	es, _ := h.Factory.EntityStore(ctx)
-	got, err := es.CountByState(ctx, mref, nil)
+	got, err := es.CountByState(ctx, mref, nil, nil)
 	require.NoError(t, err)
 	require.Empty(t, got, "empty model with nil filter should return empty map")
 
 	// Empty model: non-nil-but-empty-slice filter -> empty map (no storage call expected).
-	got, err = es.CountByState(ctx, mref, []string{})
+	got, err = es.CountByState(ctx, mref, []string{}, nil)
 	require.NoError(t, err)
 	require.Empty(t, got, "empty filter slice should return empty map")
 
@@ -619,24 +619,24 @@ func testEntityCountByState(t *testing.T, h Harness) {
 	})
 
 	// nil filter -> all states (deleted excluded).
-	got, err = es.CountByState(ctx, mref, nil)
+	got, err = es.CountByState(ctx, mref, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, map[string]int64{"new": 3, "approved": 2, "rejected": 1}, got)
 
 	// Filter to "approved" only.
-	got, err = es.CountByState(ctx, mref, []string{"approved"})
+	got, err = es.CountByState(ctx, mref, []string{"approved"}, nil)
 	require.NoError(t, err)
 	require.Equal(t, map[string]int64{"approved": 2}, got)
 
 	// Filter including a missing state — missing omitted (not zero-valued).
-	got, err = es.CountByState(ctx, mref, []string{"approved", "missing"})
+	got, err = es.CountByState(ctx, mref, []string{"approved", "missing"}, nil)
 	require.NoError(t, err)
 	require.Equal(t, map[string]int64{"approved": 2}, got)
 
 	// Tenant isolation.
 	otherCtx := tenantContext(h.NewTenant())
 	esOther, _ := h.Factory.EntityStore(otherCtx)
-	got, err = esOther.CountByState(otherCtx, mref, nil)
+	got, err = esOther.CountByState(otherCtx, mref, nil, nil)
 	require.NoError(t, err)
 	require.Empty(t, got, "different tenant must not see other tenant's entities")
 
@@ -648,7 +648,7 @@ func testEntityCountByState(t *testing.T, h Harness) {
 		_, err := esTx.Save(txCtx, e)
 		require.NoError(t, err)
 
-		got, err := esTx.CountByState(txCtx, mref, []string{"in_review"})
+		got, err := esTx.CountByState(txCtx, mref, []string{"in_review"}, nil)
 		require.NoError(t, err)
 		require.Equal(t, map[string]int64{"in_review": 1}, got, "uncommitted tx save must be visible inside tx")
 	})
@@ -710,7 +710,7 @@ func testEntityCountByState(t *testing.T, h Harness) {
 	//   approved: 2 (unchanged — transitionID was saved at approved then moved away)
 	//   rejected: 2 (was 1 before; +1 for the transitioned entity)
 	//   in_review: 1 (from the prior transactional-visibility section, which committed)
-	got, err = es.CountByState(ctx, mref, nil)
+	got, err = es.CountByState(ctx, mref, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, map[string]int64{"new": 3, "approved": 2, "rejected": 2, "in_review": 1}, got,
 		"after state transition, entity must count under post-transition state")
@@ -759,10 +759,10 @@ func testEntityCountInTxBufferShapes(t *testing.T, h Harness) {
 		require.NoError(t, err)
 	}
 	check := func(step string, total int64, byState map[string]int64) {
-		n, err := es.Count(txCtx, mref)
+		n, err := es.Count(txCtx, mref, nil)
 		require.NoError(t, err, step)
 		require.Equal(t, total, n, step)
-		got, err := es.CountByState(txCtx, mref, nil)
+		got, err := es.CountByState(txCtx, mref, nil, nil)
 		require.NoError(t, err, step)
 		require.Equal(t, byState, got, step)
 	}
@@ -803,7 +803,7 @@ func testEntitySaveAllOrdering(t *testing.T, h Harness) {
 	require.Len(t, versions, 3)
 
 	es, _ := h.Factory.EntityStore(ctx)
-	n, _ := es.Count(ctx, mref)
+	n, _ := es.Count(ctx, mref, nil)
 	require.Equal(t, int64(3), n)
 }
 
@@ -824,7 +824,7 @@ func testEntitySaveAllAtomicity(t *testing.T, h Harness) {
 	require.NoError(t, tm.Rollback(txCtx, txID))
 
 	esOut, _ := h.Factory.EntityStore(ctx)
-	n, _ := esOut.Count(ctx, mref)
+	n, _ := esOut.Count(ctx, mref, nil)
 	require.Equal(t, int64(0), n, "no SaveAll entities visible after rollback")
 }
 
@@ -2069,7 +2069,7 @@ func testEntityConcurrentDifferent(t *testing.T, h Harness) {
 		require.NoError(t, <-errs)
 	}
 	es, _ := h.Factory.EntityStore(ctx)
-	count, err := es.Count(ctx, mref)
+	count, err := es.Count(ctx, mref, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(n), count)
 }
@@ -2204,20 +2204,20 @@ func testEntityTenantIsolationCount(t *testing.T, h Harness) {
 	})
 
 	esA, _ := h.Factory.EntityStore(ctxA)
-	ownerN, err := esA.Count(ctxA, mref)
+	ownerN, err := esA.Count(ctxA, mref, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(2), ownerN,
 		"control: the owning tenant must count its own entities, so tenant B's zero below is evidence of tenant scoping")
-	ownerByState, err := esA.CountByState(ctxA, mref, nil)
+	ownerByState, err := esA.CountByState(ctxA, mref, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, map[string]int64{"open": 1, "closed": 1}, ownerByState,
 		"control: the owning tenant must see its own per-state counts")
 
 	esB, _ := h.Factory.EntityStore(ctxB)
-	n, err := esB.Count(ctxB, mref)
+	n, err := esB.Count(ctxB, mref, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(0), n, "cross-tenant Count must not count tenant A's entities")
-	byState, err := esB.CountByState(ctxB, mref, nil)
+	byState, err := esB.CountByState(ctxB, mref, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, map[string]int64{}, byState,
 		"cross-tenant CountByState must return an empty (non-nil) map, not tenant A's per-state counts")
@@ -2287,7 +2287,7 @@ func testEntityEmptyTenant(t *testing.T, h Harness) {
 	require.NoError(t, err)
 	require.NotNil(t, got, "GetPage on an empty model must return a non-nil, empty page")
 	require.Len(t, got, 0)
-	n, err := es.Count(ctx, mref)
+	n, err := es.Count(ctx, mref, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(0), n)
 }

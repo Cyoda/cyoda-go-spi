@@ -37,6 +37,10 @@ func commitOne(t *testing.T, h Harness, ctx context.Context, model string) (txID
 	return txID, entityID
 }
 
+// ctMaxWriterCommits bounds each writer so the case's run time stays bounded
+// on every backend.
+const ctMaxWriterCommits = 200
+
 // commitOneErr is commitOne for goroutines other than the test's: it returns
 // the failure instead of calling FailNow.
 func commitOneErr(h Harness, ctx context.Context, model string) error {
@@ -106,10 +110,14 @@ func testCTLaterCommitStampsAbove(t *testing.T, h Harness) {
 func testCTMonotonic(t *testing.T, h Harness) {
 	ctxA := tenantContext(h.NewTenant())
 	ctxB := tenantContext(h.NewTenant())
-	tmA, _ := h.Factory.TransactionManager(ctxA)
-	tmB, _ := h.Factory.TransactionManager(ctxB)
+	tmA, err := h.Factory.TransactionManager(ctxA)
+	require.NoError(t, err)
+	tmB, err := h.Factory.TransactionManager(ctxB)
+	require.NoError(t, err)
 	var prev time.Time
 	for i := 0; i < 20; i++ {
+		// A commit in tenant A between calls makes the stamps advance.
+		commitOne(t, h, ctxA, "m-ct-mono")
 		ctx, tm := ctxA, tmA
 		if i%2 == 1 {
 			ctx, tm = ctxB, tmB
@@ -135,11 +143,17 @@ func testCTFinalUnderConcurrentWrites(t *testing.T, h Harness) {
 	stop := make(chan struct{})
 	errCh := make(chan error, 4)
 	var wg sync.WaitGroup
+	var once sync.Once
+	halt := func() {
+		once.Do(func() { close(stop) })
+		wg.Wait()
+	}
+	defer halt()
 	for w := 0; w < 4; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for {
+			for n := 0; n < ctMaxWriterCommits; n++ {
 				select {
 				case <-stop:
 					return
@@ -166,8 +180,7 @@ func testCTFinalUnderConcurrentWrites(t *testing.T, h Harness) {
 		require.NoError(t, err)
 		select {
 		case werr := <-errCh:
-			close(stop)
-			wg.Wait()
+			halt()
 			require.NoError(t, werr, "writer failed")
 		default:
 		}
@@ -177,8 +190,7 @@ func testCTFinalUnderConcurrentWrites(t *testing.T, h Harness) {
 		require.NoError(t, err)
 		require.Equal(t, n1, n2, "count at C changed after it was given")
 	}
-	close(stop)
-	wg.Wait()
+	halt()
 	select {
 	case werr := <-errCh:
 		require.NoError(t, werr, "writer failed")
@@ -207,8 +219,24 @@ func testCTCalledInsideTransaction(t *testing.T, h Harness) {
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 	txID, txCtx := beginGuarded(t, tm, ctx)
-	_, err = tm.ConsistencyTime(txCtx)
+	es, err := h.Factory.EntityStore(txCtx)
 	require.NoError(t, err)
+	_, err = es.Save(txCtx, newEntity(t, "m-ct-intx", newID(), map[string]any{"k": 1}))
+	require.NoError(t, err)
+
+	// A separate transaction commits while T is open.
+	h.AdvanceClock(10 * time.Millisecond)
+	xID, _ := commitOne(t, h, ctx, "m-ct-intx-other")
+
+	// Bounded so a backend that waits on T fails instead of hanging the suite.
+	callCtx, cancel := context.WithTimeout(txCtx, 30*time.Second)
+	defer cancel()
+	c, err := tm.ConsistencyTime(callCtx)
+	require.NoError(t, err)
+	submit, err := tm.GetSubmitTime(ctx, xID)
+	require.NoError(t, err)
+	require.False(t, submit.After(c), "commit %v acknowledged before the call must be <= C %v", submit, c)
+
 	// The transaction is still usable and still ours to commit.
 	require.NoError(t, tm.Commit(txCtx, txID))
 }

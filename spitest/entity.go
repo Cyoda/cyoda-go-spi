@@ -35,7 +35,9 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Count", testEntityCount)
 	runSubtest(t, h, tracker, "CountByState", testEntityCountByState)
 	runSubtest(t, h, tracker, "Count/AsAt", testEntityCountAsAt)
+	runSubtest(t, h, tracker, "Count/AsAtCommittedOnlyInTx", testEntityCountAsAtCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "CountByState/AsAt", testEntityCountByStateAsAt)
+	runSubtest(t, h, tracker, "CountByState/AsAtCommittedOnlyInTx", testEntityCountByStateAsAtCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "GetVersionMetadata/CommittedOnlyInTx", testEntityVersionMetadataCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "Count/InTxBufferShapes", testEntityCountInTxBufferShapes)
 	runSubtest(t, h, tracker, "JSONFidelity/DeepNesting", testEntityJSONFidelity)
@@ -2300,7 +2302,8 @@ func testEntityCountAsAt(t *testing.T, h Harness) {
 	mref := spi.ModelRef{EntityName: "m-cnt-at", ModelVersion: "1"}
 	var ids []string
 	withTx(t, h, ctx, func(txCtx context.Context) {
-		es, _ := h.Factory.EntityStore(txCtx)
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
 		for i := 0; i < 3; i++ {
 			id := newID()
 			ids = append(ids, id)
@@ -2312,65 +2315,104 @@ func testEntityCountAsAt(t *testing.T, h Harness) {
 	mid := h.Now()
 	h.AdvanceClock(10 * time.Millisecond)
 	withTx(t, h, ctx, func(txCtx context.Context) {
-		es, _ := h.Factory.EntityStore(txCtx)
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
 		require.NoError(t, es.Delete(txCtx, ids[0]))
-		_, err := es.Save(txCtx, newEntity(t, "m-cnt-at", newID(), map[string]any{}))
+		_, err = es.Save(txCtx, newEntity(t, "m-cnt-at", newID(), map[string]any{}))
 		require.NoError(t, err)
 		_, err = es.Save(txCtx, newEntity(t, "m-cnt-at", newID(), map[string]any{}))
 		require.NoError(t, err)
 	})
-	es, _ := h.Factory.EntityStore(ctx)
+	h.AdvanceClock(10 * time.Millisecond)
+	after := h.Now()
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
 	n, err := es.Count(ctx, mref, &mid)
 	require.NoError(t, err)
 	require.Equal(t, int64(3), n, "as at mid: three live entities")
+	n, err = es.Count(ctx, mref, &after)
+	require.NoError(t, err)
+	require.Equal(t, int64(4), n, "as at after: one deleted, two added")
 	n, err = es.Count(ctx, mref, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(4), n, "now: one deleted, two added")
+}
 
-	// Inside a transaction, asAt is committed-only.
-	tm, _ := h.Factory.TransactionManager(ctx)
-	txID, txCtx := beginGuarded(t, tm, ctx)
-	esTx, _ := h.Factory.EntityStore(txCtx)
-	_, err = esTx.Save(txCtx, newEntity(t, "m-cnt-at", newID(), map[string]any{}))
+func testEntityCountAsAtCommittedOnlyInTx(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	f := newPITCommittedOnlyFixture(t, h, ctx, "m-pit-count")
+	n, err := f.Store.Count(f.Ctx, f.ModelRef, &f.AsAt)
 	require.NoError(t, err)
-	n, err = esTx.Count(txCtx, mref, &mid)
-	require.NoError(t, err)
-	require.Equal(t, int64(3), n, "asAt inside a tx ignores the tx's own writes")
-	require.NoError(t, tm.Rollback(txCtx, txID))
+	require.Equal(t, int64(1), n,
+		"Count issued inside a transaction must not see the transaction's own uncommitted writes")
 }
 
 func testEntityCountByStateAsAt(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	mref := spi.ModelRef{EntityName: "m-cbs-at", ModelVersion: "1"}
-	id := newID()
+	keepID, deletedEarlyID, deletedLateID := newID(), newID(), newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
-		es, _ := h.Factory.EntityStore(txCtx)
-		e := newEntity(t, "m-cbs-at", id, map[string]any{})
-		e.Meta.State = "new"
-		_, err := es.Save(txCtx, e)
+		es, err := h.Factory.EntityStore(txCtx)
 		require.NoError(t, err)
+		for _, id := range []string{keepID, deletedEarlyID, deletedLateID} {
+			e := newEntity(t, "m-cbs-at", id, map[string]any{})
+			e.Meta.State = "new"
+			_, err := es.Save(txCtx, e)
+			require.NoError(t, err)
+		}
+	})
+	h.AdvanceClock(10 * time.Millisecond)
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		require.NoError(t, es.Delete(txCtx, deletedEarlyID))
 	})
 	h.AdvanceClock(10 * time.Millisecond)
 	mid := h.Now()
 	h.AdvanceClock(10 * time.Millisecond)
 	withTx(t, h, ctx, func(txCtx context.Context) {
-		es, _ := h.Factory.EntityStore(txCtx)
-		got, err := es.Get(txCtx, id)
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		got, err := es.Get(txCtx, keepID)
 		require.NoError(t, err)
 		got.Meta.State = "approved"
 		_, err = es.Save(txCtx, got)
 		require.NoError(t, err)
+		require.NoError(t, es.Delete(txCtx, deletedLateID))
 	})
-	es, _ := h.Factory.EntityStore(ctx)
+	h.AdvanceClock(10 * time.Millisecond)
+	after := h.Now()
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
 	m, err := es.CountByState(ctx, mref, nil, &mid)
 	require.NoError(t, err)
-	require.Equal(t, map[string]int64{"new": 1}, m)
+	require.Equal(t, map[string]int64{"new": 2}, m,
+		"as at mid: the entity deleted before mid is absent, the one deleted after is present")
 	m, err = es.CountByState(ctx, mref, []string{"approved"}, &mid)
 	require.NoError(t, err)
+	require.NotNil(t, m)
 	require.Empty(t, m)
+	m, err = es.CountByState(ctx, mref, nil, &after)
+	require.NoError(t, err)
+	require.Equal(t, map[string]int64{"approved": 1}, m, "as at after: both deleted entities absent")
 	m, err = es.CountByState(ctx, mref, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, map[string]int64{"approved": 1}, m)
+}
+
+func testEntityCountByStateAsAtCommittedOnlyInTx(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	f := newPITCommittedOnlyFixture(t, h, ctx, "m-pit-cbs")
+	// The fixture's committed entity carries the default state; read it
+	// outside the transaction to learn what it is.
+	esOut, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	committed, err := esOut.Get(ctx, f.CommittedID)
+	require.NoError(t, err)
+	m, err := f.Store.CountByState(f.Ctx, f.ModelRef, nil, &f.AsAt)
+	require.NoError(t, err)
+	require.Equal(t, map[string]int64{committed.Meta.State: 1}, m,
+		"CountByState issued inside a transaction must see only the committed entity")
 }
 
 func testEntityVersionMetadataCommittedOnlyInTx(t *testing.T, h Harness) {

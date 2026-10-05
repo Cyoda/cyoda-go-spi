@@ -376,6 +376,7 @@ type EntityStore interface {
 	// asAt is not a deletion — committed data only, ignoring any ambient
 	// transaction and recording nothing in its read set, the same
 	// point-in-time rule as GetPage(asAt) and IterateOptions.PointInTime.
+	// An entity with no revision at or before asAt is not counted.
 	//
 	// Unknown model: 0 with no error.
 	Count(ctx context.Context, modelRef ModelRef, asAt *time.Time) (int64, error)

@@ -33,10 +33,12 @@ func (m *mockEntityStore) Get(context.Context, string) (*spi.Entity, error) { re
 func (m *mockEntityStore) GetAsAt(_ context.Context, _ string, _ time.Time) (*spi.Entity, error) {
 	return nil, nil
 }
-func (m *mockEntityStore) Delete(context.Context, string) error               { return nil }
-func (m *mockEntityStore) DeleteAll(context.Context, spi.ModelRef) error      { return nil }
-func (m *mockEntityStore) Exists(context.Context, string) (bool, error)       { return false, nil }
-func (m *mockEntityStore) Count(context.Context, spi.ModelRef, *time.Time) (int64, error) { return 0, nil }
+func (m *mockEntityStore) Delete(context.Context, string) error          { return nil }
+func (m *mockEntityStore) DeleteAll(context.Context, spi.ModelRef) error { return nil }
+func (m *mockEntityStore) Exists(context.Context, string) (bool, error)  { return false, nil }
+func (m *mockEntityStore) Count(context.Context, spi.ModelRef, *time.Time) (int64, error) {
+	return 0, nil
+}
 func (m *mockEntityStore) CountByState(context.Context, spi.ModelRef, []string, *time.Time) (map[string]int64, error) {
 	return map[string]int64{}, nil
 }

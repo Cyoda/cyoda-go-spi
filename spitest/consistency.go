@@ -37,9 +37,9 @@ func commitOne(t *testing.T, h Harness, ctx context.Context, model string) (txID
 	return txID, entityID
 }
 
-// ctMaxWriterCommits bounds each writer so the case's run time stays bounded
-// on every backend.
-const ctMaxWriterCommits = 200
+// ctWriterDeadline bounds how long the writers run so the case's run time
+// stays bounded on every backend.
+const ctWriterDeadline = 5 * time.Second
 
 // commitOneErr is commitOne for goroutines other than the test's: it returns
 // the failure instead of calling FailNow.
@@ -149,11 +149,12 @@ func testCTFinalUnderConcurrentWrites(t *testing.T, h Harness) {
 		wg.Wait()
 	}
 	defer halt()
+	deadline := time.Now().Add(ctWriterDeadline)
 	for w := 0; w < 4; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for n := 0; n < ctMaxWriterCommits; n++ {
+			for time.Now().Before(deadline) {
 				select {
 				case <-stop:
 					return
@@ -172,8 +173,15 @@ func testCTFinalUnderConcurrentWrites(t *testing.T, h Harness) {
 	}
 	es, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
+	var ackedAtFirst, ackedAtLast int64
 	for i := 0; i < 20; i++ {
 		before := acked.Load()
+		if i == 0 {
+			ackedAtFirst = before
+		}
+		if i == 19 {
+			ackedAtLast = before
+		}
 		c, err := tm.ConsistencyTime(ctx)
 		require.NoError(t, err)
 		n1, err := es.Count(ctx, mref, &c)
@@ -196,6 +204,8 @@ func testCTFinalUnderConcurrentWrites(t *testing.T, h Harness) {
 		require.NoError(t, werr, "writer failed")
 	default:
 	}
+	require.Greater(t, ackedAtLast, ackedAtFirst,
+		"no commit was acknowledged while the checks ran: the writers finished early and the case proved nothing")
 }
 
 func testCTNonTransactionalSaveIncluded(t *testing.T, h Harness) {

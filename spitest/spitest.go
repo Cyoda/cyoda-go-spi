@@ -190,6 +190,7 @@ func StoreFactoryConformance(t *testing.T, h Harness) {
 
 	t.Run("Transaction", func(t *testing.T) { runTransactionSuite(t, h, tracker) })
 	t.Run("Entity", func(t *testing.T) { runEntitySuite(t, h, tracker) })
+	t.Run("ConsistencyTime", func(t *testing.T) { runConsistencyTimeSuite(t, h, tracker) })
 	t.Run("Model", func(t *testing.T) { runModelSuite(t, h, tracker) })
 	t.Run("KeyValue", func(t *testing.T) { runKeyValueSuite(t, h, tracker) })
 	t.Run("Message", func(t *testing.T) { runMessageSuite(t, h, tracker) })

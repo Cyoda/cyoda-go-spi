@@ -68,6 +68,29 @@ type TransactionManager interface {
 	// be answerable by any node, not only the one that committed.
 	GetSubmitTime(ctx context.Context, txID string) (time.Time, error)
 
+	// ConsistencyTime returns the consistency time C for the tenant in ctx:
+	// an instant, in the store's own stamp domain, with four properties.
+	//
+	//   - Complete: every save, of any tenant, whose success was returned on
+	//     any node before this call started has a stamp <= C.
+	//   - Final: a read for this tenant at T <= C that starts after this call
+	//     returned sees every save of this tenant stamped <= T, now and later.
+	//     A save not yet stamped when C is returned is stamped > C.
+	//   - Monotonic: every C returned, for any tenant on any node, is >= every
+	//     C returned before this call started, across restarts too.
+	//   - Read resolution: if the store widens an instant to a coarser unit
+	//     when it reads (a whole millisecond, say), C closes that whole unit.
+	//
+	// The mechanism is "reserve, then wait": raise the stamp floor to
+	// max(store clock, highest stamp issued), then wait until every save of
+	// the tenant already holding a stamp <= C has committed or aborted.
+	//
+	// It never returns a guessed instant. When the store cannot certify C
+	// within its own wait budget it returns an error wrapping
+	// ErrConsistencyTimeUnavailable. It never uses, joins or holds the
+	// transaction in ctx, so it is safe to call from inside one.
+	ConsistencyTime(ctx context.Context) (time.Time, error)
+
 	// Savepoint creates a named savepoint within the given transaction by
 	// snapshotting tx.Buffer / tx.ReadSet / tx.WriteSet / tx.Deletes, with
 	// tx.DeleteAttribution snapshotted paired with tx.Deletes.

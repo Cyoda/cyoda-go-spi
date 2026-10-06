@@ -577,10 +577,10 @@ func testTxStateOpAfterCommit(t *testing.T, h Harness) {
 	}
 	requireTxAlreadyCommittedOrPurged(t, iterErr, "Iterate")
 
-	_, err = es.Count(txCtx, mref)
+	_, err = es.Count(txCtx, mref, nil)
 	requireTxAlreadyCommittedOrPurged(t, err, "Count")
 
-	_, err = es.CountByState(txCtx, mref, nil)
+	_, err = es.CountByState(txCtx, mref, nil, nil)
 	requireTxAlreadyCommittedOrPurged(t, err, "CountByState")
 }
 

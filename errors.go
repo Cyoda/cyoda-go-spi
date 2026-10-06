@@ -132,6 +132,12 @@ var ErrTxCommitInProgress = errors.New("transaction commit in progress")
 // answer to a cross-tenant lookup, or it becomes an existence oracle.
 var ErrTxNotCommitted = errors.New("transaction not yet committed")
 
+// ErrConsistencyTimeUnavailable is returned (wrapped) by
+// TransactionManager.ConsistencyTime when the store cannot certify a
+// consistency time within its wait budget — typically because a save of the
+// tenant is held in its commit phase. It is transient: a retry may succeed.
+var ErrConsistencyTimeUnavailable = errors.New("consistency time unavailable")
+
 // ErrTxTenantMismatch indicates a tenant mismatch against the transaction
 // on ctx:
 //

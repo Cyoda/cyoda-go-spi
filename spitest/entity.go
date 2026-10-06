@@ -37,6 +37,7 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Count/AsAt", testEntityCountAsAt)
 	runSubtest(t, h, tracker, "Count/AsAtCommittedOnlyInTx", testEntityCountAsAtCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "CountByState/AsAt", testEntityCountByStateAsAt)
+	runSubtest(t, h, tracker, "CountByState/EmptyStateFilter", testEntityCountByStateEmptyStateFilter)
 	runSubtest(t, h, tracker, "CountByState/AsAtCommittedOnlyInTx", testEntityCountByStateAsAtCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "GetVersionMetadata/CommittedOnlyInTx", testEntityVersionMetadataCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "Count/InTxBufferShapes", testEntityCountInTxBufferShapes)
@@ -2434,4 +2435,37 @@ func testEntityVersionMetadataCommittedOnlyInTx(t *testing.T, h Harness) {
 	require.NoError(t, err)
 	require.Len(t, vs, 1, "the transaction's own uncommitted version must not be listed")
 	require.NoError(t, tm.Rollback(txCtx, txID))
+}
+
+// testEntityCountByStateEmptyStateFilter: an entity with no state is counted
+// under "", so a filter naming "" finds it, live and at an instant.
+func testEntityCountByStateEmptyStateFilter(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	mref := spi.ModelRef{EntityName: "m-cbs-empty", ModelVersion: "1"}
+	withTx(t, h, ctx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		stateless := newEntity(t, "m-cbs-empty", newID(), map[string]any{})
+		stateless.Meta.State = ""
+		_, err = es.Save(txCtx, stateless)
+		require.NoError(t, err)
+		withState := newEntity(t, "m-cbs-empty", newID(), map[string]any{})
+		withState.Meta.State = "new"
+		_, err = es.Save(txCtx, withState)
+		require.NoError(t, err)
+	})
+	h.AdvanceClock(10 * time.Millisecond)
+	at := h.Now()
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+
+	got, err := es.CountByState(ctx, mref, []string{""}, nil)
+	require.NoError(t, err)
+	require.Equal(t, map[string]int64{"": 1}, got, "live: a state-less entity is counted under the empty state")
+	got, err = es.CountByState(ctx, mref, []string{""}, &at)
+	require.NoError(t, err)
+	require.Equal(t, map[string]int64{"": 1}, got, "at an instant: a state-less entity is counted under the empty state")
+	got, err = es.CountByState(ctx, mref, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, map[string]int64{"": 1, "new": 1}, got)
 }

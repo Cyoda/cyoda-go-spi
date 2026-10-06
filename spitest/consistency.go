@@ -37,9 +37,9 @@ func commitOne(t *testing.T, h Harness, ctx context.Context, model string) (txID
 	return txID, entityID
 }
 
-// ctWriterDeadline bounds how long the writers run so the case's run time
-// stays bounded on every backend.
-const ctWriterDeadline = 5 * time.Second
+// ctProgressTimeout bounds, in real time, how long each checker iteration
+// waits for the writers to acknowledge another commit.
+const ctProgressTimeout = 10 * time.Second
 
 // commitOneErr is commitOne for goroutines other than the test's: it returns
 // the failure instead of calling FailNow.
@@ -149,12 +149,11 @@ func testCTFinalUnderConcurrentWrites(t *testing.T, h Harness) {
 		wg.Wait()
 	}
 	defer halt()
-	deadline := time.Now().Add(ctWriterDeadline)
 	for w := 0; w < 4; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for time.Now().Before(deadline) {
+			for {
 				select {
 				case <-stop:
 					return
@@ -173,9 +172,27 @@ func testCTFinalUnderConcurrentWrites(t *testing.T, h Harness) {
 	}
 	es, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
-	var ackedAtFirst, ackedAtLast int64
+	var ackedAtFirst, ackedAtLast, prevAcked int64
 	for i := 0; i < 20; i++ {
+		// Yield real time to the writers: virtual-clock backends would
+		// otherwise finish every iteration before any writer commits.
+		progressDeadline := time.Now().Add(ctProgressTimeout)
+		for acked.Load() <= prevAcked {
+			select {
+			case werr := <-errCh:
+				halt()
+				require.NoError(t, werr, "writer failed")
+			default:
+			}
+			if time.Now().After(progressDeadline) {
+				halt()
+				require.Fail(t, "writers made no progress",
+					"no commit acknowledged within %v before iteration %d", ctProgressTimeout, i)
+			}
+			time.Sleep(time.Millisecond)
+		}
 		before := acked.Load()
+		prevAcked = before
 		if i == 0 {
 			ackedAtFirst = before
 		}

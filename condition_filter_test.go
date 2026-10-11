@@ -1547,15 +1547,21 @@ func TestValidateConditionOperators(t *testing.T) {
 		}
 	})
 
-	t.Run("NilAndOperatorlessNodesPass", func(t *testing.T) {
+	t.Run("NilAndFunctionNodesPass", func(t *testing.T) {
 		for _, cond := range []predicate.Condition{
 			nil,
-			&predicate.ArrayCondition{OperatorType: "EQUALS", JsonPath: "$.tags", Values: []any{"a"}},
 			&predicate.FunctionCondition{},
 		} {
 			if err := spi.ValidateConditionOperators(cond); err != nil {
-				t.Errorf("%T carries no operator but was rejected: %v", cond, err)
+				t.Errorf("%T has no operator to check but was rejected: %v", cond, err)
 			}
+		}
+	})
+
+	t.Run("ValidArrayClausePasses", func(t *testing.T) {
+		c := &predicate.ArrayCondition{OperatorType: "EQUALS", JsonPath: "$.tags", Values: []any{"a"}}
+		if err := spi.ValidateConditionOperators(c); err != nil {
+			t.Errorf("valid array clause rejected: %v", err)
 		}
 	})
 
@@ -1663,7 +1669,7 @@ func TestValidateConditionPatterns(t *testing.T) {
 		t.Errorf("lifecycle leaf not checked or not named: %v", err)
 	}
 
-	// Arms that carry no operator, and nil.
+	// A valid array clause, a function condition (no operator), and nil all pass.
 	for name, cond := range map[string]predicate.Condition{
 		"array":    &predicate.ArrayCondition{OperatorType: "EQUALS", JsonPath: "$.tags", Values: []any{"a"}},
 		"function": &predicate.FunctionCondition{},
@@ -1869,5 +1875,27 @@ func TestConditionToFilter_NestedArrayClauseTestingNothingIsRefused(t *testing.T
 	}}
 	if _, err := spi.ConditionToFilter(cond, nil); !errors.Is(err, spi.ErrArrayClauseTestsNothing) {
 		t.Fatalf("want ErrArrayClauseTestsNothing, got %v", err)
+	}
+}
+
+func TestValidateConditionOperators_ArrayClause(t *testing.T) {
+	bad := &predicate.ArrayCondition{JsonPath: "$.t[*]", OperatorType: "FROBNICATE", Values: []any{"a"}}
+	if err := spi.ValidateConditionOperators(bad); !errors.Is(err, spi.ErrUnknownOperator) {
+		t.Errorf("unknown operator: want ErrUnknownOperator, got %v", err)
+	}
+	missing := &predicate.ArrayCondition{JsonPath: "$.t[*]", Values: []any{"a"}}
+	if err := spi.ValidateConditionOperators(missing); !errors.Is(err, spi.ErrUnknownOperator) {
+		t.Errorf("missing operator: want ErrUnknownOperator, got %v", err)
+	}
+	ok := &predicate.ArrayCondition{JsonPath: "$.t[*]", OperatorType: "GREATER_THAN", Values: []any{1}}
+	if err := spi.ValidateConditionOperators(ok); err != nil {
+		t.Errorf("valid clause: %v", err)
+	}
+}
+
+func TestValidateConditionPatterns_ArrayClause(t *testing.T) {
+	bad := &predicate.ArrayCondition{JsonPath: "$.t[*]", OperatorType: "MATCHES_PATTERN", Values: []any{"("}}
+	if err := spi.ValidateConditionPatterns(bad); err == nil {
+		t.Error("an invalid pattern at a position must be reported")
 	}
 }

@@ -14,6 +14,17 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **`predicate.ArrayCondition` carries `OperatorType`, applied at every tested
+  position.** The parser reads `operatorType` (aliases `operator`,
+  `operation`); `MarshalJSON` writes it. `DesugarCondition` now returns
+  `(Condition, error)`: its positional leaves use the clause's operator, and a
+  clause whose `Values` holds no non-nil entry is refused with the new
+  `ErrArrayClauseTestsNothing` instead of becoming an empty AND that matches
+  everything. `ConditionToFilter`, `ValidateConditionOperators` and
+  `ValidateConditionPatterns` check the array clause through the rewrite.
+  Migration: set `OperatorType` (`"EQUALS"` keeps the previous meaning);
+  handle the error from `DesugarCondition`; a backend with its own condition
+  parser must read the operator.
 - `TransactionManager.ConsistencyTime(ctx)` is required. It returns the
   consistency time: complete, final, monotonic, at the store's read
   resolution (see its doc). New sentinel `ErrConsistencyTimeUnavailable`.

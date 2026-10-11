@@ -166,10 +166,10 @@ func ConditionToFilter(cond predicate.Condition, fields map[string]FieldDescript
 // its switch, cond's WHOLE tree is already desugared — every descendant, not
 // just the direct children. A [groupToFilter] child is therefore always
 // already-desugared, and re-running [DesugarCondition] on it is pure
-// redundant work: it re-walks and re-allocates a `children` slice for every
-// group node in that child's subtree, and because this happened once per
-// ancestor level, a depth-D chain paid D + (D-1) + ... + 1 = O(D²) group-node
-// revisits instead of O(D). See
+// redundant work: it re-walks and re-allocates a `children` slice for
+// every group node in that child's subtree, and because this happened
+// once per ancestor level, a depth-D chain paid D + (D-1) + ... + 1 =
+// O(D²) group-node revisits instead of O(D). See
 // TestConditionToFilter_DesugarIsNotReappliedPerLevel.
 func desugaredToFilter(cond predicate.Condition, fields map[string]FieldDescriptor) (Filter, error) {
 	switch c := cond.(type) {
@@ -207,8 +207,7 @@ func desugaredToFilter(cond predicate.Condition, fields map[string]FieldDescript
 // [ErrArrayClauseTestsNothing] at any depth, rather than rendered as an empty
 // AND that would match every entity.
 //
-// Apart from that refusal this function never inspects jsonPath for
-// well-formedness. Per the path grammar, an array clause's jsonPath must
+// It never inspects jsonPath for well-formedness. Per the path grammar, an array clause's jsonPath must
 // carry a trailing wildcard subscript ("$.tags[*]"), which desugars to
 // "$.tags[i]" by replacing that trailing "[*]" with "[i]"; a path with no
 // trailing wildcard has "[i]" appended instead (a bare "$.tags" yields
@@ -835,9 +834,12 @@ func validateOperatorsAtDepth(cond predicate.Condition, depth int) error {
 		}
 		return nil
 	case *predicate.ArrayCondition:
-		// Carries no operator — each positional value becomes an equality
-		// leaf in DesugarCondition. Nothing to check.
-		return nil
+		// The clause means its desugared leaves; check those.
+		d, err := DesugarCondition(c)
+		if err != nil {
+			return err
+		}
+		return validateOperatorsAtDepth(d, depth+1)
 	default:
 		// Including FunctionCondition, which carries no operator either.
 		// ConditionToFilter rejects it on its own terms.
@@ -892,8 +894,12 @@ func validatePatternsAtDepth(cond predicate.Condition, depth int) error {
 		}
 		return nil
 	case *predicate.ArrayCondition:
-		// Positional values become equality leaves; no pattern operand.
-		return nil
+		// The clause means its desugared leaves; check those.
+		d, err := DesugarCondition(c)
+		if err != nil {
+			return err
+		}
+		return validatePatternsAtDepth(d, depth+1)
 	default:
 		// Including FunctionCondition, which carries no operator.
 		return nil

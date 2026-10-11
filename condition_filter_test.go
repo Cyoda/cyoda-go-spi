@@ -76,7 +76,8 @@ func TestConditionToFilter_PrefixedPathsAccepted(t *testing.T) {
 		})
 		t.Run("array/"+tc.jsonPath, func(t *testing.T) {
 			f, err := spi.ConditionToFilter(&predicate.ArrayCondition{
-				JsonPath: tc.jsonPath, Values: []any{"v"},
+				OperatorType: "EQUALS",
+				JsonPath:     tc.jsonPath, Values: []any{"v"},
 			}, nil)
 			if err != nil {
 				t.Fatalf("ConditionToFilter(%q): unexpected error: %v", tc.jsonPath, err)
@@ -139,7 +140,8 @@ func TestConditionToFilter_BarePathRejected(t *testing.T) {
 		})
 		t.Run("array/"+p, func(t *testing.T) {
 			_, err := spi.ConditionToFilter(&predicate.ArrayCondition{
-				JsonPath: p, Values: []any{"v"},
+				OperatorType: "EQUALS",
+				JsonPath:     p, Values: []any{"v"},
 			}, nil)
 			if err == nil {
 				t.Fatalf("ConditionToFilter(%q): expected an error, got nil", p)
@@ -241,7 +243,8 @@ func TestConditionToFilter_MalformedSubscriptIsInvalidPath(t *testing.T) {
 		})
 		t.Run("array/"+p, func(t *testing.T) {
 			_, err := spi.ConditionToFilter(&predicate.ArrayCondition{
-				JsonPath: p, Values: []any{"v"},
+				OperatorType: "EQUALS",
+				JsonPath:     p, Values: []any{"v"},
 			}, nil)
 			if err == nil {
 				t.Fatalf("ConditionToFilter(%q): expected an error, got nil", p)
@@ -701,8 +704,9 @@ func TestConditionToFilter_NestedGroup(t *testing.T) {
 
 func TestConditionToFilter_Array(t *testing.T) {
 	cond := &predicate.ArrayCondition{
-		JsonPath: "$.tags",
-		Values:   []any{"go", nil, "test"},
+		OperatorType: "EQUALS",
+		JsonPath:     "$.tags",
+		Values:       []any{"go", nil, "test"},
 	}
 	f, err := spi.ConditionToFilter(cond, nil)
 	if err != nil {
@@ -738,8 +742,9 @@ func TestConditionToFilter_Array(t *testing.T) {
 
 func TestConditionToFilter_ArraySingleValue(t *testing.T) {
 	cond := &predicate.ArrayCondition{
-		JsonPath: "$.items",
-		Values:   []any{nil, "only"},
+		OperatorType: "EQUALS",
+		JsonPath:     "$.items",
+		Values:       []any{nil, "only"},
 	}
 	f, err := spi.ConditionToFilter(cond, nil)
 	if err != nil {
@@ -751,24 +756,6 @@ func TestConditionToFilter_ArraySingleValue(t *testing.T) {
 	}
 	if f.Path != "items[1]" {
 		t.Errorf("Path = %s, want items[1]", f.Path)
-	}
-}
-
-func TestConditionToFilter_ArrayAllNil(t *testing.T) {
-	cond := &predicate.ArrayCondition{
-		JsonPath: "$.arr",
-		Values:   []any{nil, nil},
-	}
-	f, err := spi.ConditionToFilter(cond, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// All-nil values produce an empty AND (tautology — matches everything).
-	if f.Op != spi.FilterAnd {
-		t.Errorf("Op = %s, want and for all-nil array", f.Op)
-	}
-	if len(f.Children) != 0 {
-		t.Errorf("Children count = %d, want 0", len(f.Children))
 	}
 }
 
@@ -1082,8 +1069,9 @@ func TestConditionToFilter_Array_StampsDeclaredFromFieldsMap(t *testing.T) {
 		"$.tags[*]": {Path: "$.tags[*]", Types: []spi.DataType{spi.String}, IsArray: true},
 	}
 	cond := &predicate.ArrayCondition{
-		JsonPath: "$.tags",
-		Values:   []any{"go", nil, "test"},
+		OperatorType: "EQUALS",
+		JsonPath:     "$.tags",
+		Values:       []any{"go", nil, "test"},
 	}
 	f, err := spi.ConditionToFilter(cond, fields)
 	if err != nil {
@@ -1107,8 +1095,9 @@ func TestConditionToFilter_Array_StampsDeclaredFromFieldsMap(t *testing.T) {
 // leaves.
 func TestConditionToFilter_Array_DeclaredNilWhenUnresolvable(t *testing.T) {
 	cond := &predicate.ArrayCondition{
-		JsonPath: "$.tags",
-		Values:   []any{"go", nil, "test"},
+		OperatorType: "EQUALS",
+		JsonPath:     "$.tags",
+		Values:       []any{"go", nil, "test"},
 	}
 	f, err := spi.ConditionToFilter(cond, nil)
 	if err != nil {
@@ -1375,32 +1364,6 @@ func TestConditionToFilter_FieldsLookupUsesPrefixedKey(t *testing.T) {
 }
 
 func TestConditionToFilter_EmptyGroupIdentityEncodings(t *testing.T) {
-	t.Run("AllNilArrayYieldsNonNilEmptyChildren", func(t *testing.T) {
-		// DesugarCondition turns an all-nil array into a literal empty AND
-		// GroupCondition (no bespoke tautology encoding of its own), so this
-		// now goes through the exact same groupToFilter path — and gets the
-		// exact same non-nil-empty-slice shape — as the caller-written empty
-		// group case below.
-		f, err := spi.ConditionToFilter(&predicate.ArrayCondition{
-			JsonPath: "$.arr", Values: []any{nil, nil},
-		}, nil)
-		if err != nil {
-			t.Fatalf("ConditionToFilter: %v", err)
-		}
-		if f.Op != spi.FilterAnd {
-			t.Fatalf("Op = %s, want and", f.Op)
-		}
-		if f.Children == nil {
-			t.Error("Children = nil, want a non-nil empty slice (groupToFilter always allocates)")
-		}
-		if len(f.Children) != 0 {
-			t.Errorf("len(Children) = %d, want 0", len(f.Children))
-		}
-		if !mustPrepare(t, f).Match([]byte(`{}`), spi.EntityMeta{}) {
-			t.Error("an empty AND must be the identity (match everything), not match nothing")
-		}
-	})
-
 	for _, op := range []struct {
 		operator string
 		want     spi.FilterOp
@@ -1542,7 +1505,7 @@ func TestValidateConditionOperators(t *testing.T) {
 					Operator: "OR",
 					Conditions: []predicate.Condition{
 						&predicate.LifecycleCondition{Field: "state", OperatorType: "NOT_EQUAL", Value: "draft"},
-						&predicate.ArrayCondition{JsonPath: "$.tags", Values: []any{"a", nil}},
+						&predicate.ArrayCondition{OperatorType: "EQUALS", JsonPath: "$.tags", Values: []any{"a", nil}},
 					},
 				},
 			},
@@ -1587,7 +1550,7 @@ func TestValidateConditionOperators(t *testing.T) {
 	t.Run("NilAndOperatorlessNodesPass", func(t *testing.T) {
 		for _, cond := range []predicate.Condition{
 			nil,
-			&predicate.ArrayCondition{JsonPath: "$.tags", Values: []any{"a"}},
+			&predicate.ArrayCondition{OperatorType: "EQUALS", JsonPath: "$.tags", Values: []any{"a"}},
 			&predicate.FunctionCondition{},
 		} {
 			if err := spi.ValidateConditionOperators(cond); err != nil {
@@ -1702,7 +1665,7 @@ func TestValidateConditionPatterns(t *testing.T) {
 
 	// Arms that carry no operator, and nil.
 	for name, cond := range map[string]predicate.Condition{
-		"array":    &predicate.ArrayCondition{JsonPath: "$.tags", Values: []any{"a"}},
+		"array":    &predicate.ArrayCondition{OperatorType: "EQUALS", JsonPath: "$.tags", Values: []any{"a"}},
 		"function": &predicate.FunctionCondition{},
 	} {
 		if err := spi.ValidateConditionPatterns(cond); err != nil {
@@ -1754,10 +1717,14 @@ func TestValidateLeafPattern(t *testing.T) {
 }
 
 func TestDesugarCondition_ArrayClause(t *testing.T) {
-	got := spi.DesugarCondition(&predicate.ArrayCondition{
-		JsonPath: "$.tags[*]",
-		Values:   []any{"A", nil, "C"},
+	got, err := spi.DesugarCondition(&predicate.ArrayCondition{
+		OperatorType: "EQUALS",
+		JsonPath:     "$.tags[*]",
+		Values:       []any{"A", nil, "C"},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	g, ok := got.(*predicate.GroupCondition)
 	if !ok {
 		t.Fatalf("want *GroupCondition, got %T", got)
@@ -1778,39 +1745,16 @@ func TestDesugarCondition_ArrayClause(t *testing.T) {
 	}
 }
 
-func TestDesugarCondition_AllNullIsTautology(t *testing.T) {
-	got := spi.DesugarCondition(&predicate.ArrayCondition{
-		JsonPath: "$.tags[*]", Values: []any{nil, nil},
-	})
-	g, ok := got.(*predicate.GroupCondition)
-	if !ok || g.Operator != "AND" || len(g.Conditions) != 0 {
-		t.Fatalf("want an empty AND, got %#v", got)
-	}
-}
-
-// TestDesugarCondition_EmptyValuesIsTautology pins a case distinct from
-// TestDesugarCondition_AllNullIsTautology above: Values is a literally EMPTY
-// slice (zero elements), not a slice of nils. The loop over c.Values simply
-// never executes either way, so both collapse to the same empty AND — but
-// that equivalence is a property of the range-over-nothing loop, not
-// something the all-null case exercises, and was unpinned before this test.
-func TestDesugarCondition_EmptyValuesIsTautology(t *testing.T) {
-	got := spi.DesugarCondition(&predicate.ArrayCondition{
-		JsonPath: "$.tags[*]", Values: []any{},
-	})
-	g, ok := got.(*predicate.GroupCondition)
-	if !ok || g.Operator != "AND" || len(g.Conditions) != 0 {
-		t.Fatalf("want an empty AND, got %#v", got)
-	}
-}
-
 func TestDesugarCondition_RecursesIntoGroups(t *testing.T) {
-	got := spi.DesugarCondition(&predicate.GroupCondition{
+	got, err := spi.DesugarCondition(&predicate.GroupCondition{
 		Operator: "OR",
 		Conditions: []predicate.Condition{
-			&predicate.ArrayCondition{JsonPath: "$.tags[*]", Values: []any{"A"}},
+			&predicate.ArrayCondition{OperatorType: "EQUALS", JsonPath: "$.tags[*]", Values: []any{"A"}},
 		},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	g := got.(*predicate.GroupCondition)
 	if _, isArray := g.Conditions[0].(*predicate.ArrayCondition); isArray {
 		t.Fatal("nested ArrayCondition was not desugared")
@@ -1822,7 +1766,8 @@ func TestConditionToFilter_ArrayClauseProducesBracketPaths(t *testing.T) {
 	// path "tags.0", which both SQL dialects read as a field named "0", so
 	// the row was dropped by the WHERE clause and no residual could recover it.
 	f, err := spi.ConditionToFilter(&predicate.ArrayCondition{
-		JsonPath: "$.tags[*]", Values: []any{"A"},
+		OperatorType: "EQUALS",
+		JsonPath:     "$.tags[*]", Values: []any{"A"},
 	}, map[string]spi.FieldDescriptor{"$.tags[*]": {Types: []spi.DataType{spi.String}}})
 	if err != nil {
 		t.Fatalf("ConditionToFilter: %v", err)
@@ -1883,4 +1828,46 @@ func TestValidateConditionOperators_RejectsAnUnknownGroupOperator(t *testing.T) 
 	err := spi.ValidateConditionOperators(cond)
 	require.ErrorIs(t, err, spi.ErrUnknownOperator)
 	require.Contains(t, err.Error(), "XOR")
+}
+
+func TestDesugarCondition_ArrayClauseUsesOperator(t *testing.T) {
+	got, err := spi.DesugarCondition(&predicate.ArrayCondition{
+		JsonPath: "$.scores[*]", OperatorType: "GREATER_THAN", Values: []any{50, nil, 70},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, ok := got.(*predicate.GroupCondition)
+	if !ok || g.Operator != "AND" || len(g.Conditions) != 2 {
+		t.Fatalf("want AND of 2 leaves, got %#v", got)
+	}
+	want := []predicate.SimpleCondition{
+		{JsonPath: "$.scores[0]", OperatorType: "GREATER_THAN", Value: 50},
+		{JsonPath: "$.scores[2]", OperatorType: "GREATER_THAN", Value: 70},
+	}
+	for i, c := range g.Conditions {
+		if *c.(*predicate.SimpleCondition) != want[i] {
+			t.Errorf("leaf %d = %#v, want %#v", i, c, want[i])
+		}
+	}
+}
+
+func TestDesugarCondition_ArrayClauseTestingNothingIsRefused(t *testing.T) {
+	for name, vals := range map[string][]any{"nil": nil, "empty": {}, "all-null": {nil, nil}} {
+		_, err := spi.DesugarCondition(&predicate.ArrayCondition{
+			JsonPath: "$.t[*]", OperatorType: "EQUALS", Values: vals,
+		})
+		if !errors.Is(err, spi.ErrArrayClauseTestsNothing) {
+			t.Errorf("%s: want ErrArrayClauseTestsNothing, got %v", name, err)
+		}
+	}
+}
+
+func TestConditionToFilter_NestedArrayClauseTestingNothingIsRefused(t *testing.T) {
+	cond := &predicate.GroupCondition{Operator: "NOT", Conditions: []predicate.Condition{
+		&predicate.ArrayCondition{JsonPath: "$.t[*]", OperatorType: "EQUALS", Values: []any{nil}},
+	}}
+	if _, err := spi.ConditionToFilter(cond, nil); !errors.Is(err, spi.ErrArrayClauseTestsNothing) {
+		t.Fatalf("want ErrArrayClauseTestsNothing, got %v", err)
+	}
 }

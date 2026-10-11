@@ -149,7 +149,11 @@ func ConditionToFilter(cond predicate.Condition, fields map[string]FieldDescript
 	if cond == nil {
 		return Filter{}, fmt.Errorf("condition is nil")
 	}
-	return desugaredToFilter(DesugarCondition(cond), fields)
+	d, err := DesugarCondition(cond)
+	if err != nil {
+		return Filter{}, err
+	}
+	return desugaredToFilter(d, fields)
 }
 
 // desugaredToFilter is [ConditionToFilter]'s dispatch, factored out so
@@ -162,10 +166,10 @@ func ConditionToFilter(cond predicate.Condition, fields map[string]FieldDescript
 // its switch, cond's WHOLE tree is already desugared — every descendant, not
 // just the direct children. A [groupToFilter] child is therefore always
 // already-desugared, and re-running [DesugarCondition] on it is pure
-// redundant work: it re-walks and re-allocates a `children` slice for every
-// group node in that child's subtree, and because this happened once per
-// ancestor level, a depth-D chain paid D + (D-1) + ... + 1 = O(D²) group-node
-// revisits instead of O(D). See
+// redundant work: it re-walks and re-allocates a `children` slice for
+// every group node in that child's subtree, and because this happened
+// once per ancestor level, a depth-D chain paid D + (D-1) + ... + 1 =
+// O(D²) group-node revisits instead of O(D). See
 // TestConditionToFilter_DesugarIsNotReappliedPerLevel.
 func desugaredToFilter(cond predicate.Condition, fields map[string]FieldDescriptor) (Filter, error) {
 	switch c := cond.(type) {
@@ -184,51 +188,57 @@ func desugaredToFilter(cond predicate.Condition, fields map[string]FieldDescript
 
 // DesugarCondition rewrites every [predicate.ArrayCondition] in cond's tree
 // into a [predicate.GroupCondition] (operator "AND") of
-// [predicate.SimpleCondition] EQUALS leaves, one per non-null value, each
-// addressing its element by a bracket index rather than the container's
-// wildcard. It recurses into [predicate.GroupCondition] children so a nested
-// array clause is rewritten too, and returns every other clause type
-// unchanged. [ConditionToFilter] calls it first, so no evaluator ever sees an
-// ArrayCondition — this is the ONLY place the clause's positional semantics
-// are defined; nothing downstream has a second opinion on what it means.
+// [predicate.SimpleCondition] leaves, one per non-null value. Each leaf
+// carries the clause's OperatorType and addresses its element by a bracket
+// index rather than the container's wildcard. It recurses into
+// [predicate.GroupCondition] children so a nested array clause is rewritten
+// too, and returns every other clause type unchanged. [ConditionToFilter]
+// calls it first, so no evaluator ever sees an ArrayCondition — this is the
+// ONLY place the clause's positional semantics are defined; nothing
+// downstream has a second opinion on what it means.
 //
 // A single non-null value collapses to the bare SimpleCondition rather than a
 // one-child group — an ordinary AND-of-one is a needless wrapper, and every
 // caller here just wants "this leaf's Filter", not "this group's Filter with
-// one child". An all-null Values collapses to an empty AND (Conditions has
-// length zero), which [groupToFilter] renders as [FilterAnd] with no
-// children — the empty-AND identity ("matches everything") already
-// established for a caller-written empty group, not a special case
-// reinvented here.
+// one child".
 //
-// This function is TOTAL: it never errors and never inspects jsonPath for
-// well-formedness. Per the path grammar, an array clause's jsonPath must
-// carry a trailing wildcard subscript ("$.tags[*]"), which desugars to
-// "$.tags[i]" by replacing that trailing "[*]" with "[i]"; a path with no
-// trailing wildcard has "[i]" appended instead (a bare "$.tags" yields
-// "$.tags[0]"). Rejecting the bare spelling is the engine's job at its
-// validation boundary — not this function's — so a caller-supplied jsonPath
-// that is not well-formed at all reaches the resulting SimpleCondition
-// unrejected here and is caught downstream by [stripDollarDot], the same as
-// it always was for any other malformed path.
-func DesugarCondition(c predicate.Condition) predicate.Condition {
+// A clause whose Values holds no non-nil entry (nil, empty, or all null)
+// tests no position; it is refused with an error wrapping
+// [ErrArrayClauseTestsNothing] at any depth, rather than rendered as an empty
+// AND that would match every entity.
+//
+// It never inspects jsonPath for well-formedness. Per the path grammar, an
+// array clause's jsonPath must carry a trailing wildcard subscript
+// ("$.tags[*]"), which desugars to "$.tags[i]" by replacing that trailing
+// "[*]" with "[i]"; a path with no trailing wildcard has "[i]" appended
+// instead (a bare "$.tags" yields "$.tags[0]"). Rejecting the bare spelling
+// is the engine's job at its validation boundary — not this function's — so
+// a caller-supplied jsonPath that is not well-formed at all reaches the
+// resulting SimpleCondition unrejected here and is caught downstream by
+// [stripDollarDot], the same as it always was for any other malformed path.
+func DesugarCondition(c predicate.Condition) (predicate.Condition, error) {
 	switch v := c.(type) {
 	case *predicate.ArrayCondition:
 		return desugarArrayCondition(v)
 	case *predicate.GroupCondition:
 		children := make([]predicate.Condition, len(v.Conditions))
 		for i, child := range v.Conditions {
-			children[i] = DesugarCondition(child)
+			d, err := DesugarCondition(child)
+			if err != nil {
+				return nil, err
+			}
+			children[i] = d
 		}
-		return &predicate.GroupCondition{Operator: v.Operator, Conditions: children}
+		return &predicate.GroupCondition{Operator: v.Operator, Conditions: children}, nil
 	default:
-		return c
+		return c, nil
 	}
 }
 
 // desugarArrayCondition is [DesugarCondition]'s ArrayCondition case. See that
-// function's doc for the collapsing rules (single leaf, all-null).
-func desugarArrayCondition(c *predicate.ArrayCondition) predicate.Condition {
+// function's doc for the collapsing rules (single leaf) and the refusal of a
+// clause that tests nothing.
+func desugarArrayCondition(c *predicate.ArrayCondition) (predicate.Condition, error) {
 	var leaves []predicate.Condition
 	for i, val := range c.Values {
 		if val == nil {
@@ -236,14 +246,18 @@ func desugarArrayCondition(c *predicate.ArrayCondition) predicate.Condition {
 		}
 		leaves = append(leaves, &predicate.SimpleCondition{
 			JsonPath:     desugarArrayElementPath(c.JsonPath, i),
-			OperatorType: "EQUALS",
+			OperatorType: c.OperatorType,
 			Value:        val,
 		})
 	}
-	if len(leaves) == 1 {
-		return leaves[0]
+	switch len(leaves) {
+	case 0:
+		return nil, fmt.Errorf("%w: jsonPath %q", ErrArrayClauseTestsNothing, c.JsonPath)
+	case 1:
+		return leaves[0], nil
+	default:
+		return &predicate.GroupCondition{Operator: "AND", Conditions: leaves}, nil
 	}
-	return &predicate.GroupCondition{Operator: "AND", Conditions: leaves}
 }
 
 // desugarArrayElementPath rewrites an array clause's container jsonPath into
@@ -256,8 +270,7 @@ func desugarArrayCondition(c *predicate.ArrayCondition) predicate.Condition {
 // gets replaced or extended, not merely whatever text happens to precede a
 // literal "[*]" suffix.
 //
-// jsonPath is not required to be well-formed here — this function is total,
-// per [DesugarCondition]'s doc — so a jsonPath that does not parse (missing
+// jsonPath is not required to be well-formed here — [DesugarCondition] does not check it — so a jsonPath that does not parse (missing
 // "$." leader, a malformed subscript, or anything else [ParseFilterPath]
 // rejects) falls back to a plain textual replace-or-append. That fallback
 // output is never itself valid (it is built from already-invalid input), so
@@ -821,9 +834,12 @@ func validateOperatorsAtDepth(cond predicate.Condition, depth int) error {
 		}
 		return nil
 	case *predicate.ArrayCondition:
-		// Carries no operator — each positional value becomes an equality
-		// leaf in DesugarCondition. Nothing to check.
-		return nil
+		// The clause means its desugared leaves; check those.
+		d, err := DesugarCondition(c)
+		if err != nil {
+			return err
+		}
+		return validateOperatorsAtDepth(d, depth+1)
 	default:
 		// Including FunctionCondition, which carries no operator either.
 		// ConditionToFilter rejects it on its own terms.
@@ -878,8 +894,12 @@ func validatePatternsAtDepth(cond predicate.Condition, depth int) error {
 		}
 		return nil
 	case *predicate.ArrayCondition:
-		// Positional values become equality leaves; no pattern operand.
-		return nil
+		// The clause means its desugared leaves; check those.
+		d, err := DesugarCondition(c)
+		if err != nil {
+			return err
+		}
+		return validatePatternsAtDepth(d, depth+1)
 	default:
 		// Including FunctionCondition, which carries no operator.
 		return nil

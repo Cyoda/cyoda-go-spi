@@ -315,3 +315,8 @@ var ErrInvalidFilterPath = errors.New("invalid filter path")
 // (megabyte-scale) operand; echoing it verbatim would let an ordinary 400
 // blow up to request size, and it is logged again as "cause" by callers.
 var ErrUnevaluableLeaf = errors.New("unevaluable leaf")
+
+// ErrArrayClauseTestsNothing is returned for an array clause whose Values
+// holds no non-nil entry. Such a clause would read as an empty AND and match
+// every entity; it is refused instead.
+var ErrArrayClauseTestsNothing = errors.New("array clause tests no position")

@@ -54,13 +54,15 @@ func (c *GroupCondition) MarshalJSON() ([]byte, error) {
 // MarshalJSON for ArrayCondition emits the discriminator + struct fields.
 func (c *ArrayCondition) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		Type     string `json:"type"`
-		JsonPath string `json:"jsonPath"`
-		Values   []any  `json:"values"`
+		Type         string `json:"type"`
+		JsonPath     string `json:"jsonPath"`
+		OperatorType string `json:"operatorType"`
+		Values       []any  `json:"values"`
 	}{
-		Type:     c.Type(),
-		JsonPath: c.JsonPath,
-		Values:   c.Values,
+		Type:         c.Type(),
+		JsonPath:     c.JsonPath,
+		OperatorType: c.OperatorType,
+		Values:       c.Values,
 	})
 }
 

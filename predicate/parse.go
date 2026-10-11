@@ -65,40 +65,46 @@ func coalesce(values ...string) string {
 	return ""
 }
 
+// operatorFields holds the three spellings of a leaf's operator: the
+// canonical operatorType, the "operator" alias, and Cloud's "operation".
+type operatorFields struct {
+	OperatorType string `json:"operatorType"`
+	Operator     string `json:"operator"`  // alias per Cyoda schema
+	Operation    string `json:"operation"` // legacy alias (backwards compat)
+}
+
+func (o operatorFields) name() string {
+	return coalesce(o.OperatorType, o.Operator, o.Operation)
+}
+
 func parseSimple(body []byte) (*SimpleCondition, error) {
 	var raw struct {
-		JsonPath     string `json:"jsonPath"`
-		OperatorType string `json:"operatorType"`
-		Operator     string `json:"operator"`  // alias per Cyoda schema
-		Operation    string `json:"operation"` // legacy alias (backwards compat)
-		Value        any    `json:"value"`
+		operatorFields
+		JsonPath string `json:"jsonPath"`
+		Value    any    `json:"value"`
 	}
 	if err := unmarshalNumberAware(body, &raw); err != nil {
 		return nil, fmt.Errorf("failed to parse simple condition: %w", err)
 	}
-	op := coalesce(raw.OperatorType, raw.Operator, raw.Operation)
 	return &SimpleCondition{
 		JsonPath:     raw.JsonPath,
-		OperatorType: op,
+		OperatorType: raw.name(),
 		Value:        raw.Value,
 	}, nil
 }
 
 func parseLifecycle(body []byte) (*LifecycleCondition, error) {
 	var raw struct {
-		Field        string `json:"field"`
-		OperatorType string `json:"operatorType"`
-		Operator     string `json:"operator"`  // alias per Cyoda schema
-		Operation    string `json:"operation"` // legacy alias (backwards compat)
-		Value        any    `json:"value"`
+		operatorFields
+		Field string `json:"field"`
+		Value any    `json:"value"`
 	}
 	if err := unmarshalNumberAware(body, &raw); err != nil {
 		return nil, fmt.Errorf("failed to parse lifecycle condition: %w", err)
 	}
-	op := coalesce(raw.OperatorType, raw.Operator, raw.Operation)
 	return &LifecycleCondition{
 		Field:        raw.Field,
-		OperatorType: op,
+		OperatorType: raw.name(),
 		Value:        raw.Value,
 	}, nil
 }
@@ -128,6 +134,7 @@ func parseGroupWithDepth(body []byte, depth int) (*GroupCondition, error) {
 
 func parseArray(body []byte) (*ArrayCondition, error) {
 	var raw struct {
+		operatorFields
 		JsonPath string `json:"jsonPath"`
 		Values   []any  `json:"values"`
 	}
@@ -135,7 +142,8 @@ func parseArray(body []byte) (*ArrayCondition, error) {
 		return nil, fmt.Errorf("failed to parse array condition: %w", err)
 	}
 	return &ArrayCondition{
-		JsonPath: raw.JsonPath,
-		Values:   raw.Values,
+		JsonPath:     raw.JsonPath,
+		OperatorType: raw.name(),
+		Values:       raw.Values,
 	}, nil
 }

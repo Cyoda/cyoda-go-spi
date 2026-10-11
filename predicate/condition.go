@@ -31,11 +31,14 @@ type GroupCondition struct {
 
 func (c *GroupCondition) Type() string { return "group" }
 
-// ArrayCondition matches positional values in a JSON array.
-// Null entries in Values mean "skip this position".
+// ArrayCondition tests the elements of one array by position. OperatorType
+// is applied at every position whose entry in Values is non-nil; a nil entry
+// tests nothing at that position. [spi.DesugarCondition] defines the clause's
+// meaning: an AND of one SimpleCondition per tested position.
 type ArrayCondition struct {
-	JsonPath string
-	Values   []any // positional values, nil = skip
+	JsonPath     string
+	OperatorType string
+	Values       []any // positional operands, nil = skip
 }
 
 func (c *ArrayCondition) Type() string { return "array" }

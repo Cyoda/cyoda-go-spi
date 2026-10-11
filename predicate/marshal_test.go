@@ -54,8 +54,18 @@ func TestRoundTrip_GroupCondition_Nested(t *testing.T) {
 
 func TestRoundTrip_ArrayCondition(t *testing.T) {
 	original := &ArrayCondition{
-		JsonPath: "$.tags",
-		Values:   []any{"red", nil, "blue"},
+		JsonPath:     "$.tags[*]",
+		OperatorType: "EQUALS",
+		Values:       []any{"red", nil, "blue"},
+	}
+	roundTripCondition(t, original)
+}
+
+func TestRoundTrip_ArrayCondition_LargeIntegerKeepsPrecision(t *testing.T) {
+	original := &ArrayCondition{
+		JsonPath:     "$.ids[*]",
+		OperatorType: "GREATER_THAN",
+		Values:       []any{json.Number("12345678901234567890"), nil},
 	}
 	roundTripCondition(t, original)
 }

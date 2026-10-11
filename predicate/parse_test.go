@@ -283,3 +283,27 @@ func TestParseSimpleConditionOperationAlias(t *testing.T) {
 		t.Errorf("expected operatorType EQUALS, got %q", sc.OperatorType)
 	}
 }
+
+func TestParseArrayCondition_ReadsOperator(t *testing.T) {
+	for _, field := range []string{"operatorType", "operator", "operation"} {
+		body := []byte(`{"type":"array","jsonPath":"$.scores[*]","` + field + `":"GREATER_THAN","values":[50,null,70]}`)
+		cond, err := predicate.ParseCondition(body)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", field, err)
+		}
+		ac := cond.(*predicate.ArrayCondition)
+		if ac.OperatorType != "GREATER_THAN" {
+			t.Errorf("%s: OperatorType = %q, want GREATER_THAN", field, ac.OperatorType)
+		}
+	}
+}
+
+func TestParseArrayCondition_MissingOperatorIsEmpty(t *testing.T) {
+	cond, err := predicate.ParseCondition([]byte(`{"type":"array","jsonPath":"$.t[*]","values":["a"]}`))
+	if err != nil {
+		t.Fatalf("parse must not reject a missing operator (the validator does): %v", err)
+	}
+	if op := cond.(*predicate.ArrayCondition).OperatorType; op != "" {
+		t.Errorf("OperatorType = %q, want empty", op)
+	}
+}

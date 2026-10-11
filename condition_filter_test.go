@@ -1897,5 +1897,22 @@ func TestValidateConditionPatterns_ArrayClause(t *testing.T) {
 	bad := &predicate.ArrayCondition{JsonPath: "$.t[*]", OperatorType: "MATCHES_PATTERN", Values: []any{"("}}
 	if err := spi.ValidateConditionPatterns(bad); err == nil {
 		t.Error("an invalid pattern at a position must be reported")
+	} else if !strings.Contains(err.Error(), "MATCHES_PATTERN") {
+		t.Errorf("error should name the operator MATCHES_PATTERN: %v", err)
+	}
+}
+
+func TestValidators_ArrayClauseTestsNothingInsideNot(t *testing.T) {
+	cond := &predicate.GroupCondition{
+		Operator: "NOT",
+		Conditions: []predicate.Condition{
+			&predicate.ArrayCondition{JsonPath: "$.t[*]", OperatorType: "EQUALS", Values: []any{nil}},
+		},
+	}
+	if err := spi.ValidateConditionOperators(cond); !errors.Is(err, spi.ErrArrayClauseTestsNothing) {
+		t.Errorf("operators: want ErrArrayClauseTestsNothing, got %v", err)
+	}
+	if err := spi.ValidateConditionPatterns(cond); !errors.Is(err, spi.ErrArrayClauseTestsNothing) {
+		t.Errorf("patterns: want ErrArrayClauseTestsNothing, got %v", err)
 	}
 }

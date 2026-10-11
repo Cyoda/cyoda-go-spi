@@ -207,8 +207,8 @@ func desugaredToFilter(cond predicate.Condition, fields map[string]FieldDescript
 // [ErrArrayClauseTestsNothing] at any depth, rather than rendered as an empty
 // AND that would match every entity.
 //
-// It never inspects jsonPath for well-formedness. Per the path grammar, an array clause's jsonPath must
-// carry a trailing wildcard subscript ("$.tags[*]"), which desugars to
+// It never inspects jsonPath for well-formedness. Per the path grammar, an
+// array clause's jsonPath must carry a trailing wildcard subscript ("$.tags[*]"), which desugars to
 // "$.tags[i]" by replacing that trailing "[*]" with "[i]"; a path with no
 // trailing wildcard has "[i]" appended instead (a bare "$.tags" yields
 // "$.tags[0]"). Rejecting the bare spelling is the engine's job at its

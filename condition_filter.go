@@ -208,14 +208,14 @@ func desugaredToFilter(cond predicate.Condition, fields map[string]FieldDescript
 // AND that would match every entity.
 //
 // It never inspects jsonPath for well-formedness. Per the path grammar, an
-// array clause's jsonPath must carry a trailing wildcard subscript ("$.tags[*]"), which desugars to
-// "$.tags[i]" by replacing that trailing "[*]" with "[i]"; a path with no
-// trailing wildcard has "[i]" appended instead (a bare "$.tags" yields
-// "$.tags[0]"). Rejecting the bare spelling is the engine's job at its
-// validation boundary — not this function's — so a caller-supplied jsonPath
-// that is not well-formed at all reaches the resulting SimpleCondition
-// unrejected here and is caught downstream by [stripDollarDot], the same as
-// it always was for any other malformed path.
+// array clause's jsonPath must carry a trailing wildcard subscript
+// ("$.tags[*]"), which desugars to "$.tags[i]" by replacing that trailing
+// "[*]" with "[i]"; a path with no trailing wildcard has "[i]" appended
+// instead (a bare "$.tags" yields "$.tags[0]"). Rejecting the bare spelling
+// is the engine's job at its validation boundary — not this function's — so
+// a caller-supplied jsonPath that is not well-formed at all reaches the
+// resulting SimpleCondition unrejected here and is caught downstream by
+// [stripDollarDot], the same as it always was for any other malformed path.
 func DesugarCondition(c predicate.Condition) (predicate.Condition, error) {
 	switch v := c.(type) {
 	case *predicate.ArrayCondition:

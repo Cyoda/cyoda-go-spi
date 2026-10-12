@@ -1,5 +1,7 @@
 package predicate
 
+import "encoding/json"
+
 // Condition is the common interface for all search predicate conditions.
 type Condition interface {
 	Type() string
@@ -43,7 +45,15 @@ type ArrayCondition struct {
 
 func (c *ArrayCondition) Type() string { return "array" }
 
-// FunctionCondition is a placeholder for server-side function predicates.
-type FunctionCondition struct{}
+// FunctionCondition is a condition evaluated by a callout to a compute member.
+type FunctionCondition struct {
+	// Raw is the function condition's JSON as the parser received it (a
+	// copy). The engine dispatches each function condition with its own JSON.
+	Raw json.RawMessage
+	// PreCheck is the parsed `function.criterion` member: the condition the
+	// engine evaluates before the callout. nil when the member is absent or
+	// null. The parser does not restrict what it holds.
+	PreCheck Condition
+}
 
 func (c *FunctionCondition) Type() string { return "function" }

@@ -40,10 +40,37 @@ func parseConditionWithDepth(body []byte, depth int) (Condition, error) {
 	case "array":
 		return parseArray(body)
 	case "function":
-		return &FunctionCondition{}, nil
+		return parseFunctionWithDepth(body, depth)
 	default:
 		return nil, fmt.Errorf("unknown condition type: %q", envelope.Type)
 	}
+}
+
+// parseFunctionWithDepth keeps the function condition's JSON and parses its
+// pre-check one level below it, so the depth limit covers the pre-check.
+func parseFunctionWithDepth(body []byte, depth int) (*FunctionCondition, error) {
+	var raw struct {
+		Function *struct {
+			Criterion json.RawMessage `json:"criterion"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("failed to parse function condition: %w", err)
+	}
+	fc := &FunctionCondition{Raw: append(json.RawMessage(nil), body...)}
+	if raw.Function == nil {
+		return fc, nil
+	}
+	pc := bytes.TrimSpace(raw.Function.Criterion)
+	if len(pc) == 0 || bytes.Equal(pc, []byte("null")) {
+		return fc, nil
+	}
+	pre, err := parseConditionWithDepth(pc, depth+1)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse function pre-check: %w", err)
+	}
+	fc.PreCheck = pre
+	return fc, nil
 }
 
 // unmarshalNumberAware decodes body into v with JSON numbers preserved as

@@ -66,8 +66,12 @@ func (c *ArrayCondition) MarshalJSON() ([]byte, error) {
 	})
 }
 
-// MarshalJSON for FunctionCondition emits only the discriminator.
+// MarshalJSON for FunctionCondition writes Raw, the JSON the parser received,
+// when it is set, and only the discriminator otherwise.
 func (c *FunctionCondition) MarshalJSON() ([]byte, error) {
+	if len(c.Raw) > 0 {
+		return append([]byte(nil), c.Raw...), nil
+	}
 	return json.Marshal(struct {
 		Type string `json:"type"`
 	}{

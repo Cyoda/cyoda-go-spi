@@ -128,6 +128,17 @@ MAINTAINING.md.
 
 ### Added
 
+- **`predicate.FunctionCondition` keeps its JSON and its pre-check.** `Raw`
+  is the function condition's JSON as the parser received it (a copy), and
+  `MarshalJSON` writes it. `PreCheck` is the parsed `function.criterion`
+  member (nil when absent or null), parsed one level below the function
+  condition so the parser's depth limit covers it. The parser does not
+  restrict what a pre-check holds. Additive: code that builds
+  `&FunctionCondition{}` still compiles, and `ConditionToFilter`,
+  `ValidateConditionOperators` and `ValidateConditionPatterns` still treat a
+  function condition as before and do not enter its pre-check. A function
+  condition whose `function` member is not an object no longer parses.
+
 - **`UserContext.Executor`: on-behalf-of attribution.** `Executor *Principal`
   is set only for an on-behalf-of (OBO) token — an M2M client acting for an
   application user — and nil for every other principal. `AttributionFor`

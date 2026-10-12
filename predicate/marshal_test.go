@@ -71,7 +71,13 @@ func TestRoundTrip_ArrayCondition_LargeIntegerKeepsPrecision(t *testing.T) {
 }
 
 func TestRoundTrip_FunctionCondition(t *testing.T) {
-	original := &FunctionCondition{}
+	// A function condition round-trips through its Raw JSON; a bare
+	// &FunctionCondition{} marshals to the discriminator alone and parses back
+	// with Raw set, so the original carries both Raw and the parsed PreCheck.
+	original := &FunctionCondition{
+		Raw:      json.RawMessage(`{"type":"function","function":{"name":"f","criterion":{"type":"lifecycle","field":"state","operatorType":"EQUALS","value":"A"}}}`),
+		PreCheck: &LifecycleCondition{Field: "state", OperatorType: "EQUALS", Value: "A"},
+	}
 	roundTripCondition(t, original)
 }
 
@@ -113,5 +119,20 @@ func TestRoundTrip_GroupCondition_EmptyConditions_RegressionFromUserReport(t *te
 	}
 	if !reflect.DeepEqual(original, parsed) {
 		t.Errorf("round-trip mismatch:\n  original: %#v\n  parsed:   %#v", original, parsed)
+	}
+}
+
+func TestMarshal_FunctionConditionWritesRaw(t *testing.T) {
+	body := `{"type":"function","function":{"name":"f","criterion":{"type":"lifecycle","field":"state","operatorType":"EQUALS","value":"A"}}}`
+	cond, err := ParseCondition([]byte(body))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	out, err := json.Marshal(cond)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(out) != body {
+		t.Errorf("marshal = %s, want %s", out, body)
 	}
 }

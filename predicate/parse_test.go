@@ -307,3 +307,101 @@ func TestParseArrayCondition_MissingOperatorIsEmpty(t *testing.T) {
 		t.Errorf("OperatorType = %q, want empty", op)
 	}
 }
+
+func TestParseFunctionCondition_KeepsRawAndPreCheck(t *testing.T) {
+	body := []byte(`{"type":"function","function":{"name":"credit-check","criterion":{"type":"simple","jsonPath":"$.amount","operatorType":"GREATER_THAN","value":100}}}`)
+	cond, err := predicate.ParseCondition(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	fc, ok := cond.(*predicate.FunctionCondition)
+	if !ok {
+		t.Fatalf("expected *FunctionCondition, got %T", cond)
+	}
+	if string(fc.Raw) != string(body) {
+		t.Errorf("Raw = %s, want the input", fc.Raw)
+	}
+	body[2] = 'X'
+	if fc.Raw[2] == 'X' {
+		t.Error("Raw shares the caller's slice; it must be a copy")
+	}
+	sc, ok := fc.PreCheck.(*predicate.SimpleCondition)
+	if !ok {
+		t.Fatalf("PreCheck = %T, want *SimpleCondition", fc.PreCheck)
+	}
+	if sc.JsonPath != "$.amount" || sc.OperatorType != "GREATER_THAN" {
+		t.Errorf("PreCheck = %+v", sc)
+	}
+}
+
+func TestParseFunctionCondition_NoPreCheck(t *testing.T) {
+	for name, body := range map[string]string{
+		"criterion absent": `{"type":"function","function":{"name":"f"}}`,
+		"criterion null":   `{"type":"function","function":{"name":"f","criterion":null}}`,
+		"function null":    `{"type":"function","function":null}`,
+		"function absent":  `{"type":"function"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cond, err := predicate.ParseCondition([]byte(body))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			fc := cond.(*predicate.FunctionCondition)
+			if fc.PreCheck != nil {
+				t.Errorf("PreCheck = %#v, want nil", fc.PreCheck)
+			}
+			if string(fc.Raw) != body {
+				t.Errorf("Raw = %s, want the input", fc.Raw)
+			}
+		})
+	}
+}
+
+// The parser does not enforce what a pre-check may hold; cyoda-go refuses a
+// function condition in a pre-check with a message that names its position.
+func TestParseFunctionCondition_PreCheckWithFunctionIsParsed(t *testing.T) {
+	body := `{"type":"function","function":{"name":"f","criterion":{"type":"group","operator":"AND","conditions":[{"type":"function","function":{"name":"g"}}]}}}`
+	cond, err := predicate.ParseCondition([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	g, ok := cond.(*predicate.FunctionCondition).PreCheck.(*predicate.GroupCondition)
+	if !ok || len(g.Conditions) != 1 {
+		t.Fatalf("PreCheck = %#v, want a group of one", cond.(*predicate.FunctionCondition).PreCheck)
+	}
+	if _, ok := g.Conditions[0].(*predicate.FunctionCondition); !ok {
+		t.Errorf("member = %T, want *FunctionCondition", g.Conditions[0])
+	}
+}
+
+func TestParseFunctionCondition_Refused(t *testing.T) {
+	for name, body := range map[string]string{
+		"pre-check of unknown type": `{"type":"function","function":{"name":"f","criterion":{"type":"bogus"}}}`,
+		"function not an object":    `{"type":"function","function":"f"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := predicate.ParseCondition([]byte(body)); err == nil {
+				t.Fatal("expected an error")
+			}
+		})
+	}
+}
+
+func TestParseFunctionCondition_DepthCountsThroughPreCheck(t *testing.T) {
+	leaf := `{"type":"simple","jsonPath":"$.a","operatorType":"EQUALS","value":1}`
+	nest := func(n int) string {
+		s := leaf
+		for i := 0; i < n; i++ {
+			s = `{"type":"group","operator":"AND","conditions":[` + s + `]}`
+		}
+		return `{"type":"function","function":{"name":"f","criterion":` + s + `}}`
+	}
+	// function at depth 0, pre-check root at 1: 49 groups put the leaf at 50.
+	if _, err := predicate.ParseCondition([]byte(nest(49))); err != nil {
+		t.Fatalf("leaf at the maximum depth: %v", err)
+	}
+	_, err := predicate.ParseCondition([]byte(nest(50)))
+	if err == nil || !strings.Contains(err.Error(), "maximum depth") {
+		t.Fatalf("leaf one level below the maximum: err = %v, want the depth error", err)
+	}
+}

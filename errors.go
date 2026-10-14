@@ -349,7 +349,7 @@ var ErrOperandArray = fmt.Errorf("%w: an array, and the operator takes a single 
 
 // ErrOperandNotScalar: the operand is not nil, a map, a slice or an array,
 // and not in the accepted scalar set either — a pointer (nil or not), a
-// struct other than time.Time, a func, a channel, a complex number, or a
+// struct (time.Time included), a func, a channel, a complex number, or a
 // named string or bool type. It is refused under every operator. See
 // [ValidateOperand] for the accepted set.
 var ErrOperandNotScalar = fmt.Errorf("%w: not a scalar", ErrInvalidOperand)

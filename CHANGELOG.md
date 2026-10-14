@@ -17,12 +17,12 @@ MAINTAINING.md.
 - **A leaf operand no comparison can use is refused, not evaluated.** New
   `ValidateOperand(op FilterOp, value any) error` is the one operand-shape
   rule. It accepts a closed set of scalars — `string`, `bool`,
-  `json.Number`, `time.Time`, and any int, uint (not `uintptr`) or float
-  kind — and refuses everything else: nil for every operator except
-  `IS_NULL` and `NOT_NULL`; a map of any type for every operator; a slice or
-  array of any type for every operator except `BETWEEN` and
-  `BETWEEN_INCLUSIVE`; any other value (a pointer, nil or not, a struct other
-  than `time.Time`, a func, a named string or bool type) for every operator;
+  `json.Number`, and any int, uint (not `uintptr`) or float kind — and
+  refuses everything else: nil for every operator except `IS_NULL` and
+  `NOT_NULL`; a map of any type for every operator; a slice or array of any
+  type for every operator except `BETWEEN` and `BETWEEN_INCLUSIVE`; any other
+  value (a pointer, nil or not, a struct including `time.Time`, a func, a
+  named string or bool type) for every operator;
   and a range operand must be a `[]any` of exactly two scalar bounds. Values
   from JSON decoding (with or without `UseNumber`) and protobuf `structpb`
   are classed as before. `ConditionToFilter` applies it to every simple

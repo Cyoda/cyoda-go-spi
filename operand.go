@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"time"
 )
 
 // ValidateOperand reports whether value is an operand the leaf operator op
@@ -15,8 +14,8 @@ import (
 // same set, and maps the sentinels to its own wording.
 //
 // It accepts a closed set and refuses everything else. A scalar operand is
-// one of: string, bool, json.Number, time.Time, or a value of any int, uint
-// (uintptr excluded) or float kind, named numeric types included. JSON
+// one of: string, bool, json.Number, or a value of any int, uint (uintptr
+// excluded) or float kind, named numeric types included. JSON
 // decoding, with or without UseNumber, and protobuf structpb decoding produce
 // only these, nil, []any and map[string]any.
 //
@@ -33,7 +32,8 @@ import (
 //   - A slice or array of any type is refused with [ErrOperandArray] for
 //     every operator except [FilterBetween] and [FilterBetweenInclusive].
 //   - Any other value outside the scalar set — a pointer (nil or not), a
-//     struct other than time.Time, a func, a channel, a complex number, a
+//     struct (time.Time included: its printed form is not ISO-8601, so it
+//     would compare the wrong text), a func, a channel, a complex number, a
 //     named string or bool type — is refused with [ErrOperandNotScalar] for
 //     every operator.
 //   - Under FilterBetween and FilterBetweenInclusive the operand must be a
@@ -106,7 +106,7 @@ func operandShapeOf(v any) operandShape {
 	switch v.(type) {
 	case nil:
 		return shapeMissing
-	case string, bool, json.Number, time.Time:
+	case string, bool, json.Number:
 		return shapeScalar
 	}
 	switch reflect.ValueOf(v).Kind() {

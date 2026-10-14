@@ -331,7 +331,7 @@ type (
 )
 
 // TestValidateOperand_AcceptedTypes pins that ValidateOperand accepts a
-// closed set of operand types — string, bool, json.Number, time.Time and
+// closed set of operand types — string, bool, json.Number and
 // every int, uint and float kind — and refuses every other Go value, rather
 // than letting it be compared as its printed form. Maps are objects, slices
 // and arrays are arrays, and everything else is not a scalar.
@@ -350,7 +350,6 @@ func TestValidateOperand_AcceptedTypes(t *testing.T) {
 		{"string", spi.FilterEq, "x", nil},
 		{"bool", spi.FilterEq, true, nil},
 		{"json.Number", spi.FilterGt, json.Number("1.5"), nil},
-		{"time.Time", spi.FilterEq, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), nil},
 		{"int", spi.FilterEq, 7, nil},
 		{"int8", spi.FilterEq, int8(7), nil},
 		{"int64", spi.FilterEq, int64(7), nil},
@@ -363,7 +362,6 @@ func TestValidateOperand_AcceptedTypes(t *testing.T) {
 		{"named uint", spi.FilterEq, namedUint(7), nil},
 		{"named float", spi.FilterEq, namedFloat(1.5), nil},
 		{"scalar under IS_NULL", spi.FilterIsNull, "x", nil},
-		{"BETWEEN time.Time pair", spi.FilterBetween, []any{time.Unix(0, 0), time.Unix(1, 0)}, nil},
 		{"BETWEEN named-int pair", spi.FilterBetweenInclusive, []any{namedInt(1), uint8(2)}, nil},
 
 		// Maps are objects, slices and arrays are arrays.
@@ -381,6 +379,12 @@ func TestValidateOperand_AcceptedTypes(t *testing.T) {
 		{"nil *string IS_NULL", spi.FilterIsNull, nilStr, spi.ErrOperandNotScalar},
 		{"*string", spi.FilterEq, &s, spi.ErrOperandNotScalar},
 		{"*time.Time", spi.FilterEq, &ts, spi.ErrOperandNotScalar},
+		// time.Time is not in the set: its printed form is Go's, not
+		// ISO-8601, so it would compare the wrong text.
+		{"time.Time", spi.FilterEq, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), spi.ErrOperandNotScalar},
+		{"time.Time under NOT_NULL", spi.FilterNotNull, ts, spi.ErrOperandNotScalar},
+		{"BETWEEN time.Time", spi.FilterBetween, ts, spi.ErrOperandNotScalar},
+		{"BETWEEN time.Time bound", spi.FilterBetween, []any{"2026-01-01", ts}, spi.ErrBetweenNonScalarBound},
 		{"struct", spi.FilterEq, struct{ A int }{1}, spi.ErrOperandNotScalar},
 		{"func", spi.FilterEq, func() {}, spi.ErrOperandNotScalar},
 		{"chan", spi.FilterNotNull, make(chan int), spi.ErrOperandNotScalar},

@@ -144,12 +144,22 @@ func TestPrepare_ZeroValueAsymmetry(t *testing.T) {
 					},
 				},
 			},
+			{
+				"unknown-Op child with no operand",
+				spi.Filter{Op: spi.FilterAnd, Children: []spi.Filter{
+					leaf, {Op: spi.FilterOp("bogus"), Source: spi.SourceData, Path: "name"}}},
+			},
 		}
 		for _, tc := range tests {
 			t.Run(tc.name, func(t *testing.T) {
 				_, err := spi.Prepare(tc.f)
 				require.Error(t, err)
 				require.ErrorIs(t, err, spi.ErrUnevaluableLeaf)
+				// The defect is the operator, not the operand: an unset Value
+				// on a leaf with no valid operator must not be reported as a
+				// missing operand.
+				require.NotErrorIs(t, err, spi.ErrInvalidOperand)
+				require.Contains(t, err.Error(), "unsupported leaf operator")
 			})
 		}
 	})

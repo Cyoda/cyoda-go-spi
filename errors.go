@@ -331,36 +331,37 @@ var ErrArrayClauseTestsNothing = errors.New("array clause tests no position")
 // maps it to its own wording with errors.Is on the specific sentinels below.
 var ErrInvalidOperand = errors.New("invalid operand")
 
-// ErrOperandMissing: the operand is missing or null, and the operator takes
-// one. Every leaf operator takes one except [FilterIsNull] and
-// [FilterNotNull].
-var ErrOperandMissing = fmt.Errorf("%w: missing or null", ErrInvalidOperand)
+// ErrOperandMissing: the operand is missing (nil or a nil pointer; JSON null
+// decodes to nil), and the operator takes one. Every leaf operator takes one
+// except [FilterIsNull] and [FilterNotNull].
+var ErrOperandMissing = fmt.Errorf("%w: missing or null, and the operator takes one", ErrInvalidOperand)
 
-// ErrOperandObject: the operand is an object (map[string]any). It denotes no
-// value any operator compares against, so it is refused under every operator.
+// ErrOperandObject: the operand is a map (a decoded JSON object is a
+// map[string]any). It denotes no value any operator compares against, so it
+// is refused under every operator.
 var ErrOperandObject = fmt.Errorf("%w: an object", ErrInvalidOperand)
 
-// ErrOperandArray: the operand is an array ([]any) under an operator that
+// ErrOperandArray: the operand is a slice or array under an operator that
 // takes a single value. Only [FilterBetween] and [FilterBetweenInclusive]
 // take an array, the [low, high] pair.
-var ErrOperandArray = fmt.Errorf("%w: an array", ErrInvalidOperand)
+var ErrOperandArray = fmt.Errorf("%w: an array, and the operator takes a single value", ErrInvalidOperand)
 
 // ErrBetweenBounds is wrapped by every refusal of a [FilterBetween] /
 // [FilterBetweenInclusive] operand that is not exactly two non-null scalar
 // bounds. The four sentinels below wrap it and name the defect.
 var ErrBetweenBounds = fmt.Errorf("%w: not a [low, high] pair of scalars", ErrInvalidOperand)
 
-// ErrBetweenNotArray: the range operand is not an array. The error text
-// carries the operand's Go type.
-var ErrBetweenNotArray = fmt.Errorf("%w: not an array", ErrBetweenBounds)
+// ErrBetweenNotArray: the range operand is not a []any, the type a decoded
+// JSON array has. The error text carries the operand's Go type.
+var ErrBetweenNotArray = fmt.Errorf("%w: not a JSON array", ErrBetweenBounds)
 
 // ErrBetweenCount: the range operand is an array with other than two
 // entries. The error text carries the count.
 var ErrBetweenCount = fmt.Errorf("%w: wrong number of bounds", ErrBetweenBounds)
 
-// ErrBetweenNullBound: a bound of the range operand is null.
+// ErrBetweenNullBound: a bound of the range operand is missing or null.
 var ErrBetweenNullBound = fmt.Errorf("%w: a null bound", ErrBetweenBounds)
 
-// ErrBetweenNonScalarBound: a bound of the range operand is an object or an
-// array.
+// ErrBetweenNonScalarBound: a bound of the range operand is a map, a slice
+// or an array.
 var ErrBetweenNonScalarBound = fmt.Errorf("%w: an object or array bound", ErrBetweenBounds)

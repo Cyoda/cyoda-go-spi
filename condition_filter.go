@@ -340,7 +340,7 @@ func simpleToFilter(c *predicate.SimpleCondition, fields map[string]FieldDescrip
 		return Filter{}, unknownOperatorError(c.OperatorType)
 	}
 	if err := ValidateOperand(op, c.Value); err != nil {
-		return Filter{}, fmt.Errorf("jsonPath %q: %w", c.JsonPath, err)
+		return Filter{}, fmt.Errorf("jsonPath %q: operatorType %q: %w", c.JsonPath, c.OperatorType, err)
 	}
 	// FieldsMap keys are always "$."-prefixed, and stripDollarDot has just
 	// guaranteed c.JsonPath is too, so this first step is an identity today.
@@ -437,7 +437,7 @@ func lifecycleToFilter(c *predicate.LifecycleCondition) (Filter, error) {
 		return Filter{}, unknownOperatorError(c.OperatorType)
 	}
 	if err := ValidateOperand(op, c.Value); err != nil {
-		return Filter{}, fmt.Errorf("field %q: %w", c.Field, err)
+		return Filter{}, fmt.Errorf("field %q: operatorType %q: %w", c.Field, c.OperatorType, err)
 	}
 	return Filter{
 		Op:       op,
@@ -783,7 +783,7 @@ func OperatorNames() []string {
 // implementation surface of the kind relocating [ConditionToFilter] here was
 // meant to remove.
 //
-// It covers ONLY operator names — but that now means BOTH a leaf's
+// It covers ONLY operator names — but that means both a leaf's
 // OperatorType (EQUALS, NOT_EQUAL, …) AND a GroupCondition's own Operator
 // (AND, OR, NOT): the group's operator is checked at the same node as its
 // children are recursed into, so a bad one nested arbitrarily deep is
@@ -792,8 +792,7 @@ func OperatorNames() []string {
 // applies it), and [ValidateConditionPatterns] checks pattern operands.
 // Passing this function is not the same as having validated the condition.
 //
-// Pattern operands are now covered by [ValidateConditionPatterns]. A
-// pattern-cost bound (rejecting a syntactically valid but expensive pattern)
+// A pattern-cost bound (rejecting a syntactically valid but expensive pattern)
 // remains a separate, unsettled concern, out of scope for both functions.
 func ValidateConditionOperators(cond predicate.Condition) error {
 	return validateOperatorsAtDepth(cond, 0)

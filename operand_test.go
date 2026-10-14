@@ -1,28 +1,36 @@
 package spi_test
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	spi "github.com/cyoda-platform/cyoda-go-spi"
 	"github.com/cyoda-platform/cyoda-go-spi/predicate"
 )
 
-// operandOps is every leaf operator, so each rule below is checked against
-// all of them rather than a sample.
-var operandOps = []spi.FilterOp{
-	spi.FilterEq, spi.FilterNe, spi.FilterGt, spi.FilterGte, spi.FilterLt, spi.FilterLte,
-	spi.FilterContains, spi.FilterNotContains,
-	spi.FilterStartsWith, spi.FilterNotStartsWith,
-	spi.FilterEndsWith, spi.FilterNotEndsWith,
-	spi.FilterLike, spi.FilterMatchesRegex,
-	spi.FilterIEq, spi.FilterINe,
-	spi.FilterIContains, spi.FilterINotContains,
-	spi.FilterIStartsWith, spi.FilterINotStartsWith,
-	spi.FilterIEndsWith, spi.FilterINotEndsWith,
-	spi.FilterIsNull, spi.FilterNotNull,
-	spi.FilterBetween, spi.FilterBetweenInclusive,
+// operandOps is every leaf operator, taken from the operator table itself so
+// each rule below covers an operator added to it.
+var operandOps = func() []spi.FilterOp {
+	names := spi.OperatorNames()
+	ops := make([]spi.FilterOp, 0, len(names))
+	for _, n := range names {
+		ops = append(ops, spi.MapOperator(n))
+	}
+	return ops
+}()
+
+func TestOperandOps_CoversTheTable(t *testing.T) {
+	if len(operandOps) == 0 {
+		t.Fatal("OperatorNames is empty")
+	}
+	for i, op := range operandOps {
+		if op == "" {
+			t.Errorf("OperatorNames()[%d] maps to no FilterOp", i)
+		}
+	}
 }
 
 func isUnary(op spi.FilterOp) bool { return op == spi.FilterIsNull || op == spi.FilterNotNull }
@@ -259,6 +267,106 @@ func TestPrepare_UnaryTakesNoOperand(t *testing.T) {
 	for _, op := range []spi.FilterOp{spi.FilterIsNull, spi.FilterNotNull} {
 		if _, err := spi.Prepare(spi.Filter{Op: op, Source: spi.SourceData, Path: "a"}); err != nil {
 			t.Errorf("%s: %v", op, err)
+		}
+	}
+}
+
+// TestPrepare_OperandRefusalNamesTheLeaf pins that Prepare's operand refusal
+// says which leaf failed, and that a range leaf with its pair in Value only
+// is told the pair is read from Values.
+func TestPrepare_OperandRefusalNamesTheLeaf(t *testing.T) {
+	str := []spi.DataType{spi.String}
+	nested := spi.Filter{Op: spi.FilterAnd, Children: []spi.Filter{
+		{Op: spi.FilterEq, Source: spi.SourceData, Path: "ok", Value: "x", Declared: str},
+		{Op: spi.FilterContains, Source: spi.SourceData, Path: "deep.name", Declared: str},
+	}}
+	_, err := spi.Prepare(nested)
+	if !errors.Is(err, spi.ErrOperandMissing) || !strings.Contains(err.Error(), `"deep.name"`) {
+		t.Errorf("nested nil operand: got %v, want ErrOperandMissing naming path \"deep.name\"", err)
+	}
+
+	misplaced := spi.Filter{Op: spi.FilterBetween, Source: spi.SourceData, Path: "a", Value: []any{"a", "z"}, Declared: str}
+	_, err = spi.Prepare(misplaced)
+	if !errors.Is(err, spi.ErrBetweenCount) || !strings.Contains(err.Error(), "read from Values") {
+		t.Errorf("range pair in Value only: got %v, want ErrBetweenCount saying the pair is read from Values", err)
+	}
+	empty := spi.Filter{Op: spi.FilterBetween, Source: spi.SourceData, Path: "a", Declared: str}
+	_, err = spi.Prepare(empty)
+	if err == nil || strings.Contains(err.Error(), "read from Values") {
+		t.Errorf("range leaf with no operand at all: got %v, want a refusal without the Values hint", err)
+	}
+}
+
+// TestConditionToFilter_OperandRefusalSpeaksWireNames pins that a
+// ConditionToFilter refusal, which a caller maps to a client error, names the
+// operator the caller wrote rather than the kernel's FilterOp spelling.
+func TestConditionToFilter_OperandRefusalSpeaksWireNames(t *testing.T) {
+	conds := map[string]predicate.Condition{
+		"simple":    &predicate.SimpleCondition{JsonPath: "$.name", OperatorType: "CONTAINS"},
+		"lifecycle": &predicate.LifecycleCondition{Field: "state", OperatorType: "CONTAINS"},
+	}
+	for kind, c := range conds {
+		_, err := spi.ConditionToFilter(c, nil)
+		if !errors.Is(err, spi.ErrOperandMissing) {
+			t.Fatalf("%s: got %v, want ErrOperandMissing", kind, err)
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, `operatorType "CONTAINS"`) {
+			t.Errorf("%s: %q does not name the wire operator", kind, msg)
+		}
+		for _, kernel := range []string{`"contains"`, `"is_null"`, `"not_null"`} {
+			if strings.Contains(msg, kernel) {
+				t.Errorf("%s: %q carries the kernel name %s", kind, msg, kernel)
+			}
+		}
+	}
+}
+
+// TestValidateOperand_GoContainerTypes pins that a directly built operand of a
+// Go container type no JSON decode produces is refused like its JSON
+// counterpart, rather than compared as its printed form.
+func TestValidateOperand_GoContainerTypes(t *testing.T) {
+	var nilStr *string
+	var nilMap map[string]string
+	cases := []struct {
+		name  string
+		op    spi.FilterOp
+		value any
+		want  error // nil means accepted
+	}{
+		{"[]string", spi.FilterEq, []string{"a"}, spi.ErrOperandArray},
+		{"[]int", spi.FilterContains, []int{1}, spi.ErrOperandArray},
+		{"[2]any", spi.FilterEq, [2]any{"a", "b"}, spi.ErrOperandArray},
+		{"map[string]string", spi.FilterEq, map[string]string{}, spi.ErrOperandObject},
+		{"nil map[string]string", spi.FilterEq, nilMap, spi.ErrOperandObject},
+		{"map[int]any", spi.FilterIsNull, map[int]any{}, spi.ErrOperandObject},
+		{"nil *string", spi.FilterEq, nilStr, spi.ErrOperandMissing},
+		{"nil *string IS_NULL", spi.FilterIsNull, nilStr, nil},
+		{"[]string under IS_NULL", spi.FilterNotNull, []string{}, spi.ErrOperandArray},
+		{"BETWEEN []string pair", spi.FilterBetween, []string{"a", "b"}, spi.ErrBetweenNotArray},
+		{"BETWEEN [2]any pair", spi.FilterBetweenInclusive, [2]any{"a", "b"}, spi.ErrBetweenNotArray},
+		{"BETWEEN map[string]string", spi.FilterBetween, map[string]string{}, spi.ErrOperandObject},
+		{"BETWEEN nil *string", spi.FilterBetween, nilStr, spi.ErrOperandMissing},
+		{"BETWEEN typed-nil bound", spi.FilterBetween, []any{nilStr, "z"}, spi.ErrBetweenNullBound},
+		{"BETWEEN []string bound", spi.FilterBetween, []any{"a", []string{"z"}}, spi.ErrBetweenNonScalarBound},
+		{"BETWEEN map[string]string bound", spi.FilterBetween, []any{map[string]string{}, "z"}, spi.ErrBetweenNonScalarBound},
+		{"time.Time", spi.FilterEq, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), nil},
+		{"json.Number", spi.FilterGt, json.Number("1.5"), nil},
+		{"int64", spi.FilterEq, int64(7), nil},
+		{"uint8", spi.FilterEq, uint8(7), nil},
+		{"float32", spi.FilterLt, float32(1.5), nil},
+		{"BETWEEN time.Time pair", spi.FilterBetween, []any{time.Unix(0, 0), time.Unix(1, 0)}, nil},
+	}
+	for _, tc := range cases {
+		err := spi.ValidateOperand(tc.op, tc.value)
+		if tc.want == nil {
+			if err != nil {
+				t.Errorf("%s: got %v, want nil", tc.name, err)
+			}
+			continue
+		}
+		if !errors.Is(err, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.name, err, tc.want)
 		}
 	}
 }

@@ -1,6 +1,9 @@
 package spi
 
-import "fmt"
+import (
+	"fmt"
+	"reflect"
+)
 
 // ValidateOperand reports whether value is an operand the leaf operator op
 // can use. It is the one rule for operand shape: [ConditionToFilter] applies
@@ -11,54 +14,94 @@ import "fmt"
 //
 // The rules, checked in this order:
 //
-//   - nil (a missing or JSON-null operand) is refused with
+//   - A missing operand — nil, or a nil pointer — is refused with
 //     [ErrOperandMissing] for every operator except [FilterIsNull] and
 //     [FilterNotNull], which take no operand. Accepting it would compare it
 //     as the empty string: EQUALS would match "", and CONTAINS or
 //     STARTS_WITH every string.
-//   - map[string]any is refused with [ErrOperandObject] for every operator,
-//     IS_NULL and NOT_NULL included.
-//   - []any is refused with [ErrOperandArray] for every operator except
-//     [FilterBetween] and [FilterBetweenInclusive].
+//   - A map of any type (a decoded JSON object is a map[string]any) is
+//     refused with [ErrOperandObject] for every operator, IS_NULL and
+//     NOT_NULL included.
+//   - A slice or array of any type is refused with [ErrOperandArray] for
+//     every operator except [FilterBetween] and [FilterBetweenInclusive].
 //   - Under FilterBetween and FilterBetweenInclusive the operand must be a
-//     []any of exactly two bounds, each non-nil and neither a map nor an
-//     array; otherwise it is refused with an error wrapping
-//     [ErrBetweenBounds].
+//     []any (a decoded JSON array) of exactly two bounds, each neither
+//     missing, a map, a slice nor an array; otherwise it is refused with an
+//     error wrapping [ErrBetweenBounds].
 //
-// A scalar operand under IS_NULL or NOT_NULL is accepted and ignored. The
-// tree operators (and, or, not) carry no operand and are not leaves; do not
-// call this for them.
+// Every other value is a scalar and is accepted: a string, a bool, any
+// numeric kind, json.Number, time.Time. A scalar under IS_NULL
+// or NOT_NULL is accepted and ignored. The tree operators (and, or, not)
+// carry no operand and are not leaves; do not call this for them.
 //
-// Every refusal wraps [ErrInvalidOperand] and names op. The operand itself is
-// not echoed, only its Go type or bound count.
+// Every refusal wraps [ErrInvalidOperand]. The error does not name op or the
+// leaf: the caller does, in its own vocabulary. The operand itself is not
+// echoed, only its Go type or bound count.
 func ValidateOperand(op FilterOp, value any) error {
-	switch v := value.(type) {
-	case nil:
-		if op != FilterIsNull && op != FilterNotNull {
-			return fmt.Errorf("operator %q: %w; only %q and %q take none", op, ErrOperandMissing, FilterIsNull, FilterNotNull)
+	isRange := op == FilterBetween || op == FilterBetweenInclusive
+	switch operandShapeOf(value) {
+	case shapeMissing:
+		if op == FilterIsNull || op == FilterNotNull {
+			return nil
 		}
-		return nil
-	case map[string]any:
-		return fmt.Errorf("operator %q: %w", op, ErrOperandObject)
-	case []any:
-		if op != FilterBetween && op != FilterBetweenInclusive {
-			return fmt.Errorf("operator %q: %w; only %q and %q take a [low, high] pair", op, ErrOperandArray, FilterBetween, FilterBetweenInclusive)
+		return ErrOperandMissing
+	case shapeObject:
+		return ErrOperandObject
+	case shapeArray:
+		if !isRange {
+			return ErrOperandArray
 		}
-		if len(v) != 2 {
-			return fmt.Errorf("operator %q: %w: got %d", op, ErrBetweenCount, len(v))
+		pair, ok := value.([]any)
+		if !ok {
+			return fmt.Errorf("%w: got %T", ErrBetweenNotArray, value)
 		}
-		for _, b := range v {
-			switch b.(type) {
-			case nil:
-				return fmt.Errorf("operator %q: %w", op, ErrBetweenNullBound)
-			case map[string]any, []any:
-				return fmt.Errorf("operator %q: %w", op, ErrBetweenNonScalarBound)
+		if len(pair) != 2 {
+			return fmt.Errorf("%w: got %d", ErrBetweenCount, len(pair))
+		}
+		for _, b := range pair {
+			switch operandShapeOf(b) {
+			case shapeMissing:
+				return ErrBetweenNullBound
+			case shapeObject, shapeArray:
+				return ErrBetweenNonScalarBound
 			}
 		}
 		return nil
 	}
-	if op == FilterBetween || op == FilterBetweenInclusive {
-		return fmt.Errorf("operator %q: %w: got %T", op, ErrBetweenNotArray, value)
+	if isRange {
+		return fmt.Errorf("%w: got %T", ErrBetweenNotArray, value)
 	}
 	return nil
+}
+
+// operandShape is the shape class [ValidateOperand] judges an operand by.
+type operandShape int
+
+const (
+	shapeScalar operandShape = iota
+	shapeMissing
+	shapeObject
+	shapeArray
+)
+
+// operandShapeOf classifies v by its reflect kind, so a Go container type
+// that no JSON decode produces ([]string, map[string]string) is classed with
+// its JSON counterpart rather than as a scalar, which would compare as its
+// printed form.
+func operandShapeOf(v any) operandShape {
+	if v == nil {
+		return shapeMissing
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Pointer:
+		if rv.IsNil() {
+			return shapeMissing
+		}
+	case reflect.Map:
+		return shapeObject
+	case reflect.Slice, reflect.Array:
+		return shapeArray
+	}
+	return shapeScalar
 }

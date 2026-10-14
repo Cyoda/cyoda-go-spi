@@ -16,13 +16,17 @@ MAINTAINING.md.
 
 - **A leaf operand no comparison can use is refused, not evaluated.** New
   `ValidateOperand(op FilterOp, value any) error` is the one operand-shape
-  rule: a missing or null operand is refused for every operator except
-  `IS_NULL` and `NOT_NULL`; an object for every operator; an array for every
-  operator except `BETWEEN` and `BETWEEN_INCLUSIVE`; and a range operand must
-  be exactly two non-null scalar bounds. `ConditionToFilter` applies it to
-  every simple and lifecycle leaf at any depth, and `Prepare` to every leaf
-  (on `Values` for a range leaf, on `Value` otherwise), wrapping
-  `ErrUnevaluableLeaf`. Before, a null operand compared as the empty string,
+  rule: a missing operand (nil or a nil pointer) is refused for every
+  operator except `IS_NULL` and `NOT_NULL`; a map of any type for every
+  operator; a slice or array of any type for every operator except `BETWEEN`
+  and `BETWEEN_INCLUSIVE`; and a range operand must be a `[]any` of exactly
+  two non-null scalar bounds. `ConditionToFilter` applies it to every simple
+  and lifecycle leaf at any depth, naming the leaf and its `operatorType`, and
+  `Prepare` to every leaf (on `Values` for a range leaf, on `Value`
+  otherwise), wrapping `ErrUnevaluableLeaf` and naming the path. `Prepare`
+  refuses a leaf whose `Op` is not a leaf operator (the zero `Op` included)
+  as an unsupported operator before it judges the operand, so that refusal
+  does not match `ErrInvalidOperand`. Before, a null operand compared as the empty string,
   so `CONTAINS` with no value matched every string and a conditional delete
   removed every entity holding one; a malformed range pair translated to a
   filter with nil `Values`. New sentinels: `ErrInvalidOperand` (wrapped by

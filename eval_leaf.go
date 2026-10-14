@@ -175,14 +175,15 @@ func truncateOperand(s string) string {
 // each declared type independently rather than picking one canonical
 // bucket for the value.
 func ExpandLeaf(op FilterOp, operand string, values []string, declared []DataType) (Expansion, error) {
-	switch op {
-	case FilterIsNull, FilterNotNull:
+	kind, ok := leafKindOf(op)
+	if !ok {
+		return Expansion{}, fmt.Errorf("ExpandLeaf: %w", unsupportedLeafOperatorError(op))
+	}
+	switch kind {
+	case kindUnary:
 		return Expansion{kind: kindUnary, op: op}, nil
 
-	case FilterContains, FilterStartsWith, FilterEndsWith, FilterLike, FilterMatchesRegex,
-		FilterNotContains, FilterNotStartsWith, FilterNotEndsWith,
-		FilterIEq, FilterINe, FilterIContains, FilterINotContains, FilterIStartsWith,
-		FilterINotStartsWith, FilterIEndsWith, FilterINotEndsWith:
+	case kindStringOp:
 		e := Expansion{kind: kindStringOp, op: op, strOperand: operand}
 		// Swallowed deliberately: ExpandLeaf's own per-row contract is
 		// unchanged by prepared_filter.go's Prepare — a pattern operand that
@@ -191,8 +192,8 @@ func ExpandLeaf(op FilterOp, operand string, values []string, declared []DataTyp
 		// ExpandLeaf directly and still want that leaf built rather than an
 		// error.
 		//
-		// Prepare is no longer one of those callers: it now rejects such a
-		// leaf (ErrUnevaluableLeaf). It gets there by checking
+		// Prepare is not one of those callers: it rejects such a leaf
+		// (ErrUnevaluableLeaf). It gets there by checking
 		// exp.strMatch == nil AFTER this call returns, not by asking
 		// ValidateLeafPattern FIRST — asking first would run compileLeafPattern
 		// twice per leaf (once in ValidateLeafPattern, once here) and break
@@ -208,15 +209,39 @@ func ExpandLeaf(op FilterOp, operand string, values []string, declared []DataTyp
 		}
 		return e, nil
 
-	case FilterBetween, FilterBetweenInclusive:
+	case kindBetween:
 		return expandBetween(op, values, declared)
 
-	case FilterEq, FilterNe, FilterGt, FilterGte, FilterLt, FilterLte:
+	default: // kindCompare
 		return expandCompare(op, operand, declared)
-
-	default:
-		return Expansion{}, fmt.Errorf("ExpandLeaf: unsupported leaf operator %q", op)
 	}
+}
+
+// leafKindOf is the one definition of the leaf operator set: it reports the
+// Expansion family op belongs to, or false for a tree operator (and, or, not),
+// the zero FilterOp, or any other value outside the set. [ExpandLeaf]
+// dispatches on it and [Prepare] refuses a leaf it rejects before judging the
+// leaf's operand.
+func leafKindOf(op FilterOp) (expKind, bool) {
+	switch op {
+	case FilterIsNull, FilterNotNull:
+		return kindUnary, true
+	case FilterContains, FilterStartsWith, FilterEndsWith, FilterLike, FilterMatchesRegex,
+		FilterNotContains, FilterNotStartsWith, FilterNotEndsWith,
+		FilterIEq, FilterINe, FilterIContains, FilterINotContains, FilterIStartsWith,
+		FilterINotStartsWith, FilterIEndsWith, FilterINotEndsWith:
+		return kindStringOp, true
+	case FilterBetween, FilterBetweenInclusive:
+		return kindBetween, true
+	case FilterEq, FilterNe, FilterGt, FilterGte, FilterLt, FilterLte:
+		return kindCompare, true
+	}
+	return 0, false
+}
+
+// unsupportedLeafOperatorError reports an op outside the leaf operator set.
+func unsupportedLeafOperatorError(op FilterOp) error {
+	return fmt.Errorf("unsupported leaf operator %q", op)
 }
 
 // bucketDeclared splits a declared type set into numeric / temporal / other.

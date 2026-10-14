@@ -483,10 +483,14 @@ func TestConditionToFilter_AllSimpleOperators(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.op, func(t *testing.T) {
+			var value any = "val"
+			if tt.want == spi.FilterBetween || tt.want == spi.FilterBetweenInclusive {
+				value = []any{"a", "z"}
+			}
 			cond := &predicate.SimpleCondition{
 				JsonPath:     "$.field",
 				OperatorType: tt.op,
-				Value:        "val",
+				Value:        value,
 			}
 			f, err := spi.ConditionToFilter(cond, nil)
 			if err != nil {
@@ -843,10 +847,8 @@ func TestConditionToFilter_DataLeafTemporalType_StampsTemporal(t *testing.T) {
 // BETWEEN SimpleCondition (data leaf) populates Filter.Values with the two
 // bounds. Every downstream BETWEEN consumer (the leaf kernel's range
 // evaluation, postgres/sqlite query planners) reads Filter.Values, not
-// Filter.Value — leaving Values unset means Prepare rejects the leaf with
-// ErrUnevaluableLeaf (expandBetween's own arity check) instead of silently
-// never matching. See TestConditionToFilter_MalformedBetweenValuesIsUnevaluable
-// for that failure case.
+// Filter.Value. A malformed pair is refused by ConditionToFilter itself; see
+// TestConditionToFilter_RefusesBadOperand.
 func TestConditionToFilter_SimpleBetween_PopulatesValues(t *testing.T) {
 	c := &predicate.SimpleCondition{
 		JsonPath:     "$.age",
@@ -865,33 +867,6 @@ func TestConditionToFilter_SimpleBetween_PopulatesValues(t *testing.T) {
 	}
 	if f.Values[0] != float64(18) || f.Values[1] != float64(65) {
 		t.Errorf("Values = %v, want [18 65]", f.Values)
-	}
-}
-
-// TestConditionToFilter_MalformedBetweenValuesIsUnevaluable pins the
-// consequence of betweenValues' arity check: a BETWEEN condition whose Value
-// is not a 2-element slice produces a Filter with Values == nil, and Prepare
-// now rejects that leaf outright (ErrUnevaluableLeaf, from expandBetween's
-// own arity check) rather than silently building a leaf that never matches.
-func TestConditionToFilter_MalformedBetweenValuesIsUnevaluable(t *testing.T) {
-	c := &predicate.SimpleCondition{
-		JsonPath:     "$.age",
-		OperatorType: "BETWEEN",
-		Value:        []any{float64(18)}, // one bound instead of two
-	}
-	f, err := spi.ConditionToFilter(c, nil)
-	if err != nil {
-		t.Fatalf("ConditionToFilter: %v", err)
-	}
-	if f.Values != nil {
-		t.Fatalf("Values = %v, want nil for a malformed (non-2-element) BETWEEN value", f.Values)
-	}
-	_, err = spi.Prepare(f)
-	if err == nil {
-		t.Fatal("Prepare succeeded for a BETWEEN leaf with one bound, want ErrUnevaluableLeaf")
-	}
-	if !errors.Is(err, spi.ErrUnevaluableLeaf) {
-		t.Fatalf("Prepare error = %v, want it to wrap ErrUnevaluableLeaf", err)
 	}
 }
 
@@ -969,25 +944,6 @@ func TestConditionToFilter_NotContains_RoutesToKernelOp(t *testing.T) {
 	}
 	if f.Op != spi.FilterNotContains {
 		t.Fatalf("Op = %s, want not_contains (must not fall through to matches_regex)", f.Op)
-	}
-}
-
-// TestConditionToFilter_SimpleBetween_MalformedValue_LeavesValuesNil verifies
-// that a malformed BETWEEN value (not a 2-element []any) leaves Filter.Values
-// nil rather than panicking — validation elsewhere rejects malformed BETWEEN
-// conditions, and a nil Values correctly no-matches downstream.
-func TestConditionToFilter_SimpleBetween_MalformedValue_LeavesValuesNil(t *testing.T) {
-	c := &predicate.SimpleCondition{
-		JsonPath:     "$.age",
-		OperatorType: "BETWEEN",
-		Value:        "not-a-slice",
-	}
-	f, err := spi.ConditionToFilter(c, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if f.Values != nil {
-		t.Errorf("Values = %v, want nil for malformed BETWEEN value", f.Values)
 	}
 }
 

@@ -82,9 +82,8 @@ func TestPrepare_AcceptsMatchAllAndOrdinaryLeaves(t *testing.T) {
 }
 
 // TestPrepare_ZeroValueAsymmetry pins spec §3's table: a zero-Op filter is
-// match-all at the ROOT only. A zero-Op CHILD is an unevaluable leaf —
-// ExpandLeaf hits its default arm ("unsupported leaf operator"), and Prepare
-// now rejects the whole request (ErrUnevaluableLeaf) rather than silently
+// match-all at the ROOT only. A zero-Op CHILD is an unevaluable leaf, and
+// Prepare rejects the whole request (ErrUnevaluableLeaf) rather than silently
 // building a leaf that is false for every row. Hoisting the root's Op == ""
 // check into the recursion would instead turn a zero-Op child into an
 // identity element, which is the mistake this test guards against — a
@@ -145,12 +144,22 @@ func TestPrepare_ZeroValueAsymmetry(t *testing.T) {
 					},
 				},
 			},
+			{
+				"unknown-Op child with no operand",
+				spi.Filter{Op: spi.FilterAnd, Children: []spi.Filter{
+					leaf, {Op: spi.FilterOp("bogus"), Source: spi.SourceData, Path: "name"}}},
+			},
 		}
 		for _, tc := range tests {
 			t.Run(tc.name, func(t *testing.T) {
 				_, err := spi.Prepare(tc.f)
 				require.Error(t, err)
 				require.ErrorIs(t, err, spi.ErrUnevaluableLeaf)
+				// The defect is the operator, not the operand: an unset Value
+				// on a leaf with no valid operator must not be reported as a
+				// missing operand.
+				require.NotErrorIs(t, err, spi.ErrInvalidOperand)
+				require.Contains(t, err.Error(), "unsupported leaf operator")
 			})
 		}
 	})

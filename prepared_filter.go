@@ -54,11 +54,13 @@ type preparedNode struct {
 }
 
 // Prepare compiles f for repeated evaluation, or reports why it cannot: a
-// leaf whose operand cannot be expanded, whose SourceData Path is empty or
-// outside the documented path grammar, whose SourceMeta Path is empty or
-// outside the closed meta vocabulary, or whose pattern operand will not
-// compile, makes the whole filter unevaluable — and so does a FilterNot node
-// whose Children is not exactly one well-formed filter. That is decided once, from the
+// leaf whose operand [ValidateOperand] refuses (checked on Values for a range
+// leaf, on Value for every other leaf), whose operand cannot be expanded,
+// whose SourceData Path is empty or outside the documented path grammar,
+// whose SourceMeta Path is empty or outside the closed meta vocabulary, or
+// whose pattern operand will not compile, makes the whole filter unevaluable
+// — and so does a FilterNot node whose Children is not exactly one
+// well-formed filter. That is decided once, from the
 // condition alone, before any entity is read — it is a property of the
 // request, and Prepare rejects the request rather than silently building a
 // leaf that never matches. A never-match leaf would be indistinguishable from
@@ -70,7 +72,7 @@ type preparedNode struct {
 // value.
 func Prepare(f Filter) (PreparedFilter, error) {
 	// Root-only match-all. This check must NOT move into prepareNode: a
-	// zero-Op CHILD is an unevaluable leaf (ExpandLeaf's default arm rejects
+	// zero-Op CHILD is an unevaluable leaf (prepareNode's leaf branch rejects
 	// it, same as any other unsupported operator), and hoisting the check
 	// into the recursion would silently turn it into an identity element
 	// instead of the rejection every other unevaluable leaf gets.
@@ -114,9 +116,9 @@ func prepareNode(f Filter) (preparedNode, error) {
 		}
 		// The single child's own Op — including the zero value — is
 		// validated by recursing into prepareNode: a zero-Op child falls to
-		// this function's leaf branch below and is rejected there by
-		// ExpandLeaf's default arm, the same path any other unsupported
-		// operator takes. No separate check is needed here.
+		// this function's leaf branch below and is rejected there as an
+		// unsupported leaf operator, the same as any other. No separate
+		// check is needed here.
 		child, err := prepareNode(f.Children[0])
 		if err != nil {
 			return preparedNode{}, err
@@ -124,7 +126,11 @@ func prepareNode(f Filter) (preparedNode, error) {
 		return preparedNode{op: FilterNot, children: []preparedNode{child}}, nil
 	}
 
-	// Leaf — including a zero-Op child, which ExpandLeaf's default arm rejects.
+	// Leaf. Its operator is checked first, so a zero-Op or unknown-Op node is
+	// refused as an unsupported operator, not for whatever else it leaves unset.
+	if _, ok := leafKindOf(f.Op); !ok {
+		return preparedNode{}, fmt.Errorf("%w: %w", ErrUnevaluableLeaf, unsupportedLeafOperatorError(f.Op))
+	}
 	n := preparedNode{op: f.Op, source: f.Source, path: f.Path}
 	if f.Source == SourceData {
 		if f.Path == "" {
@@ -163,6 +169,21 @@ func prepareNode(f Filter) (preparedNode, error) {
 		// and is a legitimate non-match — see
 		// TestPreparedFilter_ValidMetaPathAbsentValueStillNonMatches.
 		return preparedNode{}, fmt.Errorf("%w: meta path %q is not in the canonical meta vocabulary", ErrUnevaluableLeaf, f.Path)
+	}
+	// The operand is checked before it is stringified: OperandString maps a
+	// nil operand to "" and an object to its printed form, both of which
+	// ExpandLeaf would accept as a real operand. A range leaf is checked on
+	// Values, the field ExpandLeaf reads for it; every other leaf on Value.
+	isRange := f.Op == FilterBetween || f.Op == FilterBetweenInclusive
+	operand := f.Value
+	if isRange {
+		operand = f.Values
+	}
+	if err := ValidateOperand(f.Op, operand); err != nil {
+		if isRange && len(f.Values) == 0 && f.Value != nil {
+			return preparedNode{}, fmt.Errorf("%w: path %q: op %q: %w (the range pair is read from Values, not Value)", ErrUnevaluableLeaf, f.Path, f.Op, err)
+		}
+		return preparedNode{}, fmt.Errorf("%w: path %q: op %q: %w", ErrUnevaluableLeaf, f.Path, f.Op, err)
 	}
 	operandStr := OperandString(f.Value)
 	exp, err := ExpandLeaf(f.Op, operandStr, valuesToStrings(f.Values), f.Declared)

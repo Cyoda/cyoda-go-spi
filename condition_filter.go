@@ -123,28 +123,30 @@ import (
 // becomes an anchored regex that behaves as EQUALS and returns exactly the
 // rows the caller meant to exclude.
 //
-// # Three obligations that remain the caller's
+// # Operand shape is refused here
 //
-// ConditionToFilter validates operator names and path shape. It does not
-// validate operands, and each of these fails SILENTLY — an under- or
-// wrongly-populated result set, never an error:
+// Every leaf's operand passes through [ValidateOperand] before a Filter is
+// built from it, at any depth. A missing or null operand under an operator
+// that takes one, an object operand, an array operand outside BETWEEN /
+// BETWEEN_INCLUSIVE, any other operand outside the accepted scalar set, and a
+// range operand that is not exactly two scalar bounds all fail with an error
+// wrapping [ErrInvalidOperand]. Callers
+// should map that to a client error (400 INVALID_CONDITION), as for
+// [ErrUnknownOperator]. Each would otherwise evaluate to a wrong answer, not
+// an error: a null operand compares as the empty string, so CONTAINS matches
+// every string, and an object compares as its printed form.
 //
-//   - OBJECT OPERANDS. A leaf value that is an object denotes no scalar any
-//     operator could compare against. Left unchecked it reaches the kernel,
-//     which stringifies it via fmt.Sprint and compares the literal text
-//     "map[a:1]". Reject a map-typed operand outright.
-//   - BETWEEN ARITY. BETWEEN / BETWEEN_INCLUSIVE require exactly a two-element
-//     [lo, hi] operand. Anything else leaves Filter.Values nil, ExpandLeaf
-//     errors, and the leaf silently no-matches. Check the arity before
-//     translating rather than diagnosing an empty result set afterwards.
-//   - PATTERN COMPILABILITY. An uncompilable MATCHES_PATTERN or LIKE operand
-//     (e.g. LIKE with a trailing unpaired escape) leaves the compiled
-//     program nil and the leaf silently returns false. Note the kernel
-//     compiles the ANCHORED form of MATCHES_PATTERN while a naive
-//     caller-side check would compile the raw operand, so the two accept
-//     sets are not identical — use [ValidateLeafPattern] (per leaf) or
-//     [ValidateConditionPatterns] (whole condition) rather than hand-rolling
-//     the check; they route through the same derivation the kernel does.
+// # Pattern compilability remains the caller's
+//
+// ConditionToFilter does not compile pattern operands. An uncompilable
+// MATCHES_PATTERN or LIKE operand (e.g. LIKE with a trailing unpaired escape)
+// translates, and [Prepare] then refuses the leaf with ErrUnevaluableLeaf.
+// To refuse it at the request boundary instead, use [ValidateLeafPattern]
+// (per leaf) or [ValidateConditionPatterns] (whole condition) rather than
+// hand-rolling the check: the kernel compiles the ANCHORED form of
+// MATCHES_PATTERN while a naive caller-side check would compile the raw
+// operand, so the two accept sets are not identical, and these two route
+// through the same derivation the kernel does.
 func ConditionToFilter(cond predicate.Condition, fields map[string]FieldDescriptor) (Filter, error) {
 	if cond == nil {
 		return Filter{}, fmt.Errorf("condition is nil")
@@ -338,6 +340,9 @@ func simpleToFilter(c *predicate.SimpleCondition, fields map[string]FieldDescrip
 	if !ok {
 		return Filter{}, unknownOperatorError(c.OperatorType)
 	}
+	if err := ValidateOperand(op, c.Value); err != nil {
+		return Filter{}, fmt.Errorf("jsonPath %q: operatorType %q: %w", c.JsonPath, c.OperatorType, err)
+	}
 	// FieldsMap keys are always "$."-prefixed, and stripDollarDot has just
 	// guaranteed c.JsonPath is too, so this first step is an identity today.
 	// It is kept as the single key-construction convention.
@@ -376,26 +381,15 @@ func unknownOperatorError(op string) error {
 // betweenValues returns the two BETWEEN / BETWEEN_INCLUSIVE bounds as a []any
 // for consumers that read Filter.Values (the kernel's range evaluation, and
 // the SQL backends' query planners). Every range consumer reads Values, not
-// Value.
+// Value. It returns nil for every other operator.
 //
-// Returns nil for non-range ops or a malformed (non 2-element []any) value.
-// The BETWEEN-arity check is left to the caller as a cheap local check (see
-// [ValidateConditionOperators]'s doc comment) rather than done here, so a
-// malformed range condition CAN reach this far with Values left nil — but
-// that is no longer a silent non-match downstream: [Prepare] rejects a range
-// leaf whose Values is not exactly length 2 with ErrUnevaluableLeaf (see
-// expandBetween's own arity check), so skipping the up-front check costs a
-// rejected request, never a wrong-but-available answer. See
-// TestConditionToFilter_MalformedBetweenValuesIsUnevaluable.
+// Its caller has passed value through [ValidateOperand], so under a range
+// operator value is a []any of exactly two non-null scalar bounds.
 func betweenValues(op FilterOp, value any) []any {
 	if op != FilterBetween && op != FilterBetweenInclusive {
 		return nil
 	}
-	vals, ok := value.([]any)
-	if !ok || len(vals) != 2 {
-		return nil
-	}
-	return vals
+	return value.([]any)
 }
 
 // dataCoercion returns CoerceTemporal only if the schema classifies the
@@ -442,6 +436,9 @@ func lifecycleToFilter(c *predicate.LifecycleCondition) (Filter, error) {
 	op, ok := LookupOperator(c.OperatorType)
 	if !ok {
 		return Filter{}, unknownOperatorError(c.OperatorType)
+	}
+	if err := ValidateOperand(op, c.Value); err != nil {
+		return Filter{}, fmt.Errorf("field %q: operatorType %q: %w", c.Field, c.OperatorType, err)
 	}
 	return Filter{
 		Op:       op,
@@ -787,20 +784,16 @@ func OperatorNames() []string {
 // implementation surface of the kind relocating [ConditionToFilter] here was
 // meant to remove.
 //
-// It covers ONLY operator names — but that now means BOTH a leaf's
+// It covers ONLY operator names — but that means both a leaf's
 // OperatorType (EQUALS, NOT_EQUAL, …) AND a GroupCondition's own Operator
 // (AND, OR, NOT): the group's operator is checked at the same node as its
 // children are recursed into, so a bad one nested arbitrarily deep is
-// reported the same way a bad leaf operator is. The three operand
-// obligations documented on [ConditionToFilter] are deliberately not folded
-// in: the object-operand and BETWEEN-arity checks are cheap local checks a
-// caller can apply while walking its own input; the pattern-compilability
-// check was blocked on reaching the kernel's own pattern derivation, which
-// [ValidateLeafPattern] and [ValidateConditionPatterns] now expose. Passing
-// this function is not the same as having validated the condition.
+// reported the same way a bad leaf operator is. Operands are not checked
+// here: [ValidateOperand] is the operand-shape rule (and [ConditionToFilter]
+// applies it), and [ValidateConditionPatterns] checks pattern operands.
+// Passing this function is not the same as having validated the condition.
 //
-// Pattern operands are now covered by [ValidateConditionPatterns]. A
-// pattern-cost bound (rejecting a syntactically valid but expensive pattern)
+// A pattern-cost bound (rejecting a syntactically valid but expensive pattern)
 // remains a separate, unsettled concern, out of scope for both functions.
 func ValidateConditionOperators(cond predicate.Condition) error {
 	return validateOperatorsAtDepth(cond, 0)

@@ -1,6 +1,9 @@
 package spi
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // ErrNotFound indicates the requested resource does not exist.
 var ErrNotFound = errors.New("not found")
@@ -285,7 +288,9 @@ var ErrInvalidPattern = errors.New("invalid pattern")
 var ErrInvalidFilterPath = errors.New("invalid filter path")
 
 // ErrUnevaluableLeaf is returned by [Prepare] for a Filter leaf it cannot
-// evaluate: an operand that parses into none of the leaf's declared types
+// evaluate: an operand [ValidateOperand] refuses (the error wraps that
+// refusal too, so it also matches [ErrInvalidOperand] and the specific
+// sentinel), an operand that parses into none of the leaf's declared types
 // (including an empty/nil declared set), a SourceData leaf whose Path is
 // empty or falls outside the documented path grammar, a SourceMeta leaf
 // whose Path is empty or is not one of the names extractFilterMetaValue
@@ -320,3 +325,53 @@ var ErrUnevaluableLeaf = errors.New("unevaluable leaf")
 // holds no non-nil entry. Such a clause would read as an empty AND and match
 // every entity; it is refused instead.
 var ErrArrayClauseTestsNothing = errors.New("array clause tests no position")
+
+// ErrInvalidOperand is wrapped by every refusal [ValidateOperand] returns: a
+// leaf operand that no comparison can use. It is a client error. A caller
+// maps it to its own wording with errors.Is on the specific sentinels below.
+var ErrInvalidOperand = errors.New("invalid operand")
+
+// ErrOperandMissing: the operand is nil (missing, or JSON null), and the
+// operator takes one. Every leaf operator takes one except [FilterIsNull] and
+// [FilterNotNull]. A nil pointer is not a missing operand: it is refused with
+// [ErrOperandNotScalar].
+var ErrOperandMissing = fmt.Errorf("%w: missing or null, and the operator takes one", ErrInvalidOperand)
+
+// ErrOperandObject: the operand is a map of an unnamed type (a decoded JSON
+// object is a map[string]any). It denotes no value any operator compares
+// against, so it is refused under every operator.
+var ErrOperandObject = fmt.Errorf("%w: an object", ErrInvalidOperand)
+
+// ErrOperandArray: the operand is a slice or array of an unnamed type under
+// an operator that takes a single value. Only [FilterBetween] and [FilterBetweenInclusive]
+// take an array, the [low, high] pair.
+var ErrOperandArray = fmt.Errorf("%w: an array, and the operator takes a single value", ErrInvalidOperand)
+
+// ErrOperandNotScalar: the operand is not nil, an unnamed map, slice or
+// array, and not in the accepted scalar set either — a pointer (nil or not),
+// a struct (time.Time included), a func, a channel, a complex number, a
+// uintptr, or any named type other than json.Number, whatever its kind. It
+// is refused under every operator. See [ValidateOperand] for the accepted
+// set.
+var ErrOperandNotScalar = fmt.Errorf("%w: not a scalar", ErrInvalidOperand)
+
+// ErrBetweenBounds is wrapped by every refusal of a [FilterBetween] /
+// [FilterBetweenInclusive] operand that is not exactly two non-null scalar
+// bounds. The four sentinels below wrap it and name the defect.
+var ErrBetweenBounds = fmt.Errorf("%w: not a [low, high] pair of scalars", ErrInvalidOperand)
+
+// ErrBetweenNotArray: the range operand is not a []any, the type a decoded
+// JSON array has. The error text carries the operand's Go type.
+var ErrBetweenNotArray = fmt.Errorf("%w: not a JSON array", ErrBetweenBounds)
+
+// ErrBetweenCount: the range operand is an array with other than two
+// entries. The error text carries the count.
+var ErrBetweenCount = fmt.Errorf("%w: wrong number of bounds", ErrBetweenBounds)
+
+// ErrBetweenNullBound: a bound of the range operand is nil (JSON null).
+var ErrBetweenNullBound = fmt.Errorf("%w: a null bound", ErrBetweenBounds)
+
+// ErrBetweenNonScalarBound: a bound of the range operand is neither nil nor
+// in the accepted scalar set: a map, a slice, an array, or any other value
+// [ErrOperandNotScalar] names.
+var ErrBetweenNonScalarBound = fmt.Errorf("%w: a bound that is not a scalar", ErrBetweenBounds)

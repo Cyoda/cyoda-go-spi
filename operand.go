@@ -13,11 +13,11 @@ import (
 // caller that validates conditions at its own boundary calls it to refuse the
 // same set, and maps the sentinels to its own wording.
 //
-// It accepts a closed set and refuses everything else. A scalar operand is
-// one of: string, bool, json.Number, or a value of any int, uint (uintptr
-// excluded) or float kind, named numeric types included. JSON
-// decoding, with or without UseNumber, and protobuf structpb decoding produce
-// only these, nil, []any and map[string]any.
+// It accepts a closed set and refuses everything else. A scalar operand has
+// one of these types: string, bool, json.Number, int, int8, int16, int32,
+// int64, uint, uint8, uint16, uint32, uint64, float32, float64. JSON
+// decoding, with or without UseNumber, produces only these, nil, []any and
+// map[string]any.
 //
 // The rules, checked in this order:
 //
@@ -26,16 +26,17 @@ import (
 //     [FilterNotNull], which take no operand. Accepting it would compare it
 //     as the empty string: EQUALS would match "", and CONTAINS or
 //     STARTS_WITH every string.
-//   - A map of any type (a decoded JSON object is a map[string]any) is
-//     refused with [ErrOperandObject] for every operator, IS_NULL and
+//   - A map of an unnamed type (a decoded JSON object is a map[string]any)
+//     is refused with [ErrOperandObject] for every operator, IS_NULL and
 //     NOT_NULL included.
-//   - A slice or array of any type is refused with [ErrOperandArray] for
-//     every operator except [FilterBetween] and [FilterBetweenInclusive].
-//   - Any other value outside the scalar set — a pointer (nil or not), a
+//   - A slice or array of an unnamed type is refused with [ErrOperandArray]
+//     for every operator except [FilterBetween] and [FilterBetweenInclusive].
+//   - Any other value outside the scalar set is refused with
+//     [ErrOperandNotScalar] for every operator: a pointer (nil or not), a
 //     struct (time.Time included: its printed form is not ISO-8601, so it
 //     would compare the wrong text), a func, a channel, a complex number, a
-//     named string or bool type — is refused with [ErrOperandNotScalar] for
-//     every operator.
+//     uintptr, and every named type other than json.Number, whatever its
+//     kind (a String() method would make it compare as that text).
 //   - Under FilterBetween and FilterBetweenInclusive the operand must be a
 //     []any (a decoded JSON array) of exactly two bounds, each a scalar;
 //     otherwise it is refused with an error wrapping [ErrBetweenBounds].
@@ -93,27 +94,31 @@ type operandShape int
 const (
 	shapeScalar  operandShape = iota // in the accepted scalar set
 	shapeMissing                     // nil
-	shapeObject                      // a map of any type
-	shapeArray                       // a slice or array of any type
+	shapeObject                      // an unnamed map type
+	shapeArray                       // an unnamed slice or array type
 	shapeOther                       // anything else
 )
 
 // operandShapeOf classifies v. The scalar set is named, not inferred: a value
-// is a scalar only if it is one of the accepted types or numeric kinds, so a
-// Go type the rule does not know is refused rather than compared as its
-// printed form.
+// is a scalar only if its type is one of the accepted types, so a Go type the
+// rule does not know is refused rather than compared as its printed form. A
+// named type other than json.Number is never a scalar, whatever its kind: a
+// String() method would make it print as that text.
 func operandShapeOf(v any) operandShape {
 	switch v.(type) {
 	case nil:
 		return shapeMissing
-	case string, bool, json.Number:
+	case string, bool, json.Number,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64:
 		return shapeScalar
 	}
-	switch reflect.ValueOf(v).Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
-		reflect.Float32, reflect.Float64:
-		return shapeScalar
+	t := reflect.TypeOf(v)
+	if t.Name() != "" {
+		return shapeOther
+	}
+	switch t.Kind() {
 	case reflect.Map:
 		return shapeObject
 	case reflect.Slice, reflect.Array:

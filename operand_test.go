@@ -328,13 +328,20 @@ type (
 	namedFloat float64
 	namedStr   string
 	namedBool  bool
+	namedMap   map[string]any
+	namedSlice []any
+	// level prints as its String() text, not its number.
+	level int
 )
 
+func (l level) String() string { return "HIGH" }
+
 // TestValidateOperand_AcceptedTypes pins that ValidateOperand accepts a
-// closed set of operand types — string, bool, json.Number and
-// every int, uint and float kind — and refuses every other Go value, rather
-// than letting it be compared as its printed form. Maps are objects, slices
-// and arrays are arrays, and everything else is not a scalar.
+// closed set of operand types — string, bool, json.Number and Go's
+// predeclared int, uint and float types — and refuses every other Go value,
+// rather than letting it be compared as its printed form. An unnamed map is
+// an object, an unnamed slice or array an array, and everything else,
+// every other named type included, is not a scalar.
 func TestValidateOperand_AcceptedTypes(t *testing.T) {
 	var nilStr *string
 	var nilMap map[string]string
@@ -358,11 +365,21 @@ func TestValidateOperand_AcceptedTypes(t *testing.T) {
 		{"uint64", spi.FilterEq, uint64(7), nil},
 		{"float32", spi.FilterLt, float32(1.5), nil},
 		{"float64", spi.FilterLt, 1.5, nil},
-		{"named int", spi.FilterEq, namedInt(7), nil},
-		{"named uint", spi.FilterEq, namedUint(7), nil},
-		{"named float", spi.FilterEq, namedFloat(1.5), nil},
+		{"int16", spi.FilterEq, int16(7), nil},
+		{"int32", spi.FilterEq, int32(7), nil},
+		{"uint16", spi.FilterEq, uint16(7), nil},
+		{"uint32", spi.FilterEq, uint32(7), nil},
 		{"scalar under IS_NULL", spi.FilterIsNull, "x", nil},
-		{"BETWEEN named-int pair", spi.FilterBetweenInclusive, []any{namedInt(1), uint8(2)}, nil},
+		{"BETWEEN int and uint8 pair", spi.FilterBetweenInclusive, []any{1, uint8(2)}, nil},
+
+		// Every other named type is not a scalar, whatever its kind.
+		{"named int", spi.FilterEq, namedInt(7), spi.ErrOperandNotScalar},
+		{"named uint", spi.FilterEq, namedUint(7), spi.ErrOperandNotScalar},
+		{"named float", spi.FilterEq, namedFloat(1.5), spi.ErrOperandNotScalar},
+		{"named int with String()", spi.FilterEq, level(1), spi.ErrOperandNotScalar},
+		{"named map", spi.FilterEq, namedMap{}, spi.ErrOperandNotScalar},
+		{"named slice", spi.FilterBetween, namedSlice{"a", "b"}, spi.ErrOperandNotScalar},
+		{"BETWEEN named-int bound", spi.FilterBetweenInclusive, []any{namedInt(1), uint8(2)}, spi.ErrBetweenNonScalarBound},
 
 		// Maps are objects, slices and arrays are arrays.
 		{"[]string", spi.FilterEq, []string{"a"}, spi.ErrOperandArray},
@@ -423,12 +440,12 @@ func TestValidateOperand_AcceptedTypes(t *testing.T) {
 	}
 }
 
-// TestValidateOperand_DecodedJSONKeepsItsClass pins that the accepted set
-// covers every value a JSON decode produces, with and without UseNumber:
-// scalars accepted, null missing, an object an object, an array an array
-// (and a range pair under BETWEEN). Protobuf structpb decoding yields the
-// same Go types as plain Unmarshal (float64, string, bool, nil, []any,
-// map[string]any).
+// TestValidateOperand_DecodedJSONKeepsItsClass pins that encoding/json
+// decoding, with and without UseNumber, of a null, a bool, a string,
+// integer, fractional, large and exponent numbers, an object and an array
+// yields values the rule classes as intended: scalars accepted, null
+// missing, an object an object, an array an array (and a range pair under
+// BETWEEN).
 func TestValidateOperand_DecodedJSONKeepsItsClass(t *testing.T) {
 	const doc = `{"null":null,"bool":true,"string":"s","int":1,"float":1.5,"big":12345678901234567890,"exp":-2e300,"object":{"a":1},"array":[1,"z"]}`
 	decoders := map[string]func() (map[string]any, error){

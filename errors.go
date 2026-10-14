@@ -337,21 +337,22 @@ var ErrInvalidOperand = errors.New("invalid operand")
 // [ErrOperandNotScalar].
 var ErrOperandMissing = fmt.Errorf("%w: missing or null, and the operator takes one", ErrInvalidOperand)
 
-// ErrOperandObject: the operand is a map (a decoded JSON object is a
-// map[string]any). It denotes no value any operator compares against, so it
-// is refused under every operator.
+// ErrOperandObject: the operand is a map of an unnamed type (a decoded JSON
+// object is a map[string]any). It denotes no value any operator compares
+// against, so it is refused under every operator.
 var ErrOperandObject = fmt.Errorf("%w: an object", ErrInvalidOperand)
 
-// ErrOperandArray: the operand is a slice or array under an operator that
-// takes a single value. Only [FilterBetween] and [FilterBetweenInclusive]
+// ErrOperandArray: the operand is a slice or array of an unnamed type under
+// an operator that takes a single value. Only [FilterBetween] and [FilterBetweenInclusive]
 // take an array, the [low, high] pair.
 var ErrOperandArray = fmt.Errorf("%w: an array, and the operator takes a single value", ErrInvalidOperand)
 
-// ErrOperandNotScalar: the operand is not nil, a map, a slice or an array,
-// and not in the accepted scalar set either — a pointer (nil or not), a
-// struct (time.Time included), a func, a channel, a complex number, or a
-// named string or bool type. It is refused under every operator. See
-// [ValidateOperand] for the accepted set.
+// ErrOperandNotScalar: the operand is not nil, an unnamed map, slice or
+// array, and not in the accepted scalar set either — a pointer (nil or not),
+// a struct (time.Time included), a func, a channel, a complex number, a
+// uintptr, or any named type other than json.Number, whatever its kind. It
+// is refused under every operator. See [ValidateOperand] for the accepted
+// set.
 var ErrOperandNotScalar = fmt.Errorf("%w: not a scalar", ErrInvalidOperand)
 
 // ErrBetweenBounds is wrapped by every refusal of a [FilterBetween] /

@@ -128,8 +128,9 @@ import (
 // Every leaf's operand passes through [ValidateOperand] before a Filter is
 // built from it, at any depth. A missing or null operand under an operator
 // that takes one, an object operand, an array operand outside BETWEEN /
-// BETWEEN_INCLUSIVE, and a range operand that is not exactly two non-null
-// scalar bounds all fail with an error wrapping [ErrInvalidOperand]. Callers
+// BETWEEN_INCLUSIVE, any other operand outside the accepted scalar set, and a
+// range operand that is not exactly two scalar bounds all fail with an error
+// wrapping [ErrInvalidOperand]. Callers
 // should map that to a client error (400 INVALID_CONDITION), as for
 // [ErrUnknownOperator]. Each would otherwise evaluate to a wrong answer, not
 // an error: a null operand compares as the empty string, so CONTAINS matches

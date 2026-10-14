@@ -322,40 +322,88 @@ func TestConditionToFilter_OperandRefusalSpeaksWireNames(t *testing.T) {
 	}
 }
 
-// TestValidateOperand_GoContainerTypes pins that a directly built operand of a
-// Go container type no JSON decode produces is refused like its JSON
-// counterpart, rather than compared as its printed form.
-func TestValidateOperand_GoContainerTypes(t *testing.T) {
+type (
+	namedInt   int
+	namedUint  uint16
+	namedFloat float64
+	namedStr   string
+	namedBool  bool
+)
+
+// TestValidateOperand_AcceptedTypes pins that ValidateOperand accepts a
+// closed set of operand types — string, bool, json.Number, time.Time and
+// every int, uint and float kind — and refuses every other Go value, rather
+// than letting it be compared as its printed form. Maps are objects, slices
+// and arrays are arrays, and everything else is not a scalar.
+func TestValidateOperand_AcceptedTypes(t *testing.T) {
 	var nilStr *string
 	var nilMap map[string]string
+	s := "x"
+	ts := time.Unix(0, 0)
 	cases := []struct {
 		name  string
 		op    spi.FilterOp
 		value any
 		want  error // nil means accepted
 	}{
+		// Accepted scalars.
+		{"string", spi.FilterEq, "x", nil},
+		{"bool", spi.FilterEq, true, nil},
+		{"json.Number", spi.FilterGt, json.Number("1.5"), nil},
+		{"time.Time", spi.FilterEq, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), nil},
+		{"int", spi.FilterEq, 7, nil},
+		{"int8", spi.FilterEq, int8(7), nil},
+		{"int64", spi.FilterEq, int64(7), nil},
+		{"uint", spi.FilterEq, uint(7), nil},
+		{"uint8", spi.FilterEq, uint8(7), nil},
+		{"uint64", spi.FilterEq, uint64(7), nil},
+		{"float32", spi.FilterLt, float32(1.5), nil},
+		{"float64", spi.FilterLt, 1.5, nil},
+		{"named int", spi.FilterEq, namedInt(7), nil},
+		{"named uint", spi.FilterEq, namedUint(7), nil},
+		{"named float", spi.FilterEq, namedFloat(1.5), nil},
+		{"scalar under IS_NULL", spi.FilterIsNull, "x", nil},
+		{"BETWEEN time.Time pair", spi.FilterBetween, []any{time.Unix(0, 0), time.Unix(1, 0)}, nil},
+		{"BETWEEN named-int pair", spi.FilterBetweenInclusive, []any{namedInt(1), uint8(2)}, nil},
+
+		// Maps are objects, slices and arrays are arrays.
 		{"[]string", spi.FilterEq, []string{"a"}, spi.ErrOperandArray},
 		{"[]int", spi.FilterContains, []int{1}, spi.ErrOperandArray},
 		{"[2]any", spi.FilterEq, [2]any{"a", "b"}, spi.ErrOperandArray},
+		{"[]byte", spi.FilterEq, []byte("a"), spi.ErrOperandArray},
 		{"map[string]string", spi.FilterEq, map[string]string{}, spi.ErrOperandObject},
 		{"nil map[string]string", spi.FilterEq, nilMap, spi.ErrOperandObject},
 		{"map[int]any", spi.FilterIsNull, map[int]any{}, spi.ErrOperandObject},
-		{"nil *string", spi.FilterEq, nilStr, spi.ErrOperandMissing},
-		{"nil *string IS_NULL", spi.FilterIsNull, nilStr, nil},
 		{"[]string under IS_NULL", spi.FilterNotNull, []string{}, spi.ErrOperandArray},
+
+		// Everything else is not a scalar, under every operator.
+		{"nil *string", spi.FilterEq, nilStr, spi.ErrOperandNotScalar},
+		{"nil *string IS_NULL", spi.FilterIsNull, nilStr, spi.ErrOperandNotScalar},
+		{"*string", spi.FilterEq, &s, spi.ErrOperandNotScalar},
+		{"*time.Time", spi.FilterEq, &ts, spi.ErrOperandNotScalar},
+		{"struct", spi.FilterEq, struct{ A int }{1}, spi.ErrOperandNotScalar},
+		{"func", spi.FilterEq, func() {}, spi.ErrOperandNotScalar},
+		{"chan", spi.FilterNotNull, make(chan int), spi.ErrOperandNotScalar},
+		{"complex128", spi.FilterEq, complex(1, 2), spi.ErrOperandNotScalar},
+		{"uintptr", spi.FilterEq, uintptr(1), spi.ErrOperandNotScalar},
+		{"named string", spi.FilterEq, namedStr("x"), spi.ErrOperandNotScalar},
+		{"named bool", spi.FilterEq, namedBool(true), spi.ErrOperandNotScalar},
+
+		// Under a range operator: the shared refusals first, then the pair.
 		{"BETWEEN []string pair", spi.FilterBetween, []string{"a", "b"}, spi.ErrBetweenNotArray},
 		{"BETWEEN [2]any pair", spi.FilterBetweenInclusive, [2]any{"a", "b"}, spi.ErrBetweenNotArray},
 		{"BETWEEN map[string]string", spi.FilterBetween, map[string]string{}, spi.ErrOperandObject},
-		{"BETWEEN nil *string", spi.FilterBetween, nilStr, spi.ErrOperandMissing},
-		{"BETWEEN typed-nil bound", spi.FilterBetween, []any{nilStr, "z"}, spi.ErrBetweenNullBound},
+		{"BETWEEN nil *string", spi.FilterBetween, nilStr, spi.ErrOperandNotScalar},
+		{"BETWEEN struct", spi.FilterBetween, struct{}{}, spi.ErrOperandNotScalar},
+		{"BETWEEN typed-nil bound", spi.FilterBetween, []any{nilStr, "z"}, spi.ErrBetweenNonScalarBound},
+		{"BETWEEN pointer bound", spi.FilterBetween, []any{"a", &s}, spi.ErrBetweenNonScalarBound},
+		{"BETWEEN struct bound", spi.FilterBetween, []any{struct{}{}, "z"}, spi.ErrBetweenNonScalarBound},
+		{"BETWEEN named-string bound", spi.FilterBetween, []any{"a", namedStr("z")}, spi.ErrBetweenNonScalarBound},
 		{"BETWEEN []string bound", spi.FilterBetween, []any{"a", []string{"z"}}, spi.ErrBetweenNonScalarBound},
 		{"BETWEEN map[string]string bound", spi.FilterBetween, []any{map[string]string{}, "z"}, spi.ErrBetweenNonScalarBound},
-		{"time.Time", spi.FilterEq, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), nil},
-		{"json.Number", spi.FilterGt, json.Number("1.5"), nil},
-		{"int64", spi.FilterEq, int64(7), nil},
-		{"uint8", spi.FilterEq, uint8(7), nil},
-		{"float32", spi.FilterLt, float32(1.5), nil},
-		{"BETWEEN time.Time pair", spi.FilterBetween, []any{time.Unix(0, 0), time.Unix(1, 0)}, nil},
+	}
+	if !errors.Is(spi.ErrOperandNotScalar, spi.ErrInvalidOperand) || errors.Is(spi.ErrOperandNotScalar, spi.ErrBetweenBounds) {
+		t.Errorf("ErrOperandNotScalar must wrap ErrInvalidOperand and not ErrBetweenBounds")
 	}
 	for _, tc := range cases {
 		err := spi.ValidateOperand(tc.op, tc.value)
@@ -367,6 +415,54 @@ func TestValidateOperand_GoContainerTypes(t *testing.T) {
 		}
 		if !errors.Is(err, tc.want) {
 			t.Errorf("%s: got %v, want %v", tc.name, err, tc.want)
+		}
+	}
+}
+
+// TestValidateOperand_DecodedJSONKeepsItsClass pins that the accepted set
+// covers every value a JSON decode produces, with and without UseNumber:
+// scalars accepted, null missing, an object an object, an array an array
+// (and a range pair under BETWEEN). Protobuf structpb decoding yields the
+// same Go types as plain Unmarshal (float64, string, bool, nil, []any,
+// map[string]any).
+func TestValidateOperand_DecodedJSONKeepsItsClass(t *testing.T) {
+	const doc = `{"null":null,"bool":true,"string":"s","int":1,"float":1.5,"big":12345678901234567890,"exp":-2e300,"object":{"a":1},"array":[1,"z"]}`
+	decoders := map[string]func() (map[string]any, error){
+		"Unmarshal": func() (map[string]any, error) {
+			var m map[string]any
+			return m, json.Unmarshal([]byte(doc), &m)
+		},
+		"UseNumber": func() (map[string]any, error) {
+			var m map[string]any
+			dec := json.NewDecoder(strings.NewReader(doc))
+			dec.UseNumber()
+			return m, dec.Decode(&m)
+		},
+	}
+	for name, decode := range decoders {
+		m, err := decode()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		for _, k := range []string{"bool", "string", "int", "float", "big", "exp"} {
+			if err := spi.ValidateOperand(spi.FilterEq, m[k]); err != nil {
+				t.Errorf("%s %s (%T): got %v, want accepted", name, k, m[k], err)
+			}
+		}
+		if err := spi.ValidateOperand(spi.FilterEq, m["null"]); !errors.Is(err, spi.ErrOperandMissing) {
+			t.Errorf("%s null: got %v, want ErrOperandMissing", name, err)
+		}
+		if err := spi.ValidateOperand(spi.FilterIsNull, m["null"]); err != nil {
+			t.Errorf("%s null under IS_NULL: got %v, want accepted", name, err)
+		}
+		if err := spi.ValidateOperand(spi.FilterEq, m["object"]); !errors.Is(err, spi.ErrOperandObject) {
+			t.Errorf("%s object: got %v, want ErrOperandObject", name, err)
+		}
+		if err := spi.ValidateOperand(spi.FilterEq, m["array"]); !errors.Is(err, spi.ErrOperandArray) {
+			t.Errorf("%s array: got %v, want ErrOperandArray", name, err)
+		}
+		if err := spi.ValidateOperand(spi.FilterBetween, m["array"]); err != nil {
+			t.Errorf("%s array under BETWEEN: got %v, want accepted", name, err)
 		}
 	}
 }

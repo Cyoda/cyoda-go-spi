@@ -1,8 +1,10 @@
 package spi
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
+	"time"
 )
 
 // ValidateOperand reports whether value is an operand the leaf operator op
@@ -12,9 +14,15 @@ import (
 // caller that validates conditions at its own boundary calls it to refuse the
 // same set, and maps the sentinels to its own wording.
 //
+// It accepts a closed set and refuses everything else. A scalar operand is
+// one of: string, bool, json.Number, time.Time, or a value of any int, uint
+// (uintptr excluded) or float kind, named numeric types included. JSON
+// decoding, with or without UseNumber, and protobuf structpb decoding produce
+// only these, nil, []any and map[string]any.
+//
 // The rules, checked in this order:
 //
-//   - A missing operand — nil, or a nil pointer — is refused with
+//   - nil (a missing or JSON-null operand) is refused with
 //     [ErrOperandMissing] for every operator except [FilterIsNull] and
 //     [FilterNotNull], which take no operand. Accepting it would compare it
 //     as the empty string: EQUALS would match "", and CONTAINS or
@@ -24,15 +32,17 @@ import (
 //     NOT_NULL included.
 //   - A slice or array of any type is refused with [ErrOperandArray] for
 //     every operator except [FilterBetween] and [FilterBetweenInclusive].
+//   - Any other value outside the scalar set — a pointer (nil or not), a
+//     struct other than time.Time, a func, a channel, a complex number, a
+//     named string or bool type — is refused with [ErrOperandNotScalar] for
+//     every operator.
 //   - Under FilterBetween and FilterBetweenInclusive the operand must be a
-//     []any (a decoded JSON array) of exactly two bounds, each neither
-//     missing, a map, a slice nor an array; otherwise it is refused with an
-//     error wrapping [ErrBetweenBounds].
+//     []any (a decoded JSON array) of exactly two bounds, each a scalar;
+//     otherwise it is refused with an error wrapping [ErrBetweenBounds].
 //
-// Every other value is a scalar and is accepted: a string, a bool, any
-// numeric kind, json.Number, time.Time. A scalar under IS_NULL
-// or NOT_NULL is accepted and ignored. The tree operators (and, or, not)
-// carry no operand and are not leaves; do not call this for them.
+// A scalar under IS_NULL or NOT_NULL is accepted and ignored. The tree
+// operators (and, or, not) carry no operand and are not leaves; do not call
+// this for them.
 //
 // Every refusal wraps [ErrInvalidOperand]. The error does not name op or the
 // leaf: the caller does, in its own vocabulary. The operand itself is not
@@ -47,6 +57,8 @@ func ValidateOperand(op FilterOp, value any) error {
 		return ErrOperandMissing
 	case shapeObject:
 		return ErrOperandObject
+	case shapeOther:
+		return ErrOperandNotScalar
 	case shapeArray:
 		if !isRange {
 			return ErrOperandArray
@@ -60,9 +72,10 @@ func ValidateOperand(op FilterOp, value any) error {
 		}
 		for _, b := range pair {
 			switch operandShapeOf(b) {
+			case shapeScalar:
 			case shapeMissing:
 				return ErrBetweenNullBound
-			case shapeObject, shapeArray:
+			default:
 				return ErrBetweenNonScalarBound
 			}
 		}
@@ -78,30 +91,33 @@ func ValidateOperand(op FilterOp, value any) error {
 type operandShape int
 
 const (
-	shapeScalar operandShape = iota
-	shapeMissing
-	shapeObject
-	shapeArray
+	shapeScalar  operandShape = iota // in the accepted scalar set
+	shapeMissing                     // nil
+	shapeObject                      // a map of any type
+	shapeArray                       // a slice or array of any type
+	shapeOther                       // anything else
 )
 
-// operandShapeOf classifies v by its reflect kind, so a Go container type
-// that no JSON decode produces ([]string, map[string]string) is classed with
-// its JSON counterpart rather than as a scalar, which would compare as its
+// operandShapeOf classifies v. The scalar set is named, not inferred: a value
+// is a scalar only if it is one of the accepted types or numeric kinds, so a
+// Go type the rule does not know is refused rather than compared as its
 // printed form.
 func operandShapeOf(v any) operandShape {
-	if v == nil {
+	switch v.(type) {
+	case nil:
 		return shapeMissing
+	case string, bool, json.Number, time.Time:
+		return shapeScalar
 	}
-	rv := reflect.ValueOf(v)
-	switch rv.Kind() {
-	case reflect.Pointer:
-		if rv.IsNil() {
-			return shapeMissing
-		}
+	switch reflect.ValueOf(v).Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return shapeScalar
 	case reflect.Map:
 		return shapeObject
 	case reflect.Slice, reflect.Array:
 		return shapeArray
 	}
-	return shapeScalar
+	return shapeOther
 }

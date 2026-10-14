@@ -168,8 +168,8 @@ type Filter struct {
 	// leaf (FilterBetween, FilterBetweenInclusive), which is read from Values
 	// alone. [Prepare] refuses a leaf whose operand [ValidateOperand]
 	// refuses: a missing operand where the operator takes one, an object, an
-	// array outside a range leaf, or a range pair that is not two non-null
-	// scalars.
+	// array outside a range leaf, any other value outside the accepted scalar
+	// set, or a range pair that is not two scalars.
 	Value  any
 	Values []any
 

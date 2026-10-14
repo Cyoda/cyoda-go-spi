@@ -47,8 +47,13 @@ func metaGjsonResult(path string, meta EntityMeta) (gjson.Result, bool) {
 
 // OperandString normalizes a filter operand to its Cloud .asText() string form,
 // the shape ExpandLeaf parses. A json.Number keeps its exact lexical form; a
-// nil operand becomes the empty string (a genuinely-null binary operand was
-// rejected at the search boundary).
+// nil operand becomes the empty string.
+//
+// The string form cannot tell a missing operand from an empty one, nor an
+// object from text that prints the same. Check the raw operand with
+// [ValidateOperand] before stringifying it, as [Prepare] does. The nil case
+// is reached by IS_NULL and NOT_NULL leaves, which take no operand and ignore
+// the result.
 func OperandString(v any) string {
 	switch x := v.(type) {
 	case nil:

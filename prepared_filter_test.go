@@ -82,9 +82,8 @@ func TestPrepare_AcceptsMatchAllAndOrdinaryLeaves(t *testing.T) {
 }
 
 // TestPrepare_ZeroValueAsymmetry pins spec §3's table: a zero-Op filter is
-// match-all at the ROOT only. A zero-Op CHILD is an unevaluable leaf —
-// ExpandLeaf hits its default arm ("unsupported leaf operator"), and Prepare
-// now rejects the whole request (ErrUnevaluableLeaf) rather than silently
+// match-all at the ROOT only. A zero-Op CHILD is an unevaluable leaf, and
+// Prepare rejects the whole request (ErrUnevaluableLeaf) rather than silently
 // building a leaf that is false for every row. Hoisting the root's Op == ""
 // check into the recursion would instead turn a zero-Op child into an
 // identity element, which is the mistake this test guards against — a

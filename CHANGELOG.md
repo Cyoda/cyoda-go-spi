@@ -14,6 +14,26 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **A leaf operand no comparison can use is refused, not evaluated.** New
+  `ValidateOperand(op FilterOp, value any) error` is the one operand-shape
+  rule: a missing or null operand is refused for every operator except
+  `IS_NULL` and `NOT_NULL`; an object for every operator; an array for every
+  operator except `BETWEEN` and `BETWEEN_INCLUSIVE`; and a range operand must
+  be exactly two non-null scalar bounds. `ConditionToFilter` applies it to
+  every simple and lifecycle leaf at any depth, and `Prepare` to every leaf
+  (on `Values` for a range leaf, on `Value` otherwise), wrapping
+  `ErrUnevaluableLeaf`. Before, a null operand compared as the empty string,
+  so `CONTAINS` with no value matched every string and a conditional delete
+  removed every entity holding one; a malformed range pair translated to a
+  filter with nil `Values`. New sentinels: `ErrInvalidOperand` (wrapped by
+  all), `ErrOperandMissing`, `ErrOperandObject`, `ErrOperandArray`, and
+  `ErrBetweenBounds`, which `ErrBetweenNotArray`, `ErrBetweenCount`,
+  `ErrBetweenNullBound` and `ErrBetweenNonScalarBound` wrap. Migration: map
+  `ErrInvalidOperand` from `ConditionToFilter` to a client error (400); a
+  caller that built a `Filter` with a nil `Value` under a binary operator, or
+  a range leaf with its pair in `Value` only, must supply the operand (the
+  pair in `Values`). A caller that calls `ExpandLeaf` directly must check the
+  raw operand with `ValidateOperand` before stringifying it.
 - **`predicate.ArrayCondition` carries `OperatorType`, applied at every tested
   position.** The parser reads `operatorType` (aliases `operator`,
   `operation`); `MarshalJSON` writes it. `DesugarCondition` now returns

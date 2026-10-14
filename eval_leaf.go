@@ -157,10 +157,12 @@ func truncateOperand(s string) string {
 //   - a range op whose values is not exactly length 2 → arity error;
 //   - a compare op whose operand parses into NO declared type → type-mismatch.
 //
-// Note on shape errors the string inputs cannot express — a JSON-null operand on
-// a binary/range op, or an object/array operand where a scalar is required — are
-// detected by the caller, which holds the raw JSON value, before it reaches this
-// string-typed boundary (entity-search.md §8).
+// The string inputs cannot express a shape error: a missing or null operand
+// arrives as "", the same as an empty-string operand, and an object or array
+// as its printed form. ExpandLeaf therefore cannot refuse them, and a caller
+// must check the raw operand with [ValidateOperand] before stringifying it.
+// [Prepare] and [ConditionToFilter] do; a caller that calls ExpandLeaf
+// directly owns that check.
 //
 // Kernel contract on declared: the caller is expected to pass AT MOST ONE
 // numeric DataType in declared — cyoda-go's TypeSet collapses the numeric

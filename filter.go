@@ -162,9 +162,17 @@ type Filter struct {
 	// ErrUnevaluableLeaf, ahead of any backend-specific validation.
 	Path string
 
-	Source   FieldSource
-	Value    any
-	Values   []any
+	Source FieldSource
+
+	// Value is a leaf's operand; Values is the [low, high] pair of a range
+	// leaf (FilterBetween, FilterBetweenInclusive), which is read from Values
+	// alone. [Prepare] refuses a leaf whose operand [ValidateOperand]
+	// refuses: a missing operand where the operator takes one, an object, an
+	// array outside a range leaf, or a range pair that is not two non-null
+	// scalars.
+	Value  any
+	Values []any
+
 	Children []Filter
 	Coercion FilterCoercion // temporal comparison routing (zero = CoerceNone)
 	// Declared holds the leaf field's declared model DataTypes, stamped by the

@@ -14,6 +14,13 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **`ExecutionResult` keeps only `State`.** `Success`, `StopReason` and
+  `Error` are removed: the engine never read them, and a run that cannot
+  complete returns an error rather than a result. Migration: delete any write
+  of those fields; read the stop reason from the state-machine FINISH audit
+  event instead. The doc comment on `ProcessorDefinition.Type` now states the
+  contract: import accepts only `"externalized"`, and an omitted or empty
+  type is stored as `"externalized"`.
 - **A leaf operand no comparison can use is refused, not evaluated.** New
   `ValidateOperand(op FilterOp, value any) error` is the one operand-shape
   rule. It accepts a closed set of scalar types — `string`, `bool`,

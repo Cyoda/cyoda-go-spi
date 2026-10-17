@@ -218,15 +218,10 @@ type TransitionDefinition struct {
 
 // ProcessorDefinition represents a processor attached to a transition.
 type ProcessorDefinition struct {
-	// Type is the execution-location axis. Recognised values are defined
-	// by the cyoda-go engine package; canonical values are "externalized"
-	// (dispatched via gRPC to a calculation node selected by
-	// Config.CalculationNodesTags) and "internalized" (reserved for an
-	// in-process execution location, currently rejected at engine
-	// dispatch as not yet implemented). Empty is treated as "externalized".
-	// Any value other than "internalized" falls through to the
-	// ExecutionMode dispatch path; import-time validation does not
-	// constrain this field.
+	// Type is the execution-location axis. Import accepts only
+	// "externalized" (dispatched via gRPC to a calculation node selected by
+	// Config.CalculationNodesTags); any other value is refused. An omitted or
+	// empty type is stored as "externalized".
 	Type          string          `json:"type"`
 	Name          string          `json:"name"`
 	ExecutionMode string          `json:"executionMode,omitempty"`
@@ -602,10 +597,9 @@ type StateMachineEvent struct {
 	Executor   Principal `json:"executor,omitzero"`
 }
 
-// ExecutionResult holds the outcome of a workflow engine execution.
+// ExecutionResult holds the outcome of a workflow engine execution: the
+// entity's state when the run settled. A run that cannot complete returns an
+// error rather than a result, so no success flag or error field is carried.
 type ExecutionResult struct {
-	State      string
-	Success    bool
-	StopReason string
-	Error      error
+	State string
 }

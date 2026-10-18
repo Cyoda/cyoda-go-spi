@@ -14,6 +14,25 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **Go 1.27.2 is required** (`go` directive `1.26.1` → `1.27.2`), for
+  `encoding/json/v2`. A consumer raises its own `go` directive with the bump.
+- **A condition's member names are exact.** `predicate.ParseCondition`
+  decodes with the new `strictjson` package: each condition form declares
+  its members (`type` included), and a member name that differs from one of
+  them only in case, a duplicate name and an unknown name are each refused.
+  Before, `encoding/json` read `"JsonPath"` as `jsonPath` (it matched names
+  ignoring case and Unicode folding), let a duplicate replace the first
+  value, and ignored any other member, so one condition could mean two
+  things to two readers. Writing the operator twice (two of `operatorType`,
+  `operator` and `operation`) is refused the same way; before, the first
+  one present won. A condition with no `type` member is refused as such. A
+  function condition declares `type` and `function`, and `function`
+  declares `name`, `config` and `criterion`; `config` is kept in `Raw`
+  unread, for the caller. A refusal of a member name is a
+  `*strictjson.Error` that names its location from the top of the condition
+  (`invalid JSON at "/conditions/1": unknown member name "OperatorType"`).
+  Migration: send the members as the spec spells them, once.
+
 - **`ExecutionResult` keeps only `State`.** `Success`, `StopReason` and
   `Error` are removed: the engine never read them, and a run that cannot
   complete returns an error rather than a result. Migration: delete any write
@@ -166,6 +185,19 @@ MAINTAINING.md.
   `ClearResults/TenantScoped`.
 
 ### Added
+
+- **`strictjson`: one decoder for a client's typed JSON.** `Decode(data,
+  dst, opts...)` is `encoding/json/v2` with unknown members refused: a name
+  matches a field exactly, a duplicate is refused, and nothing may follow
+  the value. Its `*Error` names the JSON location (a JSON Pointer, or a byte
+  offset for text that is not JSON) and never a Go type, so it can go into a
+  400 detail as it is; `Under` places an error under a member's location for
+  a parser that decodes that member on its own. Options: `PreserveNumbers`
+  (a number held in an `any`, at any depth, is a `json.Number` with its
+  literal) and `AllowUnknownMembers` (for a probe or an open shape; names
+  are still exact and duplicates still refused). A type that decodes itself
+  from an `UnmarshalJSON` method through `Decode` reports errors with the
+  path from the top-level value.
 
 - **`predicate.FunctionCondition` keeps its JSON and its pre-check.** `Raw`
   is the function condition's JSON as the parser received it (a copy), and

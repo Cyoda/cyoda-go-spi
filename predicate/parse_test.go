@@ -151,7 +151,7 @@ func TestParseArrayConditionWithNulls(t *testing.T) {
 }
 
 func TestParseFunctionCondition(t *testing.T) {
-	body := []byte(`{"type": "function", "name": "myFunc", "args": [1, 2]}`)
+	body := []byte(`{"type": "function", "function": {"name": "myFunc"}}`)
 	cond, err := predicate.ParseCondition(body)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -403,5 +403,91 @@ func TestParseFunctionCondition_DepthCountsThroughPreCheck(t *testing.T) {
 	_, err := predicate.ParseCondition([]byte(nest(50)))
 	if err == nil || !strings.Contains(err.Error(), "maximum depth") {
 		t.Fatalf("leaf one level below the maximum: err = %v, want the depth error", err)
+	}
+}
+
+// TestParseCondition_MemberNamesAreExact: a condition is typed client JSON.
+// A member name spells a member of its condition form exactly, once; a case
+// variant, a duplicate and an unknown name are refused, and the error names
+// where. encoding/json (v1) read "JsonPath" as jsonPath and let a duplicate
+// replace the first value, so one condition could mean two things.
+func TestParseCondition_MemberNamesAreExact(t *testing.T) {
+	for name, tc := range map[string]struct{ body, want string }{
+		"simple: case variant": {
+			`{"type":"simple","JsonPath":"$.a","operatorType":"EQUALS","value":1}`,
+			`invalid JSON at "": unknown member name "JsonPath"`},
+		"simple: unknown": {
+			`{"type":"simple","jsonPath":"$.a","operatorType":"EQUALS","value":1,"negate":true}`,
+			`invalid JSON at "": unknown member name "negate"`},
+		"simple: duplicate": {
+			`{"type":"simple","jsonPath":"$.a","jsonPath":"$.b","operatorType":"EQUALS","value":1}`,
+			`invalid JSON at "": duplicate member name "jsonPath"`},
+		"type: case variant": {
+			`{"Type":"simple","jsonPath":"$.a","operatorType":"EQUALS","value":1}`,
+			`the condition has no "type" member`},
+		"type: duplicate": {
+			`{"type":"simple","type":"group","jsonPath":"$.a","operatorType":"EQUALS","value":1}`,
+			`invalid JSON at "": duplicate member name "type"`},
+		"lifecycle: unknown": {
+			`{"type":"lifecycle","field":"state","operatorType":"EQUALS","value":"A","jsonPath":"$.a"}`,
+			`invalid JSON at "": unknown member name "jsonPath"`},
+		"array: case variant": {
+			`{"type":"array","jsonPath":"$.a[*]","operatorType":"EQUALS","Values":[1]}`,
+			`invalid JSON at "": unknown member name "Values"`},
+		"group: unknown": {
+			`{"type":"group","operator":"AND","conditions":[],"operatorType":"OR"}`,
+			`invalid JSON at "": unknown member name "operatorType"`},
+		"group member: case variant": {
+			`{"type":"group","operator":"AND","conditions":[{"type":"simple","jsonPath":"$.a","operatorType":"EQUALS","value":1},{"type":"simple","jsonPath":"$.a","OperatorType":"EQUALS","value":1}]}`,
+			`invalid JSON at "/conditions/1": unknown member name "OperatorType"`},
+		"function: unknown": {
+			`{"type":"function","function":{"name":"f","timeout":5}}`,
+			`invalid JSON at "/function": unknown member name "timeout"`},
+		"function: case variant": {
+			`{"type":"function","Function":{"name":"f"}}`,
+			`invalid JSON at "": unknown member name "Function"`},
+		"pre-check: unknown": {
+			`{"type":"function","function":{"name":"f","criterion":{"type":"group","operator":"AND","conditions":[{"type":"lifecycle","field":"state","operatorType":"EQUALS","value":"A","x":1}]}}}`,
+			`invalid JSON at "/function/criterion/conditions/0": unknown member name "x"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := predicate.ParseCondition([]byte(tc.body))
+			if err == nil {
+				t.Fatalf("accepted %s", tc.body)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error\n got: %s\nwant it to contain: %s", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseCondition_OneOperatorSpelling: operatorType, operator and
+// operation are three spellings of one member, so a leaf that writes two of
+// them names its operator twice and is refused, as a duplicate is. Before,
+// the first spelling present won without a word.
+func TestParseCondition_OneOperatorSpelling(t *testing.T) {
+	for _, body := range []string{
+		`{"type":"simple","jsonPath":"$.a","operatorType":"EQUALS","operation":"NOT_EQUAL","value":1}`,
+		`{"type":"lifecycle","field":"state","operator":"EQUALS","operatorType":"EQUALS","value":"A"}`,
+		`{"type":"array","jsonPath":"$.a[*]","operator":"EQUALS","operation":"EQUALS","values":[1]}`,
+	} {
+		_, err := predicate.ParseCondition([]byte(body))
+		if err == nil || !strings.Contains(err.Error(), "operator") {
+			t.Errorf("%s: err = %v, want a refusal naming the operator", body, err)
+		}
+	}
+}
+
+// TestParseFunctionCondition_ConfigIsTheCallersShape: the SPI does not know
+// a function's config; it keeps it in Raw for the caller, who checks it.
+func TestParseFunctionCondition_ConfigIsTheCallersShape(t *testing.T) {
+	body := `{"type":"function","function":{"name":"f","config":{"anything":1}}}`
+	cond, err := predicate.ParseCondition([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(cond.(*predicate.FunctionCondition).Raw) != body {
+		t.Errorf("Raw = %s", cond.(*predicate.FunctionCondition).Raw)
 	}
 }

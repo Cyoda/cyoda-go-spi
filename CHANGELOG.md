@@ -14,6 +14,14 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **`StartNewTxOnDispatch` moves from `ProcessorConfig` to
+  `ProcessorDefinition`**, beside `ExecutionMode`, which it qualifies. It is
+  written as `startNewTxOnDispatch` on the processor object, where cyoda-go's
+  published workflow contract has always placed it; the `config` placement was
+  the implementation's alone. Migration: read and write
+  `def.StartNewTxOnDispatch` instead of `def.Config.StartNewTxOnDispatch`; a
+  stored workflow carrying it inside `config` reads as unset.
+
 - **Go 1.27.2 is required** (`go` directive `1.26.1` → `1.27.2`), for
   `encoding/json/v2`. A consumer raises its own `go` directive with the bump.
 - **A condition's member names are exact.** `predicate.ParseCondition`
@@ -192,7 +200,8 @@ MAINTAINING.md.
   the value. Its `*Error` names the JSON location (a JSON Pointer, or a byte
   offset for text that is not JSON) and never a Go type, so it can go into a
   400 detail as it is; `Under` places an error under a member's location for
-  a parser that decodes that member on its own, and `Class` names the kind
+  a parser that decodes that member on its own (`Within(err, at)` does the
+  same for any error, passing a non-strictjson one through), and `Class` names the kind
   of refusal (`not JSON`, `unknown member`, `duplicate member`, `wrong kind
   of value`, `invalid value`) without the client's text, for a log line. A
   date-time, base64 bytes and a text-encoded value are described as what the

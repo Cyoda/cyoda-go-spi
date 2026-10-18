@@ -3,6 +3,7 @@ package strictjson_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/netip"
 	"testing"
 	"time"
@@ -257,6 +258,24 @@ func TestError_Under(t *testing.T) {
 	syntax := strictjson.Decode([]byte(`{`), &b).(*strictjson.Error)
 	if got, want := syntax.Under("/conditions/1").Error(), `invalid JSON at "/conditions/1": unexpected EOF`; got != want {
 		t.Errorf("got %s\nwant %s", got, want)
+	}
+}
+
+// TestWithin: a caller that decoded a member's JSON on its own (a condition
+// inside a request) places a refusal under the member's location; any other
+// error passes through unchanged.
+func TestWithin(t *testing.T) {
+	var b struct{}
+	err := strictjson.Decode([]byte(`{"x":1}`), &b)
+	if got, want := strictjson.Within(err, "/condition").Error(), `invalid JSON at "/condition": unknown member name "x"`; got != want {
+		t.Errorf("got %s\nwant %s", got, want)
+	}
+	other := errors.New("unknown condition type")
+	if got := strictjson.Within(fmt.Errorf("wrapped: %w", other), "/condition"); !errors.Is(got, other) {
+		t.Errorf("a non-strictjson error was replaced: %v", got)
+	}
+	if strictjson.Within(nil, "/condition") != nil {
+		t.Error("Within(nil) is not nil")
 	}
 }
 

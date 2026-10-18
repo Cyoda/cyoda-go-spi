@@ -222,10 +222,17 @@ type ProcessorDefinition struct {
 	// "externalized" (dispatched via gRPC to a calculation node selected by
 	// Config.CalculationNodesTags); any other value is refused. An omitted or
 	// empty type is stored as "externalized".
-	Type          string          `json:"type"`
-	Name          string          `json:"name"`
-	ExecutionMode string          `json:"executionMode,omitempty"`
-	Config        ProcessorConfig `json:"config,omitempty"`
+	Type          string `json:"type"`
+	Name          string `json:"name"`
+	ExecutionMode string `json:"executionMode,omitempty"`
+	// StartNewTxOnDispatch, when true and ExecutionMode is COMMIT_BEFORE_DISPATCH,
+	// causes the cascade engine to open a fresh transaction before dispatching
+	// the processor (so the processor may perform transactional work via that
+	// tx's token). When false (default) the processor runs with no transaction
+	// context and the connection is released entirely during dispatch.
+	// Ignored for any other ExecutionMode.
+	StartNewTxOnDispatch *bool           `json:"startNewTxOnDispatch,omitempty"`
+	Config               ProcessorConfig `json:"config,omitempty"`
 	// Annotations is arbitrary client-owned metadata, stored and
 	// round-tripped verbatim and never interpreted by the engine.
 	// Well-known renderer keys (displayName, description) are a documented
@@ -249,13 +256,6 @@ type ProcessorConfig struct {
 	// declaration on trust and cannot verify it.
 	Idempotent bool   `json:"idempotent,omitempty"`
 	Context    string `json:"context,omitempty"`
-	// StartNewTxOnDispatch, when true and ExecutionMode is COMMIT_BEFORE_DISPATCH,
-	// causes the cascade engine to open a fresh transaction before dispatching
-	// the processor (so the processor may perform transactional work via that
-	// tx's token). When false (default) the processor runs with no transaction
-	// context and the connection is released entirely during dispatch.
-	// Ignored for any other ExecutionMode.
-	StartNewTxOnDispatch *bool `json:"startNewTxOnDispatch,omitempty"`
 
 	// AsyncResult, when true, requests that the cascade engine suspend
 	// the transaction at processor dispatch and resume only when the

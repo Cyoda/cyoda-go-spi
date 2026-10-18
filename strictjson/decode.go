@@ -103,6 +103,17 @@ func (e *Error) Under(at string) *Error {
 	return &Error{at: jsontext.Pointer(at) + e.at, class: e.class, reason: e.reason}
 }
 
+// Within places err under the JSON Pointer at when it is, or wraps, an
+// *Error — for a caller that decoded the value at that location on its own —
+// and returns any other error as it is.
+func Within(err error, at string) error {
+	var e *Error
+	if errors.As(err, &e) {
+		return e.Under(at)
+	}
+	return err
+}
+
 func describe(err error) *Error {
 	var syn *jsontext.SyntacticError
 	if errors.As(err, &syn) {

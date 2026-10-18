@@ -34,17 +34,27 @@ func TestValidateChangeLevel(t *testing.T) {
 	}
 }
 
-func TestProcessorConfig_StartNewTxOnDispatch_RoundTrips(t *testing.T) {
+// startNewTxOnDispatch qualifies the execution mode, so it sits beside
+// executionMode on the processor, as the published contract places it — not
+// in config.
+func TestProcessorDefinition_StartNewTxOnDispatch_RoundTrips(t *testing.T) {
 	tt := true
-	cfg := ProcessorConfig{StartNewTxOnDispatch: &tt}
-	bs, err := json.Marshal(cfg)
+	def := ProcessorDefinition{Type: "externalized", Name: "p", ExecutionMode: "COMMIT_BEFORE_DISPATCH", StartNewTxOnDispatch: &tt}
+	bs, err := json.Marshal(def)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(bs), `"startNewTxOnDispatch":true`) {
-		t.Errorf("missing field in marshalled JSON: %s", bs)
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(bs, &top); err != nil {
+		t.Fatal(err)
 	}
-	var back ProcessorConfig
+	if string(top["startNewTxOnDispatch"]) != "true" {
+		t.Errorf("startNewTxOnDispatch not on the processor: %s", bs)
+	}
+	if strings.Contains(string(top["config"]), "startNewTxOnDispatch") {
+		t.Errorf("startNewTxOnDispatch inside config: %s", bs)
+	}
+	var back ProcessorDefinition
 	if err := json.Unmarshal(bs, &back); err != nil {
 		t.Fatal(err)
 	}
@@ -53,8 +63,7 @@ func TestProcessorConfig_StartNewTxOnDispatch_RoundTrips(t *testing.T) {
 	}
 
 	// Default (nil) does NOT marshal because of omitempty.
-	defaultCfg := ProcessorConfig{}
-	bs2, _ := json.Marshal(defaultCfg)
+	bs2, _ := json.Marshal(ProcessorDefinition{Type: "externalized", Name: "p"})
 	if strings.Contains(string(bs2), "startNewTxOnDispatch") {
 		t.Errorf("nil pointer should be omitted, got %s", bs2)
 	}

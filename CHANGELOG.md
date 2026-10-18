@@ -14,6 +14,14 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **`StartNewTxOnDispatch` moves from `ProcessorConfig` to
+  `ProcessorDefinition`**, beside `ExecutionMode`, which it qualifies. It is
+  written as `startNewTxOnDispatch` on the processor object, where cyoda-go's
+  published workflow contract has always placed it; the `config` placement was
+  the implementation's alone. Migration: read and write
+  `def.StartNewTxOnDispatch` instead of `def.Config.StartNewTxOnDispatch`; a
+  stored workflow carrying it inside `config` reads as unset.
+
 - **Go 1.27.2 is required** (`go` directive `1.26.1` → `1.27.2`), for
   `encoding/json/v2`. A consumer raises its own `go` directive with the bump.
 - **A condition's member names are exact.** `predicate.ParseCondition`

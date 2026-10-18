@@ -3,7 +3,9 @@ package strictjson_test
 import (
 	"encoding/json"
 	"errors"
+	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/cyoda-platform/cyoda-go-spi/strictjson"
 )
@@ -71,6 +73,68 @@ func TestDecode_ErrorNamesNoGoTypes(t *testing.T) {
 			t.Errorf("%q:\n got: %s\nwant: %s", in, err, want)
 		}
 	}
+}
+
+// TestDecode_ErrorNamesWhatAFieldTakes: a date-time, bytes and a text-encoded
+// value are named by what the client writes for them — never as "an object",
+// and never with Go's parser text (its reference layout).
+func TestDecode_ErrorNamesWhatAFieldTakes(t *testing.T) {
+	type body struct {
+		T time.Time   `json:"t"`
+		P *time.Time  `json:"p"`
+		B []byte      `json:"b"`
+		I netip.Addr  `json:"i"`
+		Q *netip.Addr `json:"q"`
+	}
+	for in, want := range map[string]string{
+		`{"t":"yesterday"}`: `invalid JSON at "/t": a JSON string where an RFC 3339 date-time is expected`,
+		`{"t":5}`:           `invalid JSON at "/t": a JSON number where an RFC 3339 date-time string is expected`,
+		`{"p":{}}`:          `invalid JSON at "/p": a JSON object where an RFC 3339 date-time string is expected`,
+		`{"b":"!!"}`:        `invalid JSON at "/b": a JSON string where base64 data is expected`,
+		`{"b":[1]}`:         `invalid JSON at "/b": a JSON array where a base64 string is expected`,
+		`{"i":[1]}`:         `invalid JSON at "/i": a JSON array where a string is expected`,
+		`{"q":5}`:           `invalid JSON at "/q": a JSON number where a string is expected`,
+	} {
+		var b body
+		err := strictjson.Decode([]byte(in), &b)
+		if err == nil || err.Error() != want {
+			t.Errorf("%s:\n got: %v\nwant: %s", in, err, want)
+		}
+	}
+}
+
+// TestError_Class: a caller that must not log client text (a member name can
+// be a tenant's data key) logs the class of the refusal instead.
+func TestError_Class(t *testing.T) {
+	type body struct {
+		N int `json:"n"`
+	}
+	for in, want := range map[string]string{
+		`{"n":1,"x":2}`: "unknown member",
+		`{"n":1,"n":2}`: "duplicate member",
+		`{"n":"a"}`:     "wrong kind of value",
+		`{"n":`:         "not JSON",
+	} {
+		var b body
+		var de *strictjson.Error
+		if err := strictjson.Decode([]byte(in), &b); !errors.As(err, &de) || de.Class() != want {
+			t.Errorf("%s: got %v (class %q), want class %q", in, err, classOf(de), want)
+		}
+	}
+	var b struct {
+		Model alwaysRequired `json:"model"`
+	}
+	var de *strictjson.Error
+	if err := strictjson.Decode([]byte(`{"model":{}}`), &b); !errors.As(err, &de) || de.Class() != "invalid value" {
+		t.Errorf("method error: class %q, want %q", classOf(de), "invalid value")
+	}
+}
+
+func classOf(e *strictjson.Error) string {
+	if e == nil {
+		return ""
+	}
+	return e.Class()
 }
 
 func TestDecode_Accepts(t *testing.T) {

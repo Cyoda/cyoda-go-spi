@@ -192,7 +192,11 @@ MAINTAINING.md.
   the value. Its `*Error` names the JSON location (a JSON Pointer, or a byte
   offset for text that is not JSON) and never a Go type, so it can go into a
   400 detail as it is; `Under` places an error under a member's location for
-  a parser that decodes that member on its own. Options: `PreserveNumbers`
+  a parser that decodes that member on its own, and `Class` names the kind
+  of refusal (`not JSON`, `unknown member`, `duplicate member`, `wrong kind
+  of value`, `invalid value`) without the client's text, for a log line. A
+  date-time, base64 bytes and a text-encoded value are described as what the
+  client writes for them. Options: `PreserveNumbers`
   (a number held in an `any`, at any depth, is a `json.Number` with its
   literal) and `AllowUnknownMembers` (for a probe or an open shape; names
   are still exact and duplicates still refused). A type that decodes itself

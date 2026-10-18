@@ -13,6 +13,8 @@
 package strictjson
 
 import (
+	"encoding"
+	"encoding/base64"
 	jsonv1 "encoding/json"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -20,6 +22,7 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"time"
 )
 
 // Decode decodes one JSON value into dst. A name that differs from a field's
@@ -73,6 +76,7 @@ type Error struct {
 	at     jsontext.Pointer
 	offset int64
 	syntax bool
+	class  string
 	reason string
 }
 
@@ -83,43 +87,59 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("invalid JSON at %q: %s", e.at, e.reason)
 }
 
+// Class names the kind of refusal — "not JSON", "unknown member",
+// "duplicate member", "wrong kind of value" or "invalid value" — with none
+// of the client's text, for a log line that must not carry it: a member name
+// can be a tenant's data key.
+func (e *Error) Class() string { return e.class }
+
 // Under returns e placed under the JSON Pointer at, for a parser that decoded
 // the value at that location on its own. A syntax error's byte offset is
 // relative to that value, so the location replaces it.
 func (e *Error) Under(at string) *Error {
 	if e.syntax {
-		return &Error{at: jsontext.Pointer(at), reason: e.reason}
+		return &Error{at: jsontext.Pointer(at), class: e.class, reason: e.reason}
 	}
-	return &Error{at: jsontext.Pointer(at) + e.at, reason: e.reason}
+	return &Error{at: jsontext.Pointer(at) + e.at, class: e.class, reason: e.reason}
 }
 
 func describe(err error) *Error {
 	var syn *jsontext.SyntacticError
 	if errors.As(err, &syn) {
 		if errors.Is(syn.Err, jsontext.ErrDuplicateName) {
-			return &Error{at: syn.JSONPointer.Parent(), reason: fmt.Sprintf("duplicate member name %q", syn.JSONPointer.LastToken())}
+			return &Error{at: syn.JSONPointer.Parent(), class: "duplicate member", reason: fmt.Sprintf("duplicate member name %q", syn.JSONPointer.LastToken())}
 		}
-		return &Error{syntax: true, offset: syn.ByteOffset, reason: syn.Err.Error()}
+		return &Error{syntax: true, offset: syn.ByteOffset, class: "not JSON", reason: syn.Err.Error()}
 	}
+	// Unmarshal of a byte slice reports every other failure as a
+	// *json.SemanticError: a method's error is wrapped in one, and there is
+	// no I/O to fail.
 	var sem *json.SemanticError
-	if !errors.As(err, &sem) {
-		return &Error{reason: "not accepted"}
-	}
+	errors.As(err, &sem)
 	var inner *Error
+	var parse *time.ParseError
+	var b64 base64.CorruptInputError
 	switch {
 	case errors.As(sem.Err, &inner):
 		// A value that decoded itself through Decode: its location is
 		// relative to that value.
 		return inner.Under(string(sem.JSONPointer))
 	case errors.Is(sem.Err, json.ErrUnknownName):
-		return &Error{at: sem.JSONPointer.Parent(), reason: fmt.Sprintf("unknown member name %q", sem.JSONPointer.LastToken())}
+		return &Error{at: sem.JSONPointer.Parent(), class: "unknown member", reason: fmt.Sprintf("unknown member name %q", sem.JSONPointer.LastToken())}
 	case errors.Is(sem.Err, strconv.ErrRange):
-		return &Error{at: sem.JSONPointer, reason: "a JSON number out of range"}
-	case sem.Err == nil, errors.Is(sem.Err, strconv.ErrSyntax):
-		return &Error{at: sem.JSONPointer, reason: fmt.Sprintf("%s where %s is expected", kindName(sem.JSONKind), expected(sem.GoType))}
+		return &Error{at: sem.JSONPointer, class: "invalid value", reason: "a JSON number out of range"}
+	case errors.As(sem.Err, &parse):
+		// time.ParseError quotes Go's reference layout, which is no use to
+		// a client.
+		return &Error{at: sem.JSONPointer, class: "invalid value", reason: "a JSON string where an RFC 3339 date-time is expected"}
+	case errors.As(sem.Err, &b64):
+		return &Error{at: sem.JSONPointer, class: "invalid value", reason: "a JSON string where base64 data is expected"}
+	case sem.Err == nil, errors.Is(sem.Err, strconv.ErrSyntax),
+		sem.JSONKind != '"' && textEncoded(sem.GoType):
+		return &Error{at: sem.JSONPointer, class: "wrong kind of value", reason: fmt.Sprintf("%s where %s is expected", kindName(sem.JSONKind), expected(sem.GoType))}
 	default:
 		// An UnmarshalJSON method's own words.
-		return &Error{at: sem.JSONPointer, reason: sem.Err.Error()}
+		return &Error{at: sem.JSONPointer, class: "invalid value", reason: sem.Err.Error()}
 	}
 }
 
@@ -151,6 +171,14 @@ func expected(t reflect.Type) string {
 	if t == nil {
 		return "another value"
 	}
+	switch {
+	case t == reflect.TypeFor[time.Time]():
+		return "an RFC 3339 date-time string"
+	case t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8:
+		return "a base64 string"
+	case textEncoded(t):
+		return "a string"
+	}
 	switch t.Kind() {
 	case reflect.Bool:
 		return "a boolean"
@@ -168,4 +196,13 @@ func expected(t reflect.Type) string {
 	default:
 		return "another value"
 	}
+}
+
+// textEncoded reports whether t decodes from a JSON string through
+// encoding.TextUnmarshaler.
+func textEncoded(t reflect.Type) bool {
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t != nil && reflect.PointerTo(t).Implements(reflect.TypeFor[encoding.TextUnmarshaler]())
 }

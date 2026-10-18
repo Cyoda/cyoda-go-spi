@@ -56,6 +56,9 @@ func TestDecode_ErrorNamesNoGoTypes(t *testing.T) {
 		`{"n":1e3}`:                  `invalid JSON at "/n": a JSON number where an integer is expected`,
 		`{"n":[1]}`:                  `invalid JSON at "/n": a JSON array where an integer is expected`,
 		`{"n":1} x`:                  `invalid JSON at offset 8: invalid character 'x' after top-level value`,
+		`{"n":1}}`:                   `invalid JSON at offset 7: invalid character '}' after top-level value`,
+		`{"n":1} ]`:                  `invalid JSON at offset 8: invalid character ']' after top-level value`,
+		`{"n":1}{}`:                  `invalid JSON at offset 7: invalid character '{' after top-level value`,
 		`{"n":}`:                     `invalid JSON at offset 5: invalid character '}' at start of value`,
 		``:                           `invalid JSON at offset 0: unexpected EOF`,
 	} {

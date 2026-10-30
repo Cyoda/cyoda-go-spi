@@ -29,7 +29,7 @@ func runAsyncSearchSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Terminal/WriteOnce", testASTerminalWriteOnce)
 	runSubtest(t, h, tracker, "Claim/StaleClaimed", testASClaimStaleClaimed)
 	runSubtest(t, h, tracker, "Claim/FreshNotClaimed", testASClaimFreshNotClaimed)
-	runSubtest(t, h, tracker, "Claim/NilHeartbeatBaseline", testASClaimNilHeartbeatBaseline)
+	runSubtest(t, h, tracker, "Claim/HeartbeatStampedAtCreate", testASClaimHeartbeatStampedAtCreate)
 	runSubtest(t, h, tracker, "Claim/ConcurrentDisjoint", testASClaimConcurrentDisjoint)
 	runSubtest(t, h, tracker, "Claim/TerminalNeverClaimed", testASClaimTerminalNeverClaimed)
 	runSubtest(t, h, tracker, "ClearResults/Idempotent", testASClearResultsIdempotent)
@@ -383,19 +383,21 @@ func testASTerminalWriteOnce(t *testing.T, h Harness) {
 	require.Equal(t, 5, got.ResultCount, "rejected writes must not overwrite fields set by the original terminal transition")
 }
 
-// The Claim subtests, and the two SaveResults sweeps that only need a stale
-// job, give a fresh heartbeat a minute of slack, not ten milliseconds. A
-// heartbeat is stamped from the store's own clock and cannot be backdated,
-// so "this job is stale" is expressed through CreateTime
-// instead: a job created claimJobAge ago with no heartbeat sits an hour past
-// the cutoff, and one whose heartbeat was just refreshed sits a minute
-// inside it — distances no scheduling delay between two calls closes. On
-// postgres every stamp and every comparison is the database's own now(), so
-// the old ten-millisecond window was purely the time between two round
-// trips, and under load it was routinely exceeded.
+// Staleness is judged on the store's physical clock, from the HeartbeatTime
+// that CreateJob stamps. A heartbeat is stamped from that clock and cannot be
+// backdated, so a test that needs a stale job lets the clock run past a short
+// window with AdvanceClock: delay only makes the job staler, so that
+// direction cannot lose to load. A test that needs a job to stay fresh
+// claims with claimStaleAfter, a minute of slack no scheduling delay between
+// two calls closes. On postgres every stamp and every comparison is the
+// database's own clock, and AdvanceClock is capped well under a second, which
+// is why the stale window stays short.
 const (
-	claimJobAge     = time.Hour
 	claimStaleAfter = time.Minute
+	claimShortStale = 20 * time.Millisecond
+	// claimAdvance is how far a test advances the clock to pass
+	// claimShortStale.
+	claimAdvance = 3 * claimShortStale
 )
 
 func testASClaimStaleClaimed(t *testing.T, h Harness) {
@@ -440,29 +442,48 @@ func testASClaimFreshNotClaimed(t *testing.T, h Harness) {
 	ctx := tenantContext(tid)
 	as, _ := h.Factory.AsyncSearchStore(ctx)
 	id := newID()
-	// Created an hour ago: without the heartbeat the sweep would take it.
-	require.NoError(t, as.CreateJob(ctx, backdatedJob(h, tid, id, claimJobAge)))
+	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, id)))
+	// Let the creation stamp go stale, then refresh it: the heartbeat, not
+	// the creation, is what keeps the job out of the sweep.
+	h.AdvanceClock(claimAdvance)
 	require.NoError(t, as.Heartbeat(ctx, id, 1))
 
 	claimed, err := as.ClaimStale(ctx, claimStaleAfter, 1000)
 	require.NoError(t, err)
-	require.Nil(t, findClaimed(claimed, id), "a job heartbeated within staleAfter must not be claimed, however old its CreateTime")
+	require.Nil(t, findClaimed(claimed, id), "a job heartbeated within staleAfter must not be claimed")
 }
 
-func testASClaimNilHeartbeatBaseline(t *testing.T, h Harness) {
+// testASClaimHeartbeatStampedAtCreate pins that CreateJob stamps
+// HeartbeatTime from the store's physical clock, ignoring the input's value
+// and CreateTime, and that staleness is measured from that stamp alone: a
+// job whose engine-supplied CreateTime is long past is not claimed until the
+// store's clock has run past staleAfter.
+func testASClaimHeartbeatStampedAtCreate(t *testing.T, h Harness) {
 	tid := h.NewTenant()
 	ctx := tenantContext(tid)
 	as, _ := h.Factory.AsyncSearchStore(ctx)
 	id := newID()
-	require.NoError(t, as.CreateJob(ctx, backdatedJob(h, tid, id, claimJobAge)))
+	job := newSearchJob(h, tid, id)
+	job.CreateTime = job.CreateTime.Add(-365 * 24 * time.Hour)
+	inputBeat := job.CreateTime.Add(-time.Hour)
+	job.HeartbeatTime = &inputBeat
+	require.NoError(t, as.CreateJob(ctx, job))
 
-	pre, err := as.GetJob(ctx, id)
+	got, err := as.GetJob(ctx, id)
 	require.NoError(t, err)
-	require.Nil(t, pre.HeartbeatTime, "a never-heartbeated job has nil HeartbeatTime")
+	require.NotNil(t, got.HeartbeatTime, "CreateJob must stamp HeartbeatTime")
+	require.True(t, got.HeartbeatTime.After(inputBeat.Add(24*time.Hour)),
+		"the stamp is the store's clock, not the input job's HeartbeatTime or CreateTime")
 
 	claimed, err := as.ClaimStale(ctx, claimStaleAfter, 1000)
 	require.NoError(t, err)
-	require.NotNil(t, findClaimed(claimed, id), "staleness must fall back to CreateTime when HeartbeatTime is nil")
+	require.Nil(t, findClaimed(claimed, id),
+		"a new job is not stale, whatever its CreateTime: staleness is measured from the heartbeat stamped at create")
+
+	h.AdvanceClock(claimAdvance)
+	claimed, err = as.ClaimStale(ctx, claimShortStale, 1000)
+	require.NoError(t, err)
+	require.NotNil(t, findClaimed(claimed, id), "once the store's clock passes staleAfter the job is claimed")
 }
 
 func testASClaimConcurrentDisjoint(t *testing.T, h Harness) {
@@ -471,18 +492,29 @@ func testASClaimConcurrentDisjoint(t *testing.T, h Harness) {
 	as, _ := h.Factory.AsyncSearchStore(ctx)
 	ids := []string{newID(), newID(), newID()}
 	for _, id := range ids {
-		require.NoError(t, as.CreateJob(ctx, backdatedJob(h, tid, id, claimJobAge)))
+		require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, id)))
 	}
 
 	// Two sequential claims stand in for concurrent claimers: since claiming
 	// bumps Epoch and refreshes HeartbeatTime, the second call must not
-	// re-take anything the first call already took. The jobs were created an
-	// hour ago, so a claim that failed to refresh the heartbeat would hand
-	// them straight back.
-	first, err := as.ClaimStale(ctx, claimStaleAfter, 1000)
+	// re-take anything the first call already took. The second call keeps
+	// the minute of slack, so the refresh itself is asserted on the stored
+	// HeartbeatTime, which the claim must move past the stamp it found stale.
+	before := map[string]time.Time{}
+	for _, id := range ids {
+		j, err := as.GetJob(ctx, id)
+		require.NoError(t, err)
+		require.NotNil(t, j.HeartbeatTime)
+		before[id] = *j.HeartbeatTime
+	}
+	h.AdvanceClock(claimAdvance)
+	first, err := as.ClaimStale(ctx, claimShortStale, 1000)
 	require.NoError(t, err)
 	for _, id := range ids {
 		require.NotNil(t, findClaimed(first, id), "first claim must pick up job %s", id)
+		j, err := as.GetJob(ctx, id)
+		require.NoError(t, err)
+		require.True(t, j.HeartbeatTime.After(before[id]), "claiming job %s must refresh its heartbeat", id)
 	}
 
 	second, err := as.ClaimStale(ctx, claimStaleAfter, 1000)
@@ -539,8 +571,9 @@ func testASClearResultsFenced(t *testing.T, h Harness) {
 	require.ErrorIs(t, as.ClearResults(ctx, newID(), 1), spi.ErrNotFound, "clear of a missing job")
 
 	id := newID()
-	require.NoError(t, as.CreateJob(ctx, backdatedJob(h, tid, id, claimJobAge)))
-	claimed, err := as.ClaimStale(ctx, claimStaleAfter, 1000)
+	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, id)))
+	h.AdvanceClock(claimAdvance)
+	claimed, err := as.ClaimStale(ctx, claimShortStale, 1000)
 	require.NoError(t, err)
 	job := findClaimed(claimed, id)
 	require.NotNil(t, job, "job must be claimed to advance its epoch for this scenario")
@@ -608,12 +641,13 @@ func testASSaveResultsChunkSeqContinuity(t *testing.T, h Harness) {
 	ctx := tenantContext(tid)
 	as, _ := h.Factory.AsyncSearchStore(ctx)
 	id := newID()
-	require.NoError(t, as.CreateJob(ctx, backdatedJob(h, tid, id, claimJobAge)))
+	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, id)))
 
 	firstIDs := []string{newID(), newID(), newID()}
 	require.NoError(t, as.SaveResults(ctx, id, 1, slices.Values(firstIDs)))
 
-	claimed, err := as.ClaimStale(ctx, claimStaleAfter, 1000)
+	h.AdvanceClock(claimAdvance)
+	claimed, err := as.ClaimStale(ctx, claimShortStale, 1000)
 	require.NoError(t, err)
 	job := findClaimed(claimed, id)
 	require.NotNil(t, job, "job must be claimed to advance its epoch for this scenario")
@@ -717,8 +751,9 @@ func testASSaveResultsEmptySequenceFences(t *testing.T, h Harness) {
 	// Stale epoch: ClaimStale bumps the job to epoch 2, so the original
 	// executor's epoch-1 write must be fenced.
 	staleID := newID()
-	require.NoError(t, as.CreateJob(ctx, backdatedJob(h, tid, staleID, claimJobAge)))
-	claimed, err := as.ClaimStale(ctx, claimStaleAfter, 1000)
+	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, staleID)))
+	h.AdvanceClock(claimAdvance)
+	claimed, err := as.ClaimStale(ctx, claimShortStale, 1000)
 	require.NoError(t, err)
 	job := findClaimed(claimed, staleID)
 	require.NotNil(t, job, "the job must be reclaimed to advance its epoch for this scenario")
@@ -944,9 +979,10 @@ func testASClaimStaleClaimCounted(t *testing.T, h Harness) {
 	ctx := tenantContext(tid)
 	as, _ := h.Factory.AsyncSearchStore(ctx)
 	id := newID()
-	require.NoError(t, as.CreateJob(ctx, backdatedJob(h, tid, id, claimJobAge)))
+	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, id)))
 
-	claimed, err := as.ClaimStale(ctx, claimStaleAfter, 1000)
+	h.AdvanceClock(claimAdvance)
+	claimed, err := as.ClaimStale(ctx, claimShortStale, 1000)
 	require.NoError(t, err)
 	job := findClaimed(claimed, id)
 	require.NotNil(t, job)

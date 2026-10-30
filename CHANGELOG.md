@@ -19,6 +19,12 @@ MAINTAINING.md.
   plugin given one takes every business stamp from it and keeps its own
   physical clock for liveness.
 
+- **`spitest.Harness.ClockFactory`** (optional) and the `Clock/*`,
+  `ScheduledTasks/SchedulerActivity/*` and
+  `AsyncSearch/Claim/HeartbeatStampedAtCreate` conformance cases. The
+  last replaces `Claim/NilHeartbeatBaseline`; the other `AsyncSearch/Claim`
+  and `SaveResults` cases now age a job by advancing the clock.
+
 ### Breaking
 
 - **`ScheduledTaskStore` gains `SchedulerActivity`**, which reports the

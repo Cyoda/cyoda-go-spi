@@ -47,6 +47,16 @@ type Harness struct {
 	// strings.Compare.
 	IDOrder func(a, b string) int
 
+	// ClockFactory builds a StoreFactory on a fresh store that takes its
+	// business time from c, as spi.WithClock(c) directs; the returned func
+	// closes it. Optional: when nil, the Clock/* cases skip with the reason
+	// "harness has no ClockFactory".
+	//
+	// While the factory is open, AdvanceClock must advance its physical
+	// clock as it advances Factory's, so a case can age liveness stamps and
+	// the physical side of a retention window without touching c.
+	ClockFactory func(c spi.Clock) (spi.StoreFactory, func())
+
 	// Skip is an optional map from subtest path suffix to skip reason.
 	// Keys must be the path below the root test name, e.g.:
 	//
@@ -190,6 +200,7 @@ func StoreFactoryConformance(t *testing.T, h Harness) {
 
 	t.Run("Transaction", func(t *testing.T) { runTransactionSuite(t, h, tracker) })
 	t.Run("Entity", func(t *testing.T) { runEntitySuite(t, h, tracker) })
+	t.Run("Clock", func(t *testing.T) { runClockSuite(t, h, tracker) })
 	t.Run("ConsistencyTime", func(t *testing.T) { runConsistencyTimeSuite(t, h, tracker) })
 	t.Run("Model", func(t *testing.T) { runModelSuite(t, h, tracker) })
 	t.Run("KeyValue", func(t *testing.T) { runKeyValueSuite(t, h, tracker) })

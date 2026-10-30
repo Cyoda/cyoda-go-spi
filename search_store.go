@@ -45,8 +45,10 @@ type SearchJob struct {
 	CalcTimeMs  int64
 
 	// HeartbeatTime is the last liveness stamp from the owning executor.
-	// nil means never stamped, in which case staleness is measured from
-	// CreateTime (the baseline).
+	// CreateJob stamps it from the store's physical clock, ignoring any
+	// value on the input job, so it is never nil on a job read after
+	// CreateJob. It is a liveness stamp, not a business time: CreateTime,
+	// which the engine supplies, takes no part in staleness.
 	HeartbeatTime *time.Time
 
 	// Epoch is the claim/attempt counter. CreateJob persists 1 regardless
@@ -122,7 +124,10 @@ type SelfExecutingSearchStore interface {
 // executor it was taken from.
 type AsyncSearchStore interface {
 	// CreateJob persists a new job row. Epoch is always persisted as 1,
-	// regardless of the value set on job.Epoch by the caller.
+	// regardless of the value set on job.Epoch by the caller, and
+	// HeartbeatTime is always stamped from the store's physical clock,
+	// regardless of the value set on job.HeartbeatTime. A store given a
+	// business clock (WithClock) still stamps it from its physical clock.
 	CreateJob(ctx context.Context, job *SearchJob) error
 
 	GetJob(ctx context.Context, jobID string) (*SearchJob, error)
@@ -160,7 +165,9 @@ type AsyncSearchStore interface {
 
 	DeleteJob(ctx context.Context, jobID string) error
 
-	// ReapExpired deletes eligible expired jobs. Cross-tenant: obtain with a
+	// ReapExpired deletes eligible expired jobs. A job's age is measured from
+	// its FinishTime, a business time, against the store's business clock
+	// (WithClock). Cross-tenant: obtain with a
 	// background/tenant-less context, as with ScheduledTaskStore.ClaimDue.
 	ReapExpired(ctx context.Context, ttl time.Duration) (int, error)
 
@@ -186,13 +193,13 @@ type AsyncSearchStore interface {
 	Heartbeat(ctx context.Context, jobID string, epoch int64) error
 
 	// ClaimStale atomically claims up to limit RUNNING jobs whose heartbeat
-	// (HeartbeatTime, or CreateTime as the baseline when HeartbeatTime is
-	// nil) is older than staleAfter. It never claims a terminal job. Claiming
+	// (HeartbeatTime only; CreateJob stamps it, so it is never nil) is older
+	// than staleAfter. It never claims a terminal job. Claiming
 	// bumps Epoch and stamps HeartbeatTime from the store's current clock,
 	// strictly later than the stamp it found stale; concurrent claimers
 	// obtain disjoint sets of jobs. The staleness stamp and the staleness
-	// comparison use the same clock domain (store-side, where the store has
-	// one).
+	// comparison use the same clock: the store's physical clock, never the
+	// business clock a store is given by WithClock.
 	// A released job (see Release) is eligible regardless of staleAfter;
 	// claiming it clears the released mark and does NOT increment
 	// StaleClaims. A job claimed because its heartbeat went stale has

@@ -65,7 +65,9 @@ type TransactionManager interface {
 
 	// GetSubmitTime returns the instant the transaction committed. It is the
 	// same instant stamped on every row that transaction wrote, and it must
-	// be answerable by any node, not only the one that committed.
+	// be answerable by any node, not only the one that committed. A store
+	// given a business clock (WithClock) keeps the answer for as long as it
+	// would without one, the retention measured on that business clock.
 	GetSubmitTime(ctx context.Context, txID string) (time.Time, error)
 
 	// ConsistencyTime returns the consistency time C for the tenant in ctx:

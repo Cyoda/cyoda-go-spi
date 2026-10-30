@@ -12,7 +12,24 @@ MAINTAINING.md.
 
 ## [Unreleased]
 
+### Added
+
+- **`Clock` and `WithClock`**: a factory option that gives a plugin the
+  platform's business clock (`FactoryConfig.Clock`, nil when absent). A
+  plugin given one takes every business stamp from it and keeps its own
+  physical clock for liveness.
+
 ### Breaking
+
+- **`ScheduledTaskStore` gains `SchedulerActivity`**, which reports the
+  earliest `NextAttemptTime` of any WAITING task and whether any task is
+  RUNNING, across all tenants. Migration: implement it; a store with no
+  tasks returns the zero report.
+
+- **`CreateJob` stamps `SearchJob.HeartbeatTime`** from the store's physical
+  clock, and `ClaimStale` measures staleness from `HeartbeatTime` alone. The
+  fallback to `CreateTime` for a never-heartbeated job is gone. Migration:
+  stamp the heartbeat at insert and drop the fallback.
 
 - **`StartNewTxOnDispatch` moves from `ProcessorConfig` to
   `ProcessorDefinition`**, beside `ExecutionMode`, which it qualifies. It is

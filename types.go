@@ -344,6 +344,19 @@ type ScheduleFunction struct {
 	RetryPolicy string `json:"retryPolicy,omitempty"`
 }
 
+// SchedulerActivityReport is what ScheduledTaskStore.SchedulerActivity
+// answers: the state of the scheduler's queue across all tenants.
+type SchedulerActivityReport struct {
+	// EarliestWaitingMs is the smallest NextAttemptTime, in unix
+	// milliseconds, of any WAITING task. It is meaningful only when
+	// HasWaiting is true, and is 0 otherwise.
+	EarliestWaitingMs int64
+	// HasWaiting reports whether any task is WAITING.
+	HasWaiting bool
+	// Running reports whether any task is RUNNING.
+	Running bool
+}
+
 // ScheduledTaskStatus is where a scheduled task is in its life.
 type ScheduledTaskStatus string
 

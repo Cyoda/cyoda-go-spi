@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 )
 
 // Plugin is the storage-backend contract. Implementations register
@@ -45,6 +46,18 @@ type ConfigVar struct {
 	Required    bool
 }
 
+// Clock is the source of a platform's business time: the instants a store
+// records as submit times, entity creation and modification dates, audit
+// event times and consistency times, and the instants it compares them
+// with (the retention of submit times, the age at which a finished search
+// job is reaped).
+//
+// A Clock may run at any rate, may be set to any instant, and may go
+// backward. It is read concurrently and must be safe for that.
+type Clock interface {
+	Now() time.Time
+}
+
 // FactoryOption configures a storage factory during NewFactory.
 // Plugins receive options via the variadic parameter and resolve them
 // with ApplyFactoryOptions.
@@ -53,6 +66,7 @@ type FactoryOption func(*factoryConfig)
 // factoryConfig is the mutable, unexported accumulator for options.
 type factoryConfig struct {
 	broadcaster ClusterBroadcaster
+	clock       Clock
 }
 
 // FactoryConfig is the read-only view plugins see after resolution.
@@ -70,6 +84,26 @@ func (c FactoryConfig) ClusterBroadcaster() ClusterBroadcaster {
 // that use ClusterBroadcaster for cluster-wide notifications.
 func WithClusterBroadcaster(b ClusterBroadcaster) FactoryOption {
 	return func(c *factoryConfig) { c.broadcaster = b }
+}
+
+// Clock returns the clock supplied via WithClock, or nil if none was
+// supplied.
+func (c FactoryConfig) Clock() Clock {
+	return c.inner.clock
+}
+
+// WithClock gives the plugin the platform's business clock.
+//
+// A plugin given a clock takes every business stamp from it: submit time,
+// SnapshotTime, consistency time, audit event times, the retention of
+// submit times behind GetSubmitTime, and the cutoff by which search jobs are
+// reaped. It keeps its own physical clock, unaffected by c, for liveness:
+// scheduler-owner heartbeats and sweeps, search-job heartbeats and stale
+// reclaim, and the database or lock timeouts it applies.
+//
+// Without the option a plugin's business clock is its physical clock.
+func WithClock(c Clock) FactoryOption {
+	return func(f *factoryConfig) { f.clock = c }
 }
 
 // ApplyFactoryOptions resolves the variadic options into a read-only

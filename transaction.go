@@ -65,7 +65,9 @@ type TransactionManager interface {
 
 	// GetSubmitTime returns the instant the transaction committed. It is the
 	// same instant stamped on every row that transaction wrote, and it must
-	// be answerable by any node, not only the one that committed.
+	// be answerable by any node, not only the one that committed. A store
+	// given a business clock (WithClock) keeps the answer for as long as it
+	// would without one, the retention measured on that business clock.
 	GetSubmitTime(ctx context.Context, txID string) (time.Time, error)
 
 	// ConsistencyTime returns the consistency time C for the tenant in ctx:
@@ -90,6 +92,14 @@ type TransactionManager interface {
 	// ErrConsistencyTimeUnavailable. It never uses, joins or holds the
 	// transaction in ctx, so it is safe to call from inside one.
 	ConsistencyTime(ctx context.Context) (time.Time, error)
+
+	// LatestRecordedTime returns the store's floor: a time at or above the
+	// latest submit time, SnapshotTime or consistency time it has issued
+	// (a store that persists a high-water mark seeds the floor from it, so
+	// the value may exceed the latest time issued since the store was
+	// opened). It does not move the floor and does not wait. A store that
+	// has issued none returns the zero time.
+	LatestRecordedTime(ctx context.Context) (time.Time, error)
 
 	// Savepoint creates a named savepoint within the given transaction by
 	// snapshotting tx.Buffer / tx.ReadSet / tx.WriteSet / tx.Deletes, with

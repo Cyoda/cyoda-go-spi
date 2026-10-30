@@ -172,6 +172,10 @@ func runScheduledTasksSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "LostRace/AfterSavepointRollback", testSTLostRaceAfterSavepointRollback)
 	runSubtest(t, h, tracker, "LostRace/DiscardedRivalAfter", testSTLostRaceDiscardedRivalAfter)
 
+	// Scheduler activity across tenants.
+	runSubtest(t, h, tracker, "SchedulerActivity/Empty", testSTSchedulerActivityEmpty)
+	runSubtest(t, h, tracker, "SchedulerActivity/EarliestAcrossTenants", testSTSchedulerActivityEarliestAcrossTenants)
+
 	// Query and tenant isolation.
 	runSubtest(t, h, tracker, "Query/PagesInOrder", testSTQueryPagesInOrder)
 	runSubtest(t, h, tracker, "Query/FilterPagesAcrossNonMatchingRows", testSTQueryFilterPagesAcrossNonMatchingRows)

@@ -128,8 +128,9 @@ type ReconcileRequest struct {
 //
 // Tenant scoping: every method that takes a tenant, or a TaskRef, reads
 // and writes that tenant's tasks only. ClaimDue, GiveBackIdle, Heartbeat,
-// RetireOwner, SweepOwners and SweepMarks are cross-tenant; obtain the
-// store for them with a background, tenant-less context.
+// RetireOwner, SweepOwners, SweepMarks and SchedulerActivity are
+// cross-tenant; obtain the store for them with a background, tenant-less
+// context.
 //
 // A deterministic rejection by the store, from any method, satisfies
 // errors.Is(err, ErrStoreRejected); no other error does (see
@@ -308,6 +309,12 @@ type ScheduledTaskStore interface {
 	// removed or re-armed. A mark of a task's current life, in any status,
 	// stays. Never joining.
 	SweepMarks(ctx context.Context) error
+
+	// SchedulerActivity reports, across all tenants, the earliest
+	// NextAttemptTime of any WAITING task and whether any task is RUNNING.
+	// FAILED tasks count for neither. A store with no tasks reports
+	// HasWaiting false and Running false. Never joining.
+	SchedulerActivity(ctx context.Context) (SchedulerActivityReport, error)
 }
 
 type EntityStore interface {

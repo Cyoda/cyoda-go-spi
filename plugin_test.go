@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // stubPlugin is a minimal Plugin for registry tests.
@@ -146,6 +147,21 @@ func TestFactoryOption_NoneGivesNil(t *testing.T) {
 	cfg := ApplyFactoryOptions(nil)
 	if cfg.ClusterBroadcaster() != nil {
 		t.Fatalf("expected nil broadcaster, got %v", cfg.ClusterBroadcaster())
+	}
+}
+
+type fixedClock struct{ t time.Time }
+
+func (c fixedClock) Now() time.Time { return c.t }
+
+func TestWithClock_RoundTrip(t *testing.T) {
+	c := fixedClock{t: time.Date(2015, 3, 1, 0, 0, 0, 0, time.UTC)}
+	got := ApplyFactoryOptions([]FactoryOption{WithClock(c)}).Clock()
+	if got != Clock(c) {
+		t.Fatalf("Clock() = %v, want the supplied clock", got)
+	}
+	if ApplyFactoryOptions(nil).Clock() != nil {
+		t.Fatal("Clock() without WithClock must be nil")
 	}
 }
 

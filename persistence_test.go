@@ -31,42 +31,46 @@ func TestScheduledTaskStore_InterfaceShape(t *testing.T) {
 	_ = (func(ScheduledTaskStore, context.Context, TaskRef, Attempt) error)(ScheduledTaskStore.RecordAttempt)
 	_ = (func(ScheduledTaskStore, context.Context, TaskRef, Failure) error)(ScheduledTaskStore.Fail)
 	_ = (func(ScheduledTaskStore, context.Context) error)(ScheduledTaskStore.SweepMarks)
+	_ = (func(ScheduledTaskStore, context.Context) (SchedulerActivityReport, error))(ScheduledTaskStore.SchedulerActivity)
 }
 
 // TestScheduledTaskStore_MethodSet pins that nothing else is on the
-// interface: a store double with exactly these sixteen methods satisfies
+// interface: a store double with exactly these seventeen methods satisfies
 // it, so a method added back fails the build.
 func TestScheduledTaskStore_MethodSet(t *testing.T) {
-	var _ ScheduledTaskStore = sixteenMethods{}
+	var _ ScheduledTaskStore = seventeenMethods{}
 }
 
-type sixteenMethods struct{}
+type seventeenMethods struct{}
 
-func (sixteenMethods) ReconcileForEntity(context.Context, ReconcileRequest) ([]ScheduledTask, error) {
+func (seventeenMethods) ReconcileForEntity(context.Context, ReconcileRequest) ([]ScheduledTask, error) {
 	return nil, nil
 }
-func (sixteenMethods) RemoveLife(context.Context, TenantID, string, uuid.UUID) error { return nil }
-func (sixteenMethods) StampSegment(context.Context, TaskRef, bool) error             { return nil }
-func (sixteenMethods) DeleteForEntities(context.Context, TenantID, []string) error   { return nil }
-func (sixteenMethods) DeleteForModel(context.Context, TenantID, string, int, func(string, string) bool) error {
+func (seventeenMethods) RemoveLife(context.Context, TenantID, string, uuid.UUID) error { return nil }
+func (seventeenMethods) StampSegment(context.Context, TaskRef, bool) error             { return nil }
+func (seventeenMethods) DeleteForEntities(context.Context, TenantID, []string) error   { return nil }
+func (seventeenMethods) DeleteForModel(context.Context, TenantID, string, int, func(string, string) bool) error {
 	return nil
 }
-func (sixteenMethods) Get(context.Context, TenantID, string) (*ScheduledTask, bool, error) {
+func (seventeenMethods) Get(context.Context, TenantID, string) (*ScheduledTask, bool, error) {
 	return nil, false, nil
 }
-func (sixteenMethods) Query(context.Context, TenantID, ScheduledTaskQuery) (ScheduledTaskPage, error) {
+func (seventeenMethods) Query(context.Context, TenantID, ScheduledTaskQuery) (ScheduledTaskPage, error) {
 	return ScheduledTaskPage{}, nil
 }
-func (sixteenMethods) ClaimDue(context.Context, ClaimRequest) ([]ScheduledTask, error) {
+func (seventeenMethods) ClaimDue(context.Context, ClaimRequest) ([]ScheduledTask, error) {
 	return nil, nil
 }
-func (sixteenMethods) Heartbeat(context.Context, uuid.UUID) error       { return nil }
-func (sixteenMethods) RetireOwner(context.Context, uuid.UUID) error     { return nil }
-func (sixteenMethods) SweepOwners(context.Context, time.Duration) error { return nil }
-func (sixteenMethods) GiveBackIdle(context.Context, uuid.UUID, []uuid.UUID) (int, error) {
+func (seventeenMethods) Heartbeat(context.Context, uuid.UUID) error       { return nil }
+func (seventeenMethods) RetireOwner(context.Context, uuid.UUID) error     { return nil }
+func (seventeenMethods) SweepOwners(context.Context, time.Duration) error { return nil }
+func (seventeenMethods) GiveBackIdle(context.Context, uuid.UUID, []uuid.UUID) (int, error) {
 	return 0, nil
 }
-func (sixteenMethods) MarkUnsafe(context.Context, TaskRef) error             { return nil }
-func (sixteenMethods) RecordAttempt(context.Context, TaskRef, Attempt) error { return nil }
-func (sixteenMethods) Fail(context.Context, TaskRef, Failure) error          { return nil }
-func (sixteenMethods) SweepMarks(context.Context) error                      { return nil }
+func (seventeenMethods) MarkUnsafe(context.Context, TaskRef) error             { return nil }
+func (seventeenMethods) RecordAttempt(context.Context, TaskRef, Attempt) error { return nil }
+func (seventeenMethods) Fail(context.Context, TaskRef, Failure) error          { return nil }
+func (seventeenMethods) SweepMarks(context.Context) error                      { return nil }
+func (seventeenMethods) SchedulerActivity(context.Context) (SchedulerActivityReport, error) {
+	return SchedulerActivityReport{}, nil
+}

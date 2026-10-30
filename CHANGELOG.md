@@ -12,7 +12,36 @@ MAINTAINING.md.
 
 ## [Unreleased]
 
+### Added
+
+- **`Clock` and `WithClock`**: a factory option that gives a plugin the
+  platform's business clock (`FactoryConfig.Clock`, nil when absent). A
+  plugin given one takes every business stamp from it and keeps its own
+  physical clock for liveness.
+
+- **`spitest.Harness.ClockFactory`** (optional) and the `Clock/*`,
+  `ScheduledTasks/SchedulerActivity/*` and
+  `AsyncSearch/Claim/HeartbeatStampedAtCreate` conformance cases. The
+  last replaces `Claim/NilHeartbeatBaseline`; the other `AsyncSearch/Claim`
+  and `SaveResults` cases now age a job by advancing the clock.
+
 ### Breaking
+
+- **`TransactionManager` gains `LatestRecordedTime`**, which returns the
+  store's floor (the latest submit time, SnapshotTime or consistency time it
+  has issued) without moving it and without waiting; the zero time on a store
+  that has issued none. Migration: implement it as a read of the floor. The
+  `Clock/LatestRecordedTime*` conformance cases cover it.
+
+- **`ScheduledTaskStore` gains `SchedulerActivity`**, which reports the
+  earliest `NextAttemptTime` of any WAITING task and whether any task is
+  RUNNING, across all tenants. Migration: implement it; a store with no
+  tasks returns the zero report.
+
+- **`CreateJob` stamps `SearchJob.HeartbeatTime`** from the store's physical
+  clock, and `ClaimStale` measures staleness from `HeartbeatTime` alone. The
+  fallback to `CreateTime` for a never-heartbeated job is gone. Migration:
+  stamp the heartbeat at insert and drop the fallback.
 
 - **`StartNewTxOnDispatch` moves from `ProcessorConfig` to
   `ProcessorDefinition`**, beside `ExecutionMode`, which it qualifies. It is

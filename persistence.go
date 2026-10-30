@@ -128,8 +128,9 @@ type ReconcileRequest struct {
 //
 // Tenant scoping: every method that takes a tenant, or a TaskRef, reads
 // and writes that tenant's tasks only. ClaimDue, GiveBackIdle, Heartbeat,
-// RetireOwner, SweepOwners, SweepMarks and SchedulerActivity are cross-tenant; obtain the
-// store for them with a background, tenant-less context.
+// RetireOwner, SweepOwners, SweepMarks and SchedulerActivity are
+// cross-tenant; obtain the store for them with a background, tenant-less
+// context.
 //
 // A deterministic rejection by the store, from any method, satisfies
 // errors.Is(err, ErrStoreRejected); no other error does (see

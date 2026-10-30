@@ -54,6 +54,7 @@ func runClockSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "SubmitTimeRetainedUnderPastClock", testClockSubmitTimeRetainedUnderPastClock)
 	runSubtest(t, h, tracker, "ReapUsesClock", testClockReapUsesClock)
 	runSubtest(t, h, tracker, "OperationalStaysPhysical", testClockOperationalStaysPhysical)
+	runSubtest(t, h, tracker, "HeartbeatStampedFromPhysicalClock", testClockHeartbeatStampedFromPhysicalClock)
 }
 
 // clockStore is a store built on a fresh factory with a fake business clock.
@@ -171,13 +172,13 @@ func testClockReapUsesClock(t *testing.T, h Harness) {
 	require.NoError(t, as.CreateJob(c.ctx, job))
 	require.NoError(t, as.UpdateJobStatus(c.ctx, id, 1, "SUCCESSFUL", 0, "", c.clock.Now(), 0))
 
-	_, err = as.ReapExpired(c.ctx, time.Hour)
+	_, err = as.ReapExpired(context.Background(), time.Hour)
 	require.NoError(t, err)
 	_, err = as.GetJob(c.ctx, id)
 	require.NoError(t, err, "a job finished at the clock's now is not expired")
 
 	c.clock.Advance(61 * time.Minute)
-	n, err := as.ReapExpired(c.ctx, time.Hour)
+	n, err := as.ReapExpired(context.Background(), time.Hour)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, n, 1)
 	_, err = as.GetJob(c.ctx, id)
@@ -210,4 +211,22 @@ func testClockOperationalStaysPhysical(t *testing.T, h Harness) {
 	require.Empty(t, f.claimWith(f.claimReq(uuid.New(), true)),
 		"an owner that just heartbeated survives SweepOwners and is not lost, whatever the business clock reads")
 	requireUnchangedClaim(t, claim, f.mustGet(task.ID))
+}
+
+// CreateJob stamps HeartbeatTime from the store's physical clock even when a
+// business clock is supplied: the stamp sits near real time, not near the
+// fake clock's 2015.
+func testClockHeartbeatStampedFromPhysicalClock(t *testing.T, h Harness) {
+	c := newClockStore(t, h, clockStart)
+	as, err := c.h.Factory.AsyncSearchStore(c.ctx)
+	require.NoError(t, err)
+	id := newID()
+	job := newSearchJob(c.h, c.tid, id)
+	job.CreateTime = c.clock.Now()
+	require.NoError(t, as.CreateJob(c.ctx, job))
+	got, err := as.GetJob(c.ctx, id)
+	require.NoError(t, err)
+	require.NotNil(t, got.HeartbeatTime, "CreateJob must stamp HeartbeatTime")
+	require.WithinDuration(t, h.Now(), *got.HeartbeatTime, 5*time.Second,
+		"the heartbeat stamp is physical time, not the business clock's %v", c.clock.Now())
 }

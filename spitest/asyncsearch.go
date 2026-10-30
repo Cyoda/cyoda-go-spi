@@ -437,18 +437,24 @@ func testASClaimStaleClaimed(t *testing.T, h Harness) {
 	// a missing refresh would show.
 }
 
+// A heartbeat is what keeps a job out of the sweep. The clock runs 300 ms,
+// the job heartbeats, 10 ms more pass, and the claim uses a 150 ms window: a
+// store whose Heartbeat does nothing sees a job 310 ms old and claims it; a
+// correct one sees a job 10 ms past its heartbeat. The margin on the fresh
+// side is 140 ms.
 func testASClaimFreshNotClaimed(t *testing.T, h Harness) {
 	tid := h.NewTenant()
 	ctx := tenantContext(tid)
 	as, _ := h.Factory.AsyncSearchStore(ctx)
 	id := newID()
 	require.NoError(t, as.CreateJob(ctx, newSearchJob(h, tid, id)))
-	// Let the creation stamp go stale, then refresh it: the heartbeat, not
-	// the creation, is what keeps the job out of the sweep.
-	h.AdvanceClock(claimAdvance)
+	for range 6 {
+		h.AdvanceClock(50 * time.Millisecond)
+	}
 	require.NoError(t, as.Heartbeat(ctx, id, 1))
+	h.AdvanceClock(10 * time.Millisecond)
 
-	claimed, err := as.ClaimStale(ctx, claimStaleAfter, 1000)
+	claimed, err := as.ClaimStale(ctx, 150*time.Millisecond, 1000)
 	require.NoError(t, err)
 	require.Nil(t, findClaimed(claimed, id), "a job heartbeated within staleAfter must not be claimed")
 }

@@ -19,10 +19,18 @@ func schedulerActivity(t *testing.T, f *stFixture) spi.SchedulerActivityReport {
 	return rep
 }
 
-// A store holding no task reports none. The fixtures remove every task they
-// arm, so no subtest leaves one behind for this one.
+// freshStoreHarness returns h with Factory replaced by a fresh store from
+// Harness.ClockFactory, closed when the subtest ends. SchedulerActivity reads
+// every tenant, so these cases run on a store no other case has written to.
+// It skips the subtest when the harness has no ClockFactory.
+func freshStoreHarness(t *testing.T, h Harness) Harness {
+	t.Helper()
+	return newClockStore(t, h, h.Now().UTC()).h
+}
+
+// A store holding no task reports none.
 func testSTSchedulerActivityEmpty(t *testing.T, h Harness) {
-	f := newSTFixture(t, h)
+	f := newSTFixture(t, freshStoreHarness(t, h))
 	rep := schedulerActivity(t, f)
 	require.False(t, rep.HasWaiting, "no task is WAITING")
 	require.False(t, rep.Running, "no task is RUNNING")
@@ -39,6 +47,7 @@ func testSTSchedulerActivityEarliestAcrossTenants(t *testing.T, h Harness) {
 		claimAtF  int64 = 1_500 // due: only the task at failedAt
 		claimAtEA int64 = 2_500 // due: the task at earlyAt, not the one at lateAt
 	)
+	h = freshStoreHarness(t, h)
 	fLate, fEarly, fFailed := newSTFixture(t, h), newSTFixture(t, h), newSTFixture(t, h)
 	fLate.arm(lateAt)
 	early := fEarly.arm(earlyAt)

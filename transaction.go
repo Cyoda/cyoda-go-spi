@@ -93,10 +93,12 @@ type TransactionManager interface {
 	// transaction in ctx, so it is safe to call from inside one.
 	ConsistencyTime(ctx context.Context) (time.Time, error)
 
-	// LatestRecordedTime returns the store's floor: the latest submit time,
-	// SnapshotTime or consistency time it has issued. It does not move the
-	// floor and does not wait. A store that has issued none returns the zero
-	// time.
+	// LatestRecordedTime returns the store's floor: a time at or above the
+	// latest submit time, SnapshotTime or consistency time it has issued
+	// (a store that persists a high-water mark seeds the floor from it, so
+	// the value may exceed the latest time issued since the store was
+	// opened). It does not move the floor and does not wait. A store that
+	// has issued none returns the zero time.
 	LatestRecordedTime(ctx context.Context) (time.Time, error)
 
 	// Savepoint creates a named savepoint within the given transaction by

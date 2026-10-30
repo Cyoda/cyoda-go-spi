@@ -27,6 +27,12 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **`TransactionManager` gains `LatestRecordedTime`**, which returns the
+  store's floor (the latest submit time, SnapshotTime or consistency time it
+  has issued) without moving it and without waiting; the zero time on a store
+  that has issued none. Migration: implement it as a read of the floor. The
+  `Clock/LatestRecordedTime*` conformance cases cover it.
+
 - **`ScheduledTaskStore` gains `SchedulerActivity`**, which reports the
   earliest `NextAttemptTime` of any WAITING task and whether any task is
   RUNNING, across all tenants. Migration: implement it; a store with no

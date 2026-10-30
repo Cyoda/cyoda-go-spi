@@ -55,6 +55,9 @@ func runClockSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "ReapUsesClock", testClockReapUsesClock)
 	runSubtest(t, h, tracker, "OperationalStaysPhysical", testClockOperationalStaysPhysical)
 	runSubtest(t, h, tracker, "HeartbeatStampedFromPhysicalClock", testClockHeartbeatStampedFromPhysicalClock)
+	runSubtest(t, h, tracker, "LatestRecordedTimeFreshIsZero", testClockLatestRecordedTimeFreshIsZero)
+	runSubtest(t, h, tracker, "LatestRecordedTimeFollowsCommits", testClockLatestRecordedTimeFollowsCommits)
+	runSubtest(t, h, tracker, "LatestRecordedTimeDoesNotRaise", testClockLatestRecordedTimeDoesNotRaise)
 }
 
 // clockStore is a store built on a fresh factory with a fake business clock.
@@ -229,4 +232,49 @@ func testClockHeartbeatStampedFromPhysicalClock(t *testing.T, h Harness) {
 	require.NotNil(t, got.HeartbeatTime, "CreateJob must stamp HeartbeatTime")
 	require.WithinDuration(t, h.Now(), *got.HeartbeatTime, 5*time.Second,
 		"the heartbeat stamp is physical time, not the business clock's %v", c.clock.Now())
+}
+
+func (c *clockStore) latestRecorded(t *testing.T) time.Time {
+	t.Helper()
+	tm, err := c.h.Factory.TransactionManager(c.ctx)
+	require.NoError(t, err)
+	latest, err := tm.LatestRecordedTime(c.ctx)
+	require.NoError(t, err)
+	return latest
+}
+
+// A store that has issued no time records none.
+func testClockLatestRecordedTimeFreshIsZero(t *testing.T, h Harness) {
+	c := newClockStore(t, h, clockStart)
+	got := c.latestRecorded(t)
+	require.True(t, got.IsZero(), "a fresh store has recorded no time, got %v", got)
+}
+
+func testClockLatestRecordedTimeFollowsCommits(t *testing.T, h Harness) {
+	c := newClockStore(t, h, clockStart)
+	txID, _ := c.commit(t)
+	submit := c.submitTime(t, txID)
+	got := c.latestRecorded(t)
+	require.True(t, submit.Equal(got), "after a commit the latest recorded time is its submit time %v, got %v", submit, got)
+}
+
+// Reading the latest recorded time leaves the floor where it is: a clock set
+// back below the read's moment still stamps there.
+func testClockLatestRecordedTimeDoesNotRaise(t *testing.T, h Harness) {
+	c := newClockStore(t, h, clockStart)
+	c.commit(t)
+	at := clockStart.Add(2 * time.Hour)
+	c.clock.Set(at)
+	first := c.latestRecorded(t)
+	second := c.latestRecorded(t)
+	require.True(t, first.Equal(second), "two reads with nothing in between differ: %v then %v", first, second)
+	require.True(t, first.Before(at), "the read %v must not reach the clock %v", first, at)
+
+	back := at.Add(-time.Hour)
+	c.clock.Set(back)
+	txID, _ := c.commit(t)
+	submit := c.submitTime(t, txID)
+	require.True(t, submit.After(first), "the commit %v must stamp above the earlier read %v", submit, first)
+	require.False(t, submit.After(back.Add(time.Second)),
+		"the commit %v must stamp at the clock %v: the read lifted the floor", submit, back)
 }

@@ -26,6 +26,9 @@ type StoreFactory interface {
 	// then skips the ScheduledTasks group.
 	ScheduledTaskStore(ctx context.Context) (ScheduledTaskStore, error)
 	TransactionManager(ctx context.Context) (TransactionManager, error)
+	// Ping reports whether the store answers. It returns within ctx and
+	// returns an error when ctx is done. After Close it returns an error.
+	Ping(ctx context.Context) error
 	Close() error
 }
 

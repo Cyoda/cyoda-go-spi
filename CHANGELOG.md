@@ -27,6 +27,12 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **`StoreFactory` gains `Ping(ctx) error`**, which reports whether the
+  store answers. It returns within ctx, returns an error when ctx is done,
+  and returns an error after Close. A plugin must implement it; the new
+  `Ping/*` conformance cases (`Healthy`, `CancelledContext`, `AfterClose`)
+  fail until it does.
+
 - **`TransactionManager` gains `LatestRecordedTime`**, which returns the
   store's floor (the latest submit time, SnapshotTime or consistency time it
   has issued) without moving it and without waiting; the zero time on a store

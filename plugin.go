@@ -16,7 +16,8 @@ type Plugin interface {
 }
 
 // DescribablePlugin is an optional Plugin capability: it exposes the
-// configuration variables the plugin reads, so --help can render them.
+// configuration variables the plugin reads, so `cyoda help config all` can
+// render them.
 type DescribablePlugin interface {
 	Plugin
 	ConfigVars() []ConfigVar

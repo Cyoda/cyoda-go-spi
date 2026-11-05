@@ -15,17 +15,21 @@ type TransactionManager interface {
 	// TenantID, SnapshotTime) are safe to read without locks.
 	Begin(ctx context.Context) (txID string, txCtx context.Context, err error)
 
-	// Commit closes the transaction and applies its buffered writes to
-	// the underlying store. Commit acquires tx.OpMu.Lock for its
-	// duration, so it waits for any in-flight tx-path operation on the
-	// same tx (any SPI method invocation that holds OpMu.RLock) to drain
-	// before mutating or closing tx state. Implementations must verify
-	// that the caller's tenant matches tx.TenantID and reject
-	// mismatched-tenant calls.
+	// Commit closes the transaction and applies its writes to the
+	// underlying store. The caller calls Commit only after every operation
+	// it made on the transaction has returned (see Join's application
+	// contract). An implementation that keeps the transaction's state in
+	// [TransactionState]'s mutable fields also acquires tx.OpMu.Lock for
+	// Commit's duration, so it waits for any in-flight tx-path operation
+	// on the same tx (any SPI method invocation that holds OpMu.RLock) to
+	// drain before mutating or closing tx state; an implementation that
+	// keeps none there (postgres keeps its own database transaction) needs
+	// no such lock. Implementations must verify that the caller's tenant
+	// matches tx.TenantID and reject mismatched-tenant calls.
 	Commit(ctx context.Context, txID string) error
 
-	// Rollback closes the transaction and discards its buffered writes.
-	// Acquires tx.OpMu.Lock; same tenant verification as Commit.
+	// Rollback closes the transaction and discards its writes. Same
+	// caller guarantee, OpMu posture and tenant verification as Commit.
 	Rollback(ctx context.Context, txID string) error
 
 	// Join returns a context carrying the TransactionState for an existing
@@ -37,7 +41,9 @@ type TransactionManager interface {
 	//
 	// Two distinct contracts apply to a joined tx:
 	//
-	//   - Plugin contract (enforced by [TransactionState.OpMu]): the
+	//   - Plugin contract, for an implementation that keeps the
+	//     transaction's state in [TransactionState]'s mutable fields
+	//     (enforced by [TransactionState.OpMu]): the
 	//     plugin's tx-path SPI methods hold OpMu.RLock; the plugin's
 	//     closure SPI methods (Commit, Rollback, RollbackToSavepoint)
 	//     hold OpMu.Lock. So closure waits for any in-flight SPI-method
@@ -101,12 +107,14 @@ type TransactionManager interface {
 	// has issued none returns the zero time.
 	LatestRecordedTime(ctx context.Context) (time.Time, error)
 
-	// Savepoint creates a named savepoint within the given transaction by
-	// snapshotting tx.Buffer / tx.ReadSet / tx.WriteSet / tx.Deletes, with
-	// tx.DeleteAttribution snapshotted paired with tx.Deletes.
+	// Savepoint creates a named savepoint within the given transaction. An
+	// implementation that keeps the transaction's state in
+	// [TransactionState] does it by snapshotting tx.Buffer / tx.ReadSet /
+	// tx.WriteSet / tx.Deletes, with tx.DeleteAttribution snapshotted
+	// paired with tx.Deletes.
 	//
-	// Locking discipline: read-only on tx state. Implementations must
-	// acquire tx.OpMu.RLock for the snapshot read so the operation is
+	// Locking discipline, for such an implementation: read-only on tx
+	// state. It must acquire tx.OpMu.RLock for the snapshot read so the operation is
 	// serialised against Commit/Rollback (which take tx.OpMu.Lock)
 	// without blocking other in-flight readers.
 	//
@@ -115,9 +123,10 @@ type TransactionManager interface {
 	Savepoint(ctx context.Context, txID string) (savepointID string, err error)
 
 	// RollbackToSavepoint rolls back all work done since the savepoint was
-	// created by replacing tx.Buffer / tx.ReadSet / tx.WriteSet /
-	// tx.Deletes with the snapshot taken at Savepoint time, restoring
-	// tx.DeleteAttribution paired with tx.Deletes.
+	// created. An implementation that keeps the transaction's state in
+	// [TransactionState] does it by replacing tx.Buffer / tx.ReadSet /
+	// tx.WriteSet / tx.Deletes with the snapshot taken at Savepoint time,
+	// restoring tx.DeleteAttribution paired with tx.Deletes.
 	//
 	// It does not undo a conflict the backend already detected after the
 	// savepoint: the transaction lost a race, and Commit refuses it with that
@@ -130,8 +139,8 @@ type TransactionManager interface {
 	// transaction no longer writes it. Read-set entries the rollback
 	// discards are dropped.
 	//
-	// Locking discipline: write on tx state — exclusive against every
-	// other tx-path op. Implementations must acquire tx.OpMu.Lock (write
+	// Locking discipline, for such an implementation: write on tx state —
+	// exclusive against every other tx-path op. It must acquire tx.OpMu.Lock (write
 	// lock, not RLock) for the duration of the field replacement.
 	//
 	// Tenant isolation: implementations must reject mismatched-tenant
@@ -139,9 +148,11 @@ type TransactionManager interface {
 	RollbackToSavepoint(ctx context.Context, txID string, savepointID string) error
 
 	// ReleaseSavepoint releases a savepoint, merging its work into the
-	// parent transaction. The work done since the savepoint already lives
-	// in tx.Buffer / tx.ReadSet / tx.WriteSet / tx.Deletes / tx.DeleteAttribution
-	// — Release only removes the snapshot record from manager-side state.
+	// parent transaction. The work done since the savepoint is already part
+	// of the transaction (for an implementation that keeps its state in
+	// [TransactionState], in tx.Buffer / tx.ReadSet / tx.WriteSet /
+	// tx.Deletes / tx.DeleteAttribution) — Release only removes the
+	// snapshot record from manager-side state.
 	//
 	// Locking discipline: does not touch any field of TransactionState
 	// (only manager-side savepoint records). Implementations need only

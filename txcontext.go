@@ -24,9 +24,11 @@ type WriteAttribution struct {
 //
 // # Concurrency contract
 //
-// Plugin implementations of [TransactionManager] must coordinate concurrent
-// access to TransactionState's mutable fields using OpMu. Two distinct
-// concerns:
+// A plugin implementation of [TransactionManager] that keeps a
+// transaction's state in TransactionState's mutable fields (the memory and
+// sqlite plugins do; postgres keeps it in its own database transaction and
+// uses none of them) must coordinate concurrent access to those fields
+// using OpMu. Two distinct concerns:
 //
 //  1. Cross-class serialisation — plugin's responsibility, enforced via
 //     OpMu. In-flight tx-path operations (Save, Get, Delete, Savepoint,

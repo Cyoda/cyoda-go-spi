@@ -63,6 +63,9 @@ func runTransactionSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Attribution/DeleteAttributionSavepoint", testTxDeleteAttributionSavepoint)
 	runSubtest(t, h, tracker, "DeleteThenCompareAndSave", testTxDeleteThenCompareAndSave)
 	runSubtest(t, h, tracker, "DeleteThenSave", testTxDeleteThenSave)
+	runSubtest(t, h, tracker, "DeleteThenDelete", testTxDeleteThenDelete)
+	runSubtest(t, h, tracker, "DeleteThenDeleteAll", testTxDeleteThenDeleteAll)
+	runSubtest(t, h, tracker, "DeleteSaveDelete", testTxDeleteSaveDelete)
 	runSubtest(t, h, tracker, "SaveThenCompareAndSave", testTxSaveThenCompareAndSave)
 	runSubtest(t, h, tracker, "LostRace/WriteLost", testTxLostRaceWriteLost)
 	runSubtest(t, h, tracker, "LostRace/NoRival", testTxLostRaceNoRival)
@@ -962,6 +965,110 @@ func testTxDeleteThenSave(t *testing.T, h Harness) {
 	got, err := es.Get(ctx, id)
 	require.NoError(t, err)
 	require.JSONEq(t, `{"n":2}`, string(got.Data))
+}
+
+// A transaction's own delete is its latest state: deleting the same entity
+// again in that transaction finds it gone, on every backend.
+func testTxDeleteThenDelete(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	mref := spi.ModelRef{EntityName: "m-tx-ddel", ModelVersion: "1"}
+	id := newID()
+	withTx(t, h, ctx, func(txCtx spiCtx) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		_, err := es.Save(txCtx, newEntity(t, mref.EntityName, id, map[string]any{"n": 1}))
+		require.NoError(t, err)
+	})
+
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
+	esTx, _ := h.Factory.EntityStore(txCtx)
+	require.NoError(t, esTx.Delete(txCtx, id))
+	require.ErrorIs(t, esTx.Delete(txCtx, id), spi.ErrNotFound,
+		"a second Delete of an entity the transaction already deleted must find it gone")
+	require.NoError(t, tm.Commit(txCtx, txID))
+}
+
+// A DeleteAll in a transaction that already deleted one of the model's
+// entities leaves that delete as it was: the entity's tombstone names the
+// participant that deleted it first, not the one that ran DeleteAll.
+// Checked through the committed version metadata only.
+func testTxDeleteThenDeleteAll(t *testing.T, h Harness) {
+	tenant := h.NewTenant()
+	rootCtx := tenantContextAs(tenant, "root-user", spi.PrincipalUser)
+	mref := spi.ModelRef{EntityName: "m-tx-ddall", ModelVersion: "1"}
+	idA := newID()
+	idB := newID()
+	withTx(t, h, rootCtx, func(txCtx context.Context) {
+		es, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		for _, id := range []string{idA, idB} {
+			_, err = es.Save(txCtx, newEntity(t, mref.EntityName, id, map[string]any{}))
+			require.NoError(t, err)
+		}
+	})
+
+	tm, err := h.Factory.TransactionManager(rootCtx)
+	require.NoError(t, err)
+	txID, _ := beginGuarded(t, tm, rootCtx)
+
+	svc1 := spi.Principal{ID: "svc-1", Kind: spi.PrincipalService}
+	txCtxSvc1, err := tm.Join(tenantContextAs(tenant, svc1.ID, svc1.Kind), txID)
+	require.NoError(t, err)
+	esSvc1, err := h.Factory.EntityStore(txCtxSvc1)
+	require.NoError(t, err)
+	require.NoError(t, esSvc1.Delete(txCtxSvc1, idA))
+
+	svc2 := spi.Principal{ID: "svc-2", Kind: spi.PrincipalService}
+	txCtxSvc2, err := tm.Join(tenantContextAs(tenant, svc2.ID, svc2.Kind), txID)
+	require.NoError(t, err)
+	esSvc2, err := h.Factory.EntityStore(txCtxSvc2)
+	require.NoError(t, err)
+	require.NoError(t, esSvc2.DeleteAll(txCtxSvc2, mref))
+	require.NoError(t, tm.Commit(txCtxSvc2, txID))
+
+	esOut, err := h.Factory.EntityStore(rootCtx)
+	require.NoError(t, err)
+	tombstoneOf := func(id string) spi.EntityVersionMeta {
+		t.Helper()
+		meta, err := esOut.GetVersionMetadata(rootCtx, id, spi.VersionMetadataOptions{})
+		require.NoError(t, err)
+		require.NotEmpty(t, meta)
+		require.True(t, meta[0].Deleted, "the newest version must be the committed tombstone")
+		return meta[0] // newest-first
+	}
+	require.Equal(t, svc1, tombstoneOf(idA).Executor,
+		"the entity deleted first keeps that delete: its tombstone names svc-1, not the DeleteAll caller")
+	require.Equal(t, svc2, tombstoneOf(idB).Executor,
+		"the entity DeleteAll deleted names the DeleteAll caller")
+}
+
+// An entity deleted and then created again in the same transaction can be
+// deleted again: the create makes it the transaction's latest state, and the
+// second delete stands at commit.
+func testTxDeleteSaveDelete(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	mref := spi.ModelRef{EntityName: "m-tx-dsd", ModelVersion: "1"}
+	id := newID()
+	withTx(t, h, ctx, func(txCtx spiCtx) {
+		es, _ := h.Factory.EntityStore(txCtx)
+		_, err := es.Save(txCtx, newEntity(t, mref.EntityName, id, map[string]any{"n": 1}))
+		require.NoError(t, err)
+	})
+
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
+	esTx, _ := h.Factory.EntityStore(txCtx)
+	require.NoError(t, esTx.Delete(txCtx, id))
+	_, err = esTx.Save(txCtx, newEntity(t, mref.EntityName, id, map[string]any{"n": 2}))
+	require.NoError(t, err)
+	require.NoError(t, esTx.Delete(txCtx, id), "a re-created entity can be deleted again")
+	require.NoError(t, tm.Commit(txCtx, txID))
+
+	es, _ := h.Factory.EntityStore(ctx)
+	_, err = es.Get(ctx, id)
+	require.ErrorIs(t, err, spi.ErrNotFound, "the last delete must stand after commit")
 }
 
 // A write compares against the transaction's own view: a same-transaction

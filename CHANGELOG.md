@@ -27,6 +27,15 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **A transaction's own delete is its latest state.** Deleting an entity
+  the transaction already deleted answers `ErrNotFound`; `DeleteAll` leaves
+  such an entity as it is, so its delete and the attribution recorded with
+  it stand; an entity deleted and saved again in the transaction can be
+  deleted again. No signature changes; the new conformance cases
+  `Transaction/DeleteThenDelete`, `Transaction/DeleteThenDeleteAll` and
+  `Transaction/DeleteSaveDelete` fail on a plugin that does not do this.
+  `EntityStore.Delete` and `DeleteAll` now state it.
+
 - **`StoreFactory` gains `Ping(ctx) error`**, which reports whether the
   store answers. It returns within ctx, returns an error when ctx is done,
   and returns an error after Close. A plugin must implement it; the new

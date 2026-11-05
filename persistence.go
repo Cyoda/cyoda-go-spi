@@ -373,7 +373,14 @@ type EntityStore interface {
 	// a timestamp is not sufficient, because a transaction-stable clock makes
 	// the transaction's own writes fall inside every window it can compute.
 	GetAsAt(ctx context.Context, entityID string, asAt time.Time) (*Entity, error)
+	// Delete deletes entityID. Inside a transaction the transaction's own
+	// writes are its latest state: an entity it already deleted is
+	// ErrNotFound, and one it deleted and then saved again can be deleted
+	// again.
 	Delete(ctx context.Context, entityID string) error
+	// DeleteAll deletes every entity of modelRef. Inside a transaction an
+	// entity the transaction already deleted is left as it is: that delete,
+	// and the attribution recorded with it, stand.
 	DeleteAll(ctx context.Context, modelRef ModelRef) error
 	Exists(ctx context.Context, entityID string) (bool, error)
 	// Count returns the number of non-deleted entities of modelRef.

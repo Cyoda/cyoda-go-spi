@@ -987,6 +987,10 @@ func testTxDeleteThenDelete(t *testing.T, h Harness) {
 	require.ErrorIs(t, esTx.Delete(txCtx, id), spi.ErrNotFound,
 		"a second Delete of an entity the transaction already deleted must find it gone")
 	require.NoError(t, tm.Commit(txCtx, txID))
+
+	es, _ := h.Factory.EntityStore(ctx)
+	_, err = es.Get(ctx, id)
+	require.ErrorIs(t, err, spi.ErrNotFound, "the first delete must stand after commit")
 }
 
 // A DeleteAll in a transaction that already deleted one of the model's
@@ -1035,6 +1039,13 @@ func testTxDeleteThenDeleteAll(t *testing.T, h Harness) {
 		require.NoError(t, err)
 		require.NotEmpty(t, meta)
 		require.True(t, meta[0].Deleted, "the newest version must be the committed tombstone")
+		tombstones := 0
+		for _, v := range meta {
+			if v.Deleted {
+				tombstones++
+			}
+		}
+		require.Equal(t, 1, tombstones, "one delete per entity: DeleteAll must not delete an entity the transaction already deleted")
 		return meta[0] // newest-first
 	}
 	require.Equal(t, svc1, tombstoneOf(idA).Executor,

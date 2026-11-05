@@ -29,8 +29,8 @@ MAINTAINING.md.
 
 - **A transaction's own delete is its latest state.** Deleting an entity
   the transaction already deleted answers `ErrNotFound`; `DeleteAll` leaves
-  such an entity as it is, so its delete and the attribution recorded with
-  it stand; an entity deleted and saved again in the transaction can be
+  an entity whose latest state in the transaction is deleted as it is, so
+  its delete and the attribution recorded with it stand; an entity deleted and saved again in the transaction can be
   deleted again. No signature changes; the new conformance cases
   `Transaction/DeleteThenDelete`, `Transaction/DeleteThenDeleteAll` and
   `Transaction/DeleteSaveDelete` fail on a plugin that does not do this.

@@ -379,8 +379,8 @@ type EntityStore interface {
 	// again.
 	Delete(ctx context.Context, entityID string) error
 	// DeleteAll deletes every entity of modelRef. Inside a transaction an
-	// entity the transaction already deleted is left as it is: that delete,
-	// and the attribution recorded with it, stand.
+	// entity whose latest state in the transaction is deleted is left as it
+	// is: that delete, and the attribution recorded with it, stand.
 	DeleteAll(ctx context.Context, modelRef ModelRef) error
 	Exists(ctx context.Context, entityID string) (bool, error)
 	// Count returns the number of non-deleted entities of modelRef.

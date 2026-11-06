@@ -41,8 +41,16 @@ type SearchJob struct {
 	ResultCount int
 	Error       string
 	CreateTime  time.Time
-	FinishTime  *time.Time
-	CalcTimeMs  int64
+
+	// FinishTime is nil while the job is RUNNING. On a terminal job it is
+	// the instant its terminal write was given (UpdateJobStatus or Cancel),
+	// and it does not change once the job is terminal. The engine gives one
+	// on every terminal write, and a SelfExecutingSearchStore sets one on
+	// every terminal job it reports. The engine refuses to serve a terminal
+	// job without one: the job's expiration (FinishTime plus the snapshot
+	// TTL, see ReapExpired) is then undefined.
+	FinishTime *time.Time
+	CalcTimeMs int64
 
 	// HeartbeatTime is the last liveness stamp from the owning executor.
 	// CreateJob stamps it from the store's physical clock, ignoring any
@@ -122,6 +130,11 @@ type SelfExecutingSearchStore interface {
 // refuse a call whose epoch does not match the job's current Epoch with
 // ErrStaleClaim — this is how a reclaimed job fences off writes from the
 // executor it was taken from.
+//
+// Retention: a store removes a job only on DeleteJob or ReapExpired, so a
+// terminal job stays readable until at least its FinishTime plus the ttl
+// ReapExpired is given. The engine refuses every read of a terminal job from
+// that instant on, so a store need not remove it at once.
 type AsyncSearchStore interface {
 	// CreateJob persists a new job row. Epoch is always persisted as 1,
 	// regardless of the value set on job.Epoch by the caller, and
@@ -134,7 +147,8 @@ type AsyncSearchStore interface {
 
 	// UpdateJobStatus fences on epoch (ErrStaleClaim on mismatch) and refuses
 	// a terminal job (ErrAlreadyTerminal). Against a missing job it returns
-	// ErrNotFound. A zero finishTime is stored as absent (NULL/nil).
+	// ErrNotFound. A zero finishTime is stored as absent (NULL/nil); the
+	// engine never passes one for a terminal status.
 	UpdateJobStatus(ctx context.Context, jobID string, epoch int64, status string, resultCount int, errMsg string, finishTime time.Time, calcTimeMs int64) error
 
 	// SaveResults streams entityIDs into the job's persisted result set.

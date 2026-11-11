@@ -41,6 +41,11 @@ func runCoordinationSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "AdvanceStopsLowerMajor", with(testCoordAdvanceStopsLowerMajor))
 	runSubtest(t, h, tracker, "CompleteRefusalOrder", with(testCoordCompleteRefusalOrder))
 	runSubtest(t, h, tracker, "RollbackOnlyMarksParent", with(testCoordRollbackOnlyMarksParent))
+	runSubtest(t, h, tracker, "EmptyCodeDoesNotMark", with(testCoordEmptyCodeDoesNotMark))
+	runSubtest(t, h, tracker, "FirstMarkCodeWins", with(testCoordFirstMarkCodeWins))
+	runSubtest(t, h, tracker, "RefusalNamesNearestMark", with(testCoordRefusalNamesNearestMark))
+	runSubtest(t, h, tracker, "DiscardAfterRefusedComplete", with(testCoordDiscardAfterRefusedComplete))
+	runSubtest(t, h, tracker, "MarkCodeReachesSeal", with(testCoordMarkCodeReachesSeal))
 	runSubtest(t, h, tracker, "ProcessorScopeAbsorbsMark", with(testCoordProcessorScopeAbsorbsMark))
 	runSubtest(t, h, tracker, "SealCutsOff", with(testCoordSealCutsOff))
 	runSubtest(t, h, tracker, "ScopeConflict", with(testCoordScopeConflict))
@@ -61,7 +66,23 @@ type coordFixture struct {
 
 func newCoordFixture(t *testing.T, h Harness, co spi.TransactionCoordinator) *coordFixture {
 	t.Helper()
+	return beginCoordFixture(t, h, co, tenantContext(h.NewTenant()))
+}
+
+// newSeededCoordFixture commits an entity in a transaction of its own, then
+// begins the fixture's transaction, and returns the entity's id. The entity
+// is committed before the transaction begins, so a store whose transaction
+// reads at the snapshot taken at Begin sees it.
+func newSeededCoordFixture(t *testing.T, h Harness, co spi.TransactionCoordinator) (*coordFixture, string) {
+	t.Helper()
 	ctx := tenantContext(h.NewTenant())
+	id := seedCoordEntity(t, h, ctx)
+	return beginCoordFixture(t, h, co, ctx), id
+}
+
+// beginCoordFixture begins the fixture's transaction for the tenant on ctx.
+func beginCoordFixture(t *testing.T, h Harness, co spi.TransactionCoordinator, ctx spiCtx) *coordFixture {
+	t.Helper()
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 	txID, txCtx := beginGuarded(t, tm, ctx)
@@ -136,6 +157,17 @@ func (f *coordFixture) requireAbsent(t *testing.T, id, why string) {
 	require.ErrorIs(t, err, spi.ErrNotFound, why)
 }
 
+// requireRollbackOnly requires err to be a refusal for a mark: a
+// *spi.RollbackOnlyError that matches spi.ErrTxRollbackOnly and carries code,
+// the code recorded for the nearest marked scope on the chain checked.
+func requireRollbackOnly(t *testing.T, err error, code, why string) {
+	t.Helper()
+	require.ErrorIs(t, err, spi.ErrTxRollbackOnly, why)
+	var roe *spi.RollbackOnlyError
+	require.ErrorAs(t, err, &roe, "%s: the refusal must be a *spi.RollbackOnlyError", why)
+	require.Equal(t, code, roe.FailedCode, "%s: the refusal carries the wrong code", why)
+}
+
 // returnsWithoutWaiting runs fn, which must not wait for a scope in progress,
 // and fails the case if it has not returned in time.
 func returnsWithoutWaiting(t *testing.T, what string, fn func() error) {
@@ -159,7 +191,7 @@ func testCoordScopeWritesBelongToScope(t *testing.T, h Harness, co spi.Transacti
 
 	s := f.open(t, pair(c, 1, 0))
 	w := f.save(t, s)
-	require.NoError(t, f.co.DiscardScope(s, false))
+	require.NoError(t, f.co.DiscardScope(s, ""))
 	require.NoError(t, f.co.EndCallout(f.txCtx, f.txID, c))
 
 	f.sealAndCommit(t)
@@ -185,7 +217,7 @@ func testCoordCompleteMergesIntoParent(t *testing.T, h Harness, co spi.Transacti
 		if completeProcessor {
 			require.NoError(t, f.co.CompleteScope(p))
 		} else {
-			require.NoError(t, f.co.DiscardScope(p, false))
+			require.NoError(t, f.co.DiscardScope(p, ""))
 		}
 		f.sealAndCommit(t)
 		return root, w, f
@@ -216,7 +248,7 @@ func testCoordCompleteMergesIntoParent(t *testing.T, h Harness, co spi.Transacti
 		require.NoError(t, f.co.EndCallout(s1, f.txID, n))
 		require.NoError(t, f.co.CompleteScope(s1))
 		require.NoError(t, f.co.EndCallout(p, f.txID, c))
-		require.NoError(t, f.co.DiscardScope(p, false))
+		require.NoError(t, f.co.DiscardScope(p, ""))
 
 		f.sealAndCommit(t)
 		f.requireExists(t, root, "the root's own write must commit")
@@ -276,7 +308,7 @@ func testCoordOpenScopeChecksAndAbsorbsMinor(t *testing.T, h Harness, co spi.Tra
 	require.ErrorIs(t, err, spi.ErrCalloutSuperseded,
 		"BeginCallout must refuse an outer pair that is not current")
 
-	require.NoError(t, f.co.DiscardScope(s1, false))
+	require.NoError(t, f.co.DiscardScope(s1, ""))
 	require.NoError(t, f.co.EndCallout(f.txCtx, f.txID, c))
 	_, err = f.tryOpen(t, pair(c, 1, 2))
 	require.ErrorIs(t, err, spi.ErrCalloutSuperseded,
@@ -328,9 +360,9 @@ func testCoordCompleteRefusalOrder(t *testing.T, h Harness, co spi.TransactionCo
 		s2 := f.open(t, pair(n, 1, 0), pair(c, 1, 0))
 		s3 := f.open(t, pair(n, 1, 0), pair(c, 1, 0))
 
-		require.NoError(t, f.co.DiscardScope(s3, true))
-		require.ErrorIs(t, f.co.CheckScope(s1), spi.ErrTxRollbackOnly,
-			"discarding s3 with rollbackOnly must mark its parent s1")
+		require.NoError(t, f.co.DiscardScope(s3, "S3_FAILED"))
+		requireRollbackOnly(t, f.co.CheckScope(s1), "S3_FAILED",
+			"discarding s3 with a failed code must mark its parent s1")
 		require.NoError(t, f.co.AdvanceCallout(s1, f.txID, n, 2))
 
 		require.ErrorIs(t, f.co.CheckScope(s2), spi.ErrCalloutSuperseded,
@@ -341,8 +373,7 @@ func testCoordCompleteRefusalOrder(t *testing.T, h Harness, co spi.TransactionCo
 	})
 
 	t.Run("RollbackOnlyBeforeScopeConflict", func(t *testing.T) {
-		f := newCoordFixture(t, h, co)
-		id := seedCoordEntity(t, f)
+		f, id := newSeededCoordFixture(t, h, co)
 		c := f.callout(t, f.txCtx)
 		s1 := f.open(t, pair(c, 1, 0))
 		s2 := f.open(t, pair(c, 1, 0))
@@ -353,18 +384,18 @@ func testCoordCompleteRefusalOrder(t *testing.T, h Harness, co spi.TransactionCo
 
 		n := f.callout(t, s2, pair(c, 1, 0))
 		s3 := f.open(t, pair(n, 1, 0), pair(c, 1, 0))
-		require.NoError(t, f.co.DiscardScope(s3, true))
+		require.NoError(t, f.co.DiscardScope(s3, "S3_FAILED"))
 		require.NoError(t, f.co.EndCallout(s2, f.txID, n))
 
-		require.ErrorIs(t, f.co.CompleteScope(s2), spi.ErrTxRollbackOnly,
+		requireRollbackOnly(t, f.co.CompleteScope(s2), "S3_FAILED",
 			"a marked scope that also conflicts must refuse as rollback-only first")
 		require.NoError(t, f.tm.Rollback(f.txCtx, f.txID))
 	})
 }
 
-// Contract 7. DiscardScope(ctx, true) marks the parent: a scope under it, at
-// any depth, cannot open or complete, CheckScope reports it, and with the root
-// marked Seal fails.
+// Contract 7. DiscardScope with a failed code marks the parent: a scope under
+// it, at any depth, cannot open or complete, CheckScope reports it, and with
+// the root marked Seal fails. Every refusal carries the code.
 func testCoordRollbackOnlyMarksParent(t *testing.T, h Harness, co spi.TransactionCoordinator) {
 	f := newCoordFixture(t, h, co)
 	c := f.callout(t, f.txCtx)
@@ -374,32 +405,226 @@ func testCoordRollbackOnlyMarksParent(t *testing.T, h Harness, co spi.Transactio
 	s1 := f.open(t, pair(c, 1, 0))
 	f.save(t, s1)
 
-	require.NoError(t, f.co.DiscardScope(s1, true))
+	require.NoError(t, f.co.DiscardScope(s1, "S1_FAILED"))
 
 	_, err := f.tryOpen(t, pair(c, 1, 0))
-	require.ErrorIs(t, err, spi.ErrTxRollbackOnly,
+	requireRollbackOnly(t, err, "S1_FAILED",
 		"a scope whose parent (the root) is marked must not open")
 	_, err = f.tryOpen(t, pair(n, 1, 0), pair(c, 1, 0))
-	require.ErrorIs(t, err, spi.ErrTxRollbackOnly,
+	requireRollbackOnly(t, err, "S1_FAILED",
 		"a scope whose grandparent (the root) is marked must not open")
-	require.ErrorIs(t, f.co.CheckScope(g), spi.ErrTxRollbackOnly,
+	requireRollbackOnly(t, f.co.CheckScope(g), "S1_FAILED",
 		"CheckScope must report a marked grandparent")
-	require.ErrorIs(t, f.co.CompleteScope(g), spi.ErrTxRollbackOnly,
+	requireRollbackOnly(t, f.co.CompleteScope(g), "S1_FAILED",
 		"a scope whose grandparent is marked must not complete")
 	require.NoError(t, f.co.EndCallout(s0, f.txID, n))
-	require.ErrorIs(t, f.co.CheckScope(s0), spi.ErrTxRollbackOnly,
+	requireRollbackOnly(t, f.co.CheckScope(s0), "S1_FAILED",
 		"CheckScope must report a marked parent")
-	require.ErrorIs(t, f.co.CompleteScope(s0), spi.ErrTxRollbackOnly,
+	requireRollbackOnly(t, f.co.CompleteScope(s0), "S1_FAILED",
 		"a scope whose parent is marked must not complete")
 	require.NoError(t, f.co.EndCallout(f.txCtx, f.txID, c))
 
-	require.ErrorIs(t, f.co.Seal(f.txCtx, f.txID), spi.ErrTxRollbackOnly,
+	requireRollbackOnly(t, f.co.Seal(f.txCtx, f.txID), "S1_FAILED",
 		"Seal must fail when the root is marked")
 	require.NoError(t, f.tm.Rollback(f.txCtx, f.txID))
 }
 
+// Contract 7. DiscardScope with the empty code marks nothing: the parent can
+// still complete, a later scope of the same callout opens and completes, and
+// Seal succeeds.
+func testCoordEmptyCodeDoesNotMark(t *testing.T, h Harness, co spi.TransactionCoordinator) {
+	f := newCoordFixture(t, h, co)
+	p, err := f.co.OpenChildScope(f.txCtx)
+	require.NoError(t, err)
+	c := f.callout(t, p)
+
+	s1 := f.open(t, pair(c, 1, 0))
+	w1 := f.save(t, s1)
+	require.NoError(t, f.co.DiscardScope(s1, ""))
+	require.NoError(t, f.co.CheckScope(p), "a discard with the empty code must not mark the parent")
+
+	s2, err := f.tryOpen(t, pair(c, 1, 0))
+	require.NoError(t, err, "a scope under an unmarked parent must open")
+	w2 := f.save(t, s2)
+	require.NoError(t, f.co.CompleteScope(s2))
+	require.NoError(t, f.co.EndCallout(p, f.txID, c))
+	require.NoError(t, f.co.CompleteScope(p), "a parent not marked must complete")
+
+	f.sealAndCommit(t)
+	f.requireAbsent(t, w1, "a discarded scope's write must not commit")
+	f.requireExists(t, w2, "a completed scope under the unmarked parent must commit")
+}
+
+// Contract 7. The first mark of a scope records its code; a later mark of the
+// same scope does not replace it.
+func testCoordFirstMarkCodeWins(t *testing.T, h Harness, co spi.TransactionCoordinator) {
+	f := newCoordFixture(t, h, co)
+	c := f.callout(t, f.txCtx)
+	s1 := f.open(t, pair(c, 1, 0))
+	s2 := f.open(t, pair(c, 1, 0))
+
+	require.NoError(t, f.co.DiscardScope(s1, "FIRST_FAILED"))
+	require.NoError(t, f.co.DiscardScope(s2, "SECOND_FAILED"))
+	require.NoError(t, f.co.EndCallout(f.txCtx, f.txID, c))
+
+	requireRollbackOnly(t, f.co.Seal(f.txCtx, f.txID), "FIRST_FAILED",
+		"a second mark of the root must not replace the first mark's code")
+	require.NoError(t, f.tm.Rollback(f.txCtx, f.txID))
+}
+
+// Contract 7. A refusal for a mark carries the code of the nearest marked
+// scope on the chain it checks: the scope's own when it is marked, else its
+// nearest marked ancestor's, however far up, and never that of a marked scope
+// further up.
+func testCoordRefusalNamesNearestMark(t *testing.T, h Harness, co spi.TransactionCoordinator) {
+	f := newCoordFixture(t, h, co)
+	p, err := f.co.OpenChildScope(f.txCtx)
+	require.NoError(t, err)
+	c := f.callout(t, p)
+	s := f.open(t, pair(c, 1, 0))
+	g := f.open(t, pair(c, 1, 0))
+	q, err := f.co.OpenChildScope(p) // stays unmarked, between p and k
+	require.NoError(t, err)
+	d := f.callout(t, q)
+	k := f.open(t, pair(d, 1, 0))
+	r0 := f.callout(t, f.txCtx)
+	r := f.open(t, pair(r0, 1, 0))
+
+	require.NoError(t, f.co.DiscardScope(s, "NEAR_FAILED")) // marks p
+	require.NoError(t, f.co.DiscardScope(r, "ROOT_FAILED")) // marks the root
+
+	_, err = f.tryOpen(t, pair(c, 1, 0))
+	requireRollbackOnly(t, err, "NEAR_FAILED",
+		"OpenScope under the marked child scope must name the child scope's code")
+	requireRollbackOnly(t, f.co.CheckScope(g), "NEAR_FAILED",
+		"CheckScope of a scope under the marked child scope must name the child scope's code")
+	requireRollbackOnly(t, f.co.CompleteScope(g), "NEAR_FAILED",
+		"CompleteScope of a scope under the marked child scope must name the child scope's code")
+	requireRollbackOnly(t, f.co.CheckScope(p), "NEAR_FAILED",
+		"CheckScope of a marked scope must name its own code, not its marked parent's")
+	_, err = f.tryOpen(t, pair(r0, 1, 0))
+	requireRollbackOnly(t, err, "ROOT_FAILED",
+		"OpenScope under the marked root must name the root's code")
+
+	_, err = f.tryOpen(t, pair(d, 1, 0))
+	requireRollbackOnly(t, err, "NEAR_FAILED",
+		"OpenScope under an unmarked parent must name its nearest marked ancestor's code, not the root's")
+	requireRollbackOnly(t, f.co.CheckScope(k), "NEAR_FAILED",
+		"CheckScope must name the marked grandparent's code past an unmarked parent, not the root's")
+	requireRollbackOnly(t, f.co.CompleteScope(k), "NEAR_FAILED",
+		"CompleteScope must name the marked grandparent's code past an unmarked parent, not the root's")
+	require.NoError(t, f.co.EndCallout(q, f.txID, d))
+	require.NoError(t, f.co.DiscardScope(q, ""))
+
+	require.NoError(t, f.co.EndCallout(p, f.txID, c))
+	requireRollbackOnly(t, f.co.CompleteScope(p), "NEAR_FAILED",
+		"CompleteScope of a marked scope must name its own code, not its marked parent's")
+	require.NoError(t, f.co.EndCallout(f.txCtx, f.txID, r0))
+	requireRollbackOnly(t, f.co.Seal(f.txCtx, f.txID), "ROOT_FAILED",
+		"Seal must name the root's code")
+	require.NoError(t, f.tm.Rollback(f.txCtx, f.txID))
+}
+
+// Contracts 6 and 7. DiscardScope of a scope whose completion was refused is
+// allowed. The refused completion already discarded the scope; the discard
+// removes nothing more, and with a failed code it marks the parent.
+func testCoordDiscardAfterRefusedComplete(t *testing.T, h Harness, co spi.TransactionCoordinator) {
+	t.Run("AfterRollbackOnly", func(t *testing.T) {
+		f := newCoordFixture(t, h, co)
+		root := f.save(t, f.txCtx)
+		p, err := f.co.OpenChildScope(f.txCtx)
+		require.NoError(t, err)
+		c := f.callout(t, p)
+		s := f.open(t, pair(c, 1, 0))
+		w := f.save(t, s)
+		n := f.callout(t, s, pair(c, 1, 0))
+		g := f.open(t, pair(n, 1, 0), pair(c, 1, 0))
+		require.NoError(t, f.co.DiscardScope(g, "INNER_FAILED"))
+		require.NoError(t, f.co.EndCallout(s, f.txID, n))
+
+		requireRollbackOnly(t, f.co.CompleteScope(s), "INNER_FAILED",
+			"a scope whose child marked it must not complete")
+		later, sibling := f.laterWork(t)
+		require.NoError(t, f.co.DiscardScope(s, "OUTER_FAILED"),
+			"DiscardScope after a refused completion must be allowed")
+		requireRollbackOnly(t, f.co.CheckScope(p), "OUTER_FAILED",
+			"DiscardScope after a refused completion must still mark the parent")
+
+		require.NoError(t, f.co.EndCallout(p, f.txID, c))
+		require.NoError(t, f.co.DiscardScope(p, ""))
+		f.sealAndCommit(t)
+		f.requireExists(t, root, "the root's own write must commit")
+		f.requireAbsent(t, w, "a scope refused completion must not commit")
+		f.requireExists(t, later, "DiscardScope after a refused completion must not remove the root's later write")
+		f.requireExists(t, sibling, "DiscardScope after a refused completion must not remove a later completed scope")
+	})
+	t.Run("AfterSuperseded", func(t *testing.T) {
+		f := newCoordFixture(t, h, co)
+		root := f.save(t, f.txCtx)
+		c := f.callout(t, f.txCtx)
+		s := f.open(t, pair(c, 1, 0))
+		w := f.save(t, s)
+		require.NoError(t, f.co.AdvanceCallout(f.txCtx, f.txID, c, 2))
+
+		require.ErrorIs(t, f.co.CompleteScope(s), spi.ErrCalloutSuperseded)
+		later := f.save(t, f.txCtx)
+		sib := f.open(t, pair(c, 2, 0)) // a sibling of s, at the advanced major
+		sibling := f.save(t, sib)
+		require.NoError(t, f.co.CompleteScope(sib))
+		require.NoError(t, f.co.DiscardScope(s, ""),
+			"DiscardScope after a refused completion must be allowed")
+		require.NoError(t, f.co.EndCallout(f.txCtx, f.txID, c))
+
+		f.sealAndCommit(t)
+		f.requireExists(t, root, "the root's own write must commit")
+		f.requireAbsent(t, w, "a scope refused completion must not commit")
+		f.requireExists(t, later, "DiscardScope after a refused completion must not remove the root's later write")
+		f.requireExists(t, sibling, "DiscardScope after a refused completion must not remove a later completed scope")
+	})
+}
+
+// laterWork is the work a transaction does after a scope's completion was
+// refused: a write on the root, and a scope of a new callout of the root that
+// writes and completes. It returns the two entities' ids.
+func (f *coordFixture) laterWork(t *testing.T) (later, sibling string) {
+	t.Helper()
+	later = f.save(t, f.txCtx)
+	c := f.callout(t, f.txCtx)
+	s := f.open(t, pair(c, 1, 0))
+	sibling = f.save(t, s)
+	require.NoError(t, f.co.CompleteScope(s))
+	require.NoError(t, f.co.EndCallout(f.txCtx, f.txID, c))
+	return later, sibling
+}
+
+// Contract 7 and Seal. The owner learns the code of the failed request that
+// started a chain of marks: a scope refused completion for a mark passes the
+// code it was refused with to its own DiscardScope, and Seal carries it.
+func testCoordMarkCodeReachesSeal(t *testing.T, h Harness, co spi.TransactionCoordinator) {
+	f := newCoordFixture(t, h, co)
+	c := f.callout(t, f.txCtx)
+	s := f.open(t, pair(c, 1, 0))
+	n := f.callout(t, s, pair(c, 1, 0))
+	g := f.open(t, pair(n, 1, 0), pair(c, 1, 0))
+	require.NoError(t, f.co.DiscardScope(g, "DEEP_FAILED"))
+	require.NoError(t, f.co.EndCallout(s, f.txID, n))
+
+	var refused *spi.RollbackOnlyError
+	require.ErrorAs(t, f.co.CompleteScope(s), &refused)
+	require.NoError(t, f.co.DiscardScope(s, refused.FailedCode))
+	require.NoError(t, f.co.EndCallout(f.txCtx, f.txID, c))
+
+	err := f.co.Seal(f.txCtx, f.txID)
+	require.ErrorIs(t, err, spi.ErrTxRollbackOnly)
+	var sealed *spi.RollbackOnlyError
+	require.ErrorAs(t, err, &sealed, "Seal must fail with a *spi.RollbackOnlyError")
+	require.Equal(t, "DEEP_FAILED", sealed.FailedCode,
+		"the code of the failed request must survive to Seal")
+	require.NoError(t, f.tm.Rollback(f.txCtx, f.txID))
+}
+
 // Contracts 2 and 7. A mark set on a child scope goes with it when that scope
-// is discarded without rollbackOnly: the root stays unmarked.
+// is discarded with no failed code: the root stays unmarked.
 func testCoordProcessorScopeAbsorbsMark(t *testing.T, h Harness, co spi.TransactionCoordinator) {
 	f := newCoordFixture(t, h, co)
 	root := f.save(t, f.txCtx)
@@ -409,14 +634,14 @@ func testCoordProcessorScopeAbsorbsMark(t *testing.T, h Harness, co spi.Transact
 
 	s := f.open(t, pair(c, 1, 0))
 	w := f.save(t, s)
-	require.NoError(t, f.co.DiscardScope(s, true))
-	require.ErrorIs(t, f.co.CheckScope(p), spi.ErrTxRollbackOnly,
-		"discarding a callback scope with rollbackOnly must mark its parent, the child scope")
+	require.NoError(t, f.co.DiscardScope(s, "S_FAILED"))
+	requireRollbackOnly(t, f.co.CheckScope(p), "S_FAILED",
+		"discarding a callback scope with a failed code must mark its parent, the child scope")
 	require.NoError(t, f.co.EndCallout(p, f.txID, c))
-	require.NoError(t, f.co.DiscardScope(p, false))
+	require.NoError(t, f.co.DiscardScope(p, ""))
 
 	require.NoError(t, f.co.Seal(f.txCtx, f.txID),
-		"a mark must not climb past a child scope discarded without rollbackOnly")
+		"a mark must not climb past a child scope discarded with no failed code")
 	require.NoError(t, f.tm.Commit(f.txCtx, f.txID))
 	f.requireExists(t, root, "the root's own write must commit")
 	f.requireAbsent(t, w, "a discarded scope's write must not commit")
@@ -452,8 +677,7 @@ func testCoordSealCutsOff(t *testing.T, h Harness, co spi.TransactionCoordinator
 // each writes it. The first to complete wins; the second refuses with
 // ErrScopeConflict and is discarded.
 func testCoordScopeConflict(t *testing.T, h Harness, co spi.TransactionCoordinator) {
-	f := newCoordFixture(t, h, co)
-	id := seedCoordEntity(t, f)
+	f, id := newSeededCoordFixture(t, h, co)
 	c := f.callout(t, f.txCtx)
 
 	s1 := f.open(t, pair(c, 1, 0))
@@ -474,13 +698,14 @@ func testCoordScopeConflict(t *testing.T, h Harness, co spi.TransactionCoordinat
 		"the completed scope's write must commit and the conflicting one must be discarded")
 }
 
-// seedCoordEntity commits an entity in a transaction of its own, before the
-// case's transaction reads it, and returns its id.
-func seedCoordEntity(t *testing.T, f *coordFixture) string {
+// seedCoordEntity commits an entity for the tenant on ctx in a transaction of
+// its own and returns its id. newSeededCoordFixture calls it before the case's
+// transaction begins.
+func seedCoordEntity(t *testing.T, h Harness, ctx spiCtx) string {
 	t.Helper()
 	id := newID()
-	withTx(t, f.h, f.ctx, func(txCtx spiCtx) {
-		es, err := f.h.Factory.EntityStore(txCtx)
+	withTx(t, h, ctx, func(txCtx spiCtx) {
+		es, err := h.Factory.EntityStore(txCtx)
 		require.NoError(t, err)
 		_, err = es.Save(txCtx, newEntity(t, coordModel, id, map[string]any{"by": "seed"}))
 		require.NoError(t, err)

@@ -108,17 +108,17 @@ type TransactionManager interface {
 	LatestRecordedTime(ctx context.Context) (time.Time, error)
 
 	// Savepoint creates a named savepoint within the given transaction. A
-	// savepoint lives until a rollback to an earlier savepoint or a release
-	// of itself or of an earlier one destroys it. An
-	// implementation that keeps the transaction's state in
-	// [TransactionState] does it by snapshotting tx.Buffer / tx.ReadSet /
-	// tx.WriteSet / tx.Deletes, with tx.DeleteAttribution snapshotted
-	// paired with tx.Deletes.
+	// savepoint lives until a rollback to an earlier savepoint destroys it,
+	// or a release of itself or of an earlier savepoint does. Commit and
+	// Rollback end every savepoint of the transaction. An implementation
+	// that keeps the transaction's state in [TransactionState] does it by
+	// snapshotting tx.Buffer / tx.ReadSet / tx.WriteSet / tx.Deletes, with
+	// tx.DeleteAttribution snapshotted paired with tx.Deletes.
 	//
 	// Locking discipline, for such an implementation: read-only on tx
-	// state. It must acquire tx.OpMu.RLock for the snapshot read so the operation is
-	// serialised against Commit/Rollback (which take tx.OpMu.Lock)
-	// without blocking other in-flight readers.
+	// state. It must acquire tx.OpMu.RLock for the snapshot read so the
+	// operation is serialised against Commit/Rollback (which take
+	// tx.OpMu.Lock) without blocking other in-flight readers.
 	//
 	// Tenant isolation: implementations must reject calls whose
 	// UserContext tenant does not match tx.TenantID.
@@ -127,11 +127,12 @@ type TransactionManager interface {
 	// RollbackToSavepoint rolls back all work done since the savepoint was
 	// created. It destroys every savepoint taken after that savepoint and
 	// keeps the savepoint itself, so it can be rolled back to again or
-	// released; rolling back to a destroyed savepoint returns
-	// ErrSavepointNotFound. An implementation that keeps the transaction's state in
-	// [TransactionState] does it by replacing tx.Buffer / tx.ReadSet /
-	// tx.WriteSet / tx.Deletes with the snapshot taken at Savepoint time,
-	// restoring tx.DeleteAttribution paired with tx.Deletes.
+	// released. Rolling back to a destroyed savepoint returns
+	// ErrSavepointNotFound. An implementation that keeps the transaction's
+	// state in [TransactionState] does it by replacing tx.Buffer /
+	// tx.ReadSet / tx.WriteSet / tx.Deletes with the snapshot taken at
+	// Savepoint time, restoring tx.DeleteAttribution paired with
+	// tx.Deletes.
 	//
 	// It does not undo a conflict the backend already detected after the
 	// savepoint: the transaction lost a race, and Commit refuses it with that
@@ -145,8 +146,9 @@ type TransactionManager interface {
 	// discards are dropped.
 	//
 	// Locking discipline, for such an implementation: write on tx state —
-	// exclusive against every other tx-path op. It must acquire tx.OpMu.Lock (write
-	// lock, not RLock) for the duration of the field replacement.
+	// exclusive against every other tx-path op. It must acquire
+	// tx.OpMu.Lock (write lock, not RLock) for the duration of the field
+	// replacement.
 	//
 	// Tenant isolation: implementations must reject mismatched-tenant
 	// callers — RollbackToSavepoint is destructive on tx-state.
@@ -155,11 +157,14 @@ type TransactionManager interface {
 	// ReleaseSavepoint releases a savepoint, merging its work into the
 	// parent transaction. It destroys the savepoint and every savepoint
 	// taken after it, and keeps their work; a later rollback to an earlier
-	// savepoint still discards that work. The work done since the savepoint is already part
-	// of the transaction (for an implementation that keeps its state in
-	// [TransactionState], in tx.Buffer / tx.ReadSet / tx.WriteSet /
-	// tx.Deletes / tx.DeleteAttribution) — Release only removes the
-	// snapshot record from manager-side state.
+	// savepoint still discards that work. Releasing a destroyed savepoint
+	// (one already released, released with an earlier one, or rolled past)
+	// returns ErrSavepointNotFound, as rolling back to it does. The work
+	// done since the savepoint is already part of the transaction (for an
+	// implementation that keeps its state in [TransactionState], in
+	// tx.Buffer / tx.ReadSet / tx.WriteSet / tx.Deletes /
+	// tx.DeleteAttribution) — Release only removes the snapshot record from
+	// manager-side state.
 	//
 	// Locking discipline: does not touch any field of TransactionState
 	// (only manager-side savepoint records). Implementations need only

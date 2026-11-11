@@ -47,7 +47,8 @@ func (n *savepointNesting) savepoint(t *testing.T) string {
 	return sp
 }
 
-// commit commits the transaction; exists then reports what is visible.
+// commit commits the transaction, so requireExists and requireAbsent can read
+// what it kept.
 func (n *savepointNesting) commit(t *testing.T) {
 	t.Helper()
 	require.NoError(t, n.tm.Commit(n.txCtx, n.txID))
@@ -106,7 +107,8 @@ func testTxSavepointSurvivesOwnRollback(t *testing.T, h Harness) {
 }
 
 // A release destroys the savepoint and every savepoint taken after it, and
-// keeps their work.
+// keeps their work. Rolling back to or releasing a destroyed savepoint
+// returns ErrSavepointNotFound.
 func testTxSavepointReleaseReleasesLater(t *testing.T, h Harness) {
 	n := newSavepointNesting(t, h)
 	a := n.savepoint(t)
@@ -117,6 +119,12 @@ func testTxSavepointReleaseReleasesLater(t *testing.T, h Harness) {
 	err := n.tm.RollbackToSavepoint(n.txCtx, n.txID, b)
 	require.ErrorIs(t, err, spi.ErrSavepointNotFound,
 		"a savepoint taken after the one released must be gone")
+	err = n.tm.ReleaseSavepoint(n.txCtx, n.txID, a)
+	require.ErrorIs(t, err, spi.ErrSavepointNotFound,
+		"a released savepoint must not be releasable again")
+	err = n.tm.ReleaseSavepoint(n.txCtx, n.txID, b)
+	require.ErrorIs(t, err, spi.ErrSavepointNotFound,
+		"a savepoint released with an earlier one must not be releasable")
 
 	n.commit(t)
 	n.requireExists(t, e1, "a release must keep the work")

@@ -248,14 +248,21 @@ func testCoordCompletedVisibleToParent(t *testing.T, h Harness, co spi.Transacti
 
 // Contract 4. OpenScope admits only current pairs and absorbs a higher minor
 // in the same atomic step; BeginCallout refuses an outer pair that is not
-// current; an ended callout has no current pair.
+// current; a callout has no current pair before its first AdvanceCallout or
+// after it ended.
 func testCoordOpenScopeChecksAndAbsorbsMinor(t *testing.T, h Harness, co spi.TransactionCoordinator) {
 	f := newCoordFixture(t, h, co)
 	c := f.callout(t, f.txCtx)
 
+	unadvanced := "callout-" + newID()
+	require.NoError(t, f.co.BeginCallout(f.txCtx, f.txID, unadvanced, nil))
+	_, err := f.tryOpen(t, pair(unadvanced, 0, 0))
+	require.ErrorIs(t, err, spi.ErrCalloutSuperseded,
+		"a callout begun but never advanced must have no current pair")
+
 	s1 := f.open(t, pair(c, 1, 2))
 
-	_, err := f.tryOpen(t, pair(c, 1, 5), pair("callout-never-begun-"+newID(), 1, 0))
+	_, err = f.tryOpen(t, pair(c, 1, 5), pair("callout-never-begun-"+newID(), 1, 0))
 	require.ErrorIs(t, err, spi.ErrCalloutSuperseded,
 		"a pass with a pair of an unregistered callout must be refused")
 	_, err = f.tryOpen(t, pair(c, 1, 2))
@@ -279,13 +286,14 @@ func testCoordOpenScopeChecksAndAbsorbsMinor(t *testing.T, h Harness, co spi.Tra
 // Contract 5. After AdvanceCallout(c, m) no scope admitted under c below m
 // completes, and after EndCallout(c) no scope admitted under c completes.
 // Neither call waits for the scope in progress; the scope's own
-// CompleteScope refuses and discards it.
+// CompleteScope refuses and discards it. AdvanceCallout resets the minor to 0,
+// so a pass at (m, 0) is current after it whatever minor was seen before.
 func testCoordAdvanceStopsLowerMajor(t *testing.T, h Harness, co spi.TransactionCoordinator) {
 	f := newCoordFixture(t, h, co)
 	root := f.save(t, f.txCtx)
 	c := f.callout(t, f.txCtx)
 
-	s1 := f.open(t, pair(c, 1, 0))
+	s1 := f.open(t, pair(c, 1, 3))
 	w1 := f.save(t, s1)
 	returnsWithoutWaiting(t, "AdvanceCallout", func() error {
 		return f.co.AdvanceCallout(f.txCtx, f.txID, c, 2)
@@ -293,7 +301,8 @@ func testCoordAdvanceStopsLowerMajor(t *testing.T, h Harness, co spi.Transaction
 	require.ErrorIs(t, f.co.CompleteScope(s1), spi.ErrCalloutSuperseded,
 		"a scope admitted below the advanced major must not complete")
 
-	s2 := f.open(t, pair(c, 2, 0))
+	s2, err := f.tryOpen(t, pair(c, 2, 0))
+	require.NoError(t, err, "AdvanceCallout must reset the minor: (2, 0) must be current after it")
 	w2 := f.save(t, s2)
 	returnsWithoutWaiting(t, "EndCallout", func() error {
 		return f.co.EndCallout(f.txCtx, f.txID, c)

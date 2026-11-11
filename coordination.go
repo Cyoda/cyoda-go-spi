@@ -121,7 +121,7 @@ type TransactionCoordinator interface {
 	// the same atomic step it raises a callout's highest seen minor to the
 	// pair's minor when that is higher, so a pass refused for any pair
 	// changes nothing. It refuses with ErrTxRollbackOnly when the parent or
-	// an ancestor is marked. After Seal it refuses.
+	// an ancestor is marked. After Seal it refuses with ErrCalloutSuperseded.
 	OpenScope(ctx context.Context, txID string, pairs []CalloutPair) (context.Context, error)
 
 	// OpenChildScope opens a scope as a child of the scope on ctx, and
@@ -152,8 +152,8 @@ type TransactionCoordinator interface {
 
 	// Seal is the owner's cut-off before commit or rollback. It fails with
 	// ErrTxRollbackOnly when the root is marked. After it returns, OpenScope
-	// refuses and CompleteScope refuses with ErrCalloutSuperseded. Commit
-	// after a successful Seal commits the root and every completed scope.
+	// and CompleteScope both refuse with ErrCalloutSuperseded. Commit after a
+	// successful Seal commits the root and every completed scope.
 	Seal(ctx context.Context, txID string) error
 }
 

@@ -381,7 +381,7 @@ func testCoordProcessorScopeAbsorbsMark(t *testing.T, h Harness, co spi.Transact
 	f.requireAbsent(t, w, "a discarded scope's write must not commit")
 }
 
-// Contract 8. After Seal, OpenScope refuses and CompleteScope refuses with
+// Contract 8. After Seal, OpenScope and CompleteScope both refuse with
 // ErrCalloutSuperseded, while the callout is still current. Commit then
 // commits the root and every scope completed before Seal.
 func testCoordSealCutsOff(t *testing.T, h Harness, co spi.TransactionCoordinator) {
@@ -397,7 +397,7 @@ func testCoordSealCutsOff(t *testing.T, h Harness, co spi.TransactionCoordinator
 
 	returnsWithoutWaiting(t, "Seal", func() error { return f.co.Seal(f.txCtx, f.txID) })
 	_, err := f.tryOpen(t, pair(c, 1, 0))
-	require.Error(t, err, "OpenScope must refuse after Seal")
+	require.ErrorIs(t, err, spi.ErrCalloutSuperseded, "OpenScope must refuse after Seal as superseded")
 	require.ErrorIs(t, f.co.CompleteScope(s1), spi.ErrCalloutSuperseded,
 		"a scope opened before Seal must not complete after it")
 

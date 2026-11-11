@@ -66,25 +66,27 @@ type coordFixture struct {
 
 func newCoordFixture(t *testing.T, h Harness, co spi.TransactionCoordinator) *coordFixture {
 	t.Helper()
-	f, _ := newSeededCoordFixture(t, h, co, false)
-	return f
+	return beginCoordFixture(t, h, co, tenantContext(h.NewTenant()))
 }
 
-// newSeededCoordFixture is newCoordFixture that, when seed is true, first
-// commits an entity in a transaction of its own and returns its id. The
-// entity is committed before the fixture's transaction begins, so a store
-// whose transaction reads at the snapshot taken at Begin sees it.
-func newSeededCoordFixture(t *testing.T, h Harness, co spi.TransactionCoordinator, seed bool) (*coordFixture, string) {
+// newSeededCoordFixture commits an entity in a transaction of its own, then
+// begins the fixture's transaction, and returns the entity's id. The entity
+// is committed before the transaction begins, so a store whose transaction
+// reads at the snapshot taken at Begin sees it.
+func newSeededCoordFixture(t *testing.T, h Harness, co spi.TransactionCoordinator) (*coordFixture, string) {
 	t.Helper()
 	ctx := tenantContext(h.NewTenant())
-	var id string
-	if seed {
-		id = seedCoordEntity(t, h, ctx)
-	}
+	id := seedCoordEntity(t, h, ctx)
+	return beginCoordFixture(t, h, co, ctx), id
+}
+
+// beginCoordFixture begins the fixture's transaction for the tenant on ctx.
+func beginCoordFixture(t *testing.T, h Harness, co spi.TransactionCoordinator, ctx spiCtx) *coordFixture {
+	t.Helper()
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 	txID, txCtx := beginGuarded(t, tm, ctx)
-	return &coordFixture{h: h, co: co, ctx: ctx, tm: tm, txID: txID, txCtx: txCtx}, id
+	return &coordFixture{h: h, co: co, ctx: ctx, tm: tm, txID: txID, txCtx: txCtx}
 }
 
 func pair(callout string, major, minor uint32) spi.CalloutPair {
@@ -371,7 +373,7 @@ func testCoordCompleteRefusalOrder(t *testing.T, h Harness, co spi.TransactionCo
 	})
 
 	t.Run("RollbackOnlyBeforeScopeConflict", func(t *testing.T) {
-		f, id := newSeededCoordFixture(t, h, co, true)
+		f, id := newSeededCoordFixture(t, h, co)
 		c := f.callout(t, f.txCtx)
 		s1 := f.open(t, pair(c, 1, 0))
 		s2 := f.open(t, pair(c, 1, 0))
@@ -471,7 +473,9 @@ func testCoordFirstMarkCodeWins(t *testing.T, h Harness, co spi.TransactionCoord
 }
 
 // Contract 7. A refusal for a mark carries the code of the nearest marked
-// scope on the chain it checks, not of a marked scope further up.
+// scope on the chain it checks: the scope's own when it is marked, else its
+// nearest marked ancestor's, however far up, and never that of a marked scope
+// further up.
 func testCoordRefusalNamesNearestMark(t *testing.T, h Harness, co spi.TransactionCoordinator) {
 	f := newCoordFixture(t, h, co)
 	p, err := f.co.OpenChildScope(f.txCtx)
@@ -479,6 +483,10 @@ func testCoordRefusalNamesNearestMark(t *testing.T, h Harness, co spi.Transactio
 	c := f.callout(t, p)
 	s := f.open(t, pair(c, 1, 0))
 	g := f.open(t, pair(c, 1, 0))
+	q, err := f.co.OpenChildScope(p) // stays unmarked, between p and k
+	require.NoError(t, err)
+	d := f.callout(t, q)
+	k := f.open(t, pair(d, 1, 0))
 	r0 := f.callout(t, f.txCtx)
 	r := f.open(t, pair(r0, 1, 0))
 
@@ -497,7 +505,20 @@ func testCoordRefusalNamesNearestMark(t *testing.T, h Harness, co spi.Transactio
 	_, err = f.tryOpen(t, pair(r0, 1, 0))
 	requireRollbackOnly(t, err, "ROOT_FAILED",
 		"OpenScope under the marked root must name the root's code")
+
+	_, err = f.tryOpen(t, pair(d, 1, 0))
+	requireRollbackOnly(t, err, "NEAR_FAILED",
+		"OpenScope under an unmarked parent must name its nearest marked ancestor's code, not the root's")
+	requireRollbackOnly(t, f.co.CheckScope(k), "NEAR_FAILED",
+		"CheckScope must name the marked grandparent's code past an unmarked parent, not the root's")
+	requireRollbackOnly(t, f.co.CompleteScope(k), "NEAR_FAILED",
+		"CompleteScope must name the marked grandparent's code past an unmarked parent, not the root's")
+	require.NoError(t, f.co.EndCallout(q, f.txID, d))
+	require.NoError(t, f.co.DiscardScope(q, ""))
+
 	require.NoError(t, f.co.EndCallout(p, f.txID, c))
+	requireRollbackOnly(t, f.co.CompleteScope(p), "NEAR_FAILED",
+		"CompleteScope of a marked scope must name its own code, not its marked parent's")
 	require.NoError(t, f.co.EndCallout(f.txCtx, f.txID, r0))
 	requireRollbackOnly(t, f.co.Seal(f.txCtx, f.txID), "ROOT_FAILED",
 		"Seal must name the root's code")
@@ -523,6 +544,7 @@ func testCoordDiscardAfterRefusedComplete(t *testing.T, h Harness, co spi.Transa
 
 		requireRollbackOnly(t, f.co.CompleteScope(s), "INNER_FAILED",
 			"a scope whose child marked it must not complete")
+		later, sibling := f.laterWork(t)
 		require.NoError(t, f.co.DiscardScope(s, "OUTER_FAILED"),
 			"DiscardScope after a refused completion must be allowed")
 		requireRollbackOnly(t, f.co.CheckScope(p), "OUTER_FAILED",
@@ -533,6 +555,8 @@ func testCoordDiscardAfterRefusedComplete(t *testing.T, h Harness, co spi.Transa
 		f.sealAndCommit(t)
 		f.requireExists(t, root, "the root's own write must commit")
 		f.requireAbsent(t, w, "a scope refused completion must not commit")
+		f.requireExists(t, later, "DiscardScope after a refused completion must not remove the root's later write")
+		f.requireExists(t, sibling, "DiscardScope after a refused completion must not remove a later completed scope")
 	})
 	t.Run("AfterSuperseded", func(t *testing.T) {
 		f := newCoordFixture(t, h, co)
@@ -543,6 +567,10 @@ func testCoordDiscardAfterRefusedComplete(t *testing.T, h Harness, co spi.Transa
 		require.NoError(t, f.co.AdvanceCallout(f.txCtx, f.txID, c, 2))
 
 		require.ErrorIs(t, f.co.CompleteScope(s), spi.ErrCalloutSuperseded)
+		later := f.save(t, f.txCtx)
+		sib := f.open(t, pair(c, 2, 0)) // a sibling of s, at the advanced major
+		sibling := f.save(t, sib)
+		require.NoError(t, f.co.CompleteScope(sib))
 		require.NoError(t, f.co.DiscardScope(s, ""),
 			"DiscardScope after a refused completion must be allowed")
 		require.NoError(t, f.co.EndCallout(f.txCtx, f.txID, c))
@@ -550,7 +578,23 @@ func testCoordDiscardAfterRefusedComplete(t *testing.T, h Harness, co spi.Transa
 		f.sealAndCommit(t)
 		f.requireExists(t, root, "the root's own write must commit")
 		f.requireAbsent(t, w, "a scope refused completion must not commit")
+		f.requireExists(t, later, "DiscardScope after a refused completion must not remove the root's later write")
+		f.requireExists(t, sibling, "DiscardScope after a refused completion must not remove a later completed scope")
 	})
+}
+
+// laterWork is the work a transaction does after a scope's completion was
+// refused: a write on the root, and a scope of a new callout of the root that
+// writes and completes. It returns the two entities' ids.
+func (f *coordFixture) laterWork(t *testing.T) (later, sibling string) {
+	t.Helper()
+	later = f.save(t, f.txCtx)
+	c := f.callout(t, f.txCtx)
+	s := f.open(t, pair(c, 1, 0))
+	sibling = f.save(t, s)
+	require.NoError(t, f.co.CompleteScope(s))
+	require.NoError(t, f.co.EndCallout(f.txCtx, f.txID, c))
+	return later, sibling
 }
 
 // Contract 7 and Seal. The owner learns the code of the failed request that
@@ -633,7 +677,7 @@ func testCoordSealCutsOff(t *testing.T, h Harness, co spi.TransactionCoordinator
 // each writes it. The first to complete wins; the second refuses with
 // ErrScopeConflict and is discarded.
 func testCoordScopeConflict(t *testing.T, h Harness, co spi.TransactionCoordinator) {
-	f, id := newSeededCoordFixture(t, h, co, true)
+	f, id := newSeededCoordFixture(t, h, co)
 	c := f.callout(t, f.txCtx)
 
 	s1 := f.open(t, pair(c, 1, 0))

@@ -79,9 +79,11 @@ type CalloutPair struct {
 // # Rollback-only
 //
 // A scope is marked (rollback-only) by a DiscardScope of one of its children
-// with a non-empty failedCode: the code the child's failed request was
-// answered with. The coordinator records the code of a scope's first mark; a
-// later mark of the same scope keeps it. A marked scope cannot complete. The
+// with a non-empty failedCode, the code that names the failure: for a child
+// whose completion was refused for a mark, the refusal's FailedCode;
+// otherwise the code the child's failed request was answered with. The
+// coordinator records the code of a scope's first mark; a later mark of the
+// same scope keeps it. A marked scope cannot complete. The
 // transaction is rollback-only when the root is marked.
 //
 // Every refusal for a mark (by OpenScope, CheckScope, CompleteScope or Seal)
@@ -157,15 +159,21 @@ type TransactionCoordinator interface {
 	CompleteScope(ctx context.Context) error
 
 	// DiscardScope removes the writes of the scope on ctx and those of every
-	// scope under it. With failedCode "" it marks nothing. With a non-empty
-	// failedCode, the code the scope's failed request was answered with, it
-	// also marks the scope's parent and records the code for it, unless the
-	// parent is already marked: the first mark's code stands.
+	// scope under it. With failedCode "" it marks nothing. A non-empty
+	// failedCode is the code that names the failure: for a scope whose
+	// completion was refused for a mark, the refusal's FailedCode; otherwise
+	// the code the scope's failed request was answered with. With it,
+	// DiscardScope also marks the scope's parent and records the code for
+	// it, unless the parent is already marked: the first mark's code stands.
 	//
 	// DiscardScope of a scope whose completion was refused is allowed. The
 	// refused completion has already discarded the scope, so DiscardScope
-	// removes nothing more; with a non-empty failedCode it still marks the
+	// removes nothing more: no write made since, by the transaction or by any
+	// other scope, is removed. With a non-empty failedCode it still marks the
 	// parent.
+	//
+	// The caller does not call DiscardScope after a successful CompleteScope
+	// of the same scope; a coordinator may refuse such a call.
 	DiscardScope(ctx context.Context, failedCode string) error
 
 	// Seal is the owner's cut-off before commit or rollback. It fails with a

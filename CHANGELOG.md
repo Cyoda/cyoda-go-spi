@@ -55,15 +55,18 @@ MAINTAINING.md.
   `ProcessorScopeAbsorbsMark`, `SealCutsOff`, `ScopeConflict`) run only for a
   capable factory and skip otherwise.
 
-  A mark carries the code the failed request was answered with:
+  A mark carries the code that names the failure:
   `DiscardScope(ctx, failedCode string)` marks the parent when `failedCode`
   is not empty and records the code; the first mark of a scope keeps its
-  code. `OpenScope`, `CheckScope`, `CompleteScope` and `Seal` refuse for a
+  code. For a scope refused completion for a mark, the code is the
+  refusal's `FailedCode`; otherwise it is the code the failed request was
+  answered with. `OpenScope`, `CheckScope`, `CompleteScope` and `Seal` refuse for a
   mark with a `*RollbackOnlyError` (it matches `ErrTxRollbackOnly` under
   `errors.Is`), whose `FailedCode` is the code of the nearest marked scope on
   the chain checked; for `Seal`, the root's. `DiscardScope` of a scope whose
   completion was refused is allowed: it removes nothing more, and with a
-  code it still marks the parent. The cases that conflict over a committed
+  code it still marks the parent. DiscardScope is not called after a
+  successful `CompleteScope`; a coordinator may refuse it. The cases that conflict over a committed
   entity (`ScopeConflict`, `CompleteRefusalOrder/RollbackOnlyBeforeScopeConflict`)
   commit it before the case's transaction begins, so a store that reads at
   the snapshot taken at `Begin` passes them.

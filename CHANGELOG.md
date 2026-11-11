@@ -25,6 +25,15 @@ MAINTAINING.md.
   last replaces `Claim/NilHeartbeatBaseline`; the other `AsyncSearch/Claim`
   and `SaveResults` cases now age a job by advancing the clock.
 
+- **Savepoint nesting is stated and pinned.** A rollback to a savepoint
+  destroys every savepoint taken after it and keeps the savepoint itself; a
+  release destroys the savepoint and every savepoint taken after it and keeps
+  their work. `Savepoint`, `RollbackToSavepoint` and `ReleaseSavepoint` now
+  say so. The new conformance cases `Savepoint/RollbackDropsLaterSavepoints`,
+  `Savepoint/SurvivesOwnRollback`, `Savepoint/ReleaseReleasesLaterSavepoints`
+  and `Savepoint/OuterRollbackAfterReleasedNested` fail on a plugin that does
+  otherwise.
+
 ### Breaking
 
 - **A transaction's own delete is its latest state.** Deleting an entity

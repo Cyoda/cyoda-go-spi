@@ -107,7 +107,9 @@ type TransactionManager interface {
 	// has issued none returns the zero time.
 	LatestRecordedTime(ctx context.Context) (time.Time, error)
 
-	// Savepoint creates a named savepoint within the given transaction. An
+	// Savepoint creates a named savepoint within the given transaction. A
+	// savepoint lives until a rollback to an earlier savepoint or a release
+	// of itself or of an earlier one destroys it. An
 	// implementation that keeps the transaction's state in
 	// [TransactionState] does it by snapshotting tx.Buffer / tx.ReadSet /
 	// tx.WriteSet / tx.Deletes, with tx.DeleteAttribution snapshotted
@@ -123,7 +125,10 @@ type TransactionManager interface {
 	Savepoint(ctx context.Context, txID string) (savepointID string, err error)
 
 	// RollbackToSavepoint rolls back all work done since the savepoint was
-	// created. An implementation that keeps the transaction's state in
+	// created. It destroys every savepoint taken after that savepoint and
+	// keeps the savepoint itself, so it can be rolled back to again or
+	// released; rolling back to a destroyed savepoint returns
+	// ErrSavepointNotFound. An implementation that keeps the transaction's state in
 	// [TransactionState] does it by replacing tx.Buffer / tx.ReadSet /
 	// tx.WriteSet / tx.Deletes with the snapshot taken at Savepoint time,
 	// restoring tx.DeleteAttribution paired with tx.Deletes.
@@ -148,7 +153,9 @@ type TransactionManager interface {
 	RollbackToSavepoint(ctx context.Context, txID string, savepointID string) error
 
 	// ReleaseSavepoint releases a savepoint, merging its work into the
-	// parent transaction. The work done since the savepoint is already part
+	// parent transaction. It destroys the savepoint and every savepoint
+	// taken after it, and keeps their work; a later rollback to an earlier
+	// savepoint still discards that work. The work done since the savepoint is already part
 	// of the transaction (for an implementation that keeps its state in
 	// [TransactionState], in tx.Buffer / tx.ReadSet / tx.WriteSet /
 	// tx.Deletes / tx.DeleteAttribution) — Release only removes the

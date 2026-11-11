@@ -39,6 +39,12 @@ type TransactionManager interface {
 	// contract below and [TransactionState]'s concurrency contract
 	// (cyoda-go serialises through its per-transaction gate).
 	//
+	// A store whose factory is [TransactionCoordinationCapable] (with a
+	// non-nil coordinator) is the exception: Join on it allows concurrent
+	// operations on one transaction from any number of goroutines and
+	// nodes, and the one-operation-at-a-time rule and the Application
+	// contract below do not apply to it.
+	//
 	// Two distinct contracts apply to a joined tx:
 	//
 	//   - Plugin contract, for an implementation that keeps the

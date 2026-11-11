@@ -37,6 +37,22 @@ MAINTAINING.md.
   `Savepoint/OuterRollbackAfterReleasedNested` fail on a plugin that does
   otherwise.
 
+- **`TransactionCoordinationCapable`** (optional on a `StoreFactory`): a
+  store that implements it supplies a `TransactionCoordinator`, which
+  coordinates a transaction's callouts (`BeginCallout`, `AdvanceCallout`,
+  `EndCallout`), its callback and child scopes (`OpenScope`,
+  `OpenChildScope`, `CheckScope`, `CompleteScope`, `DiscardScope`) and the
+  owner's cut-off (`Seal`), with the sentinels `ErrCalloutSuperseded`,
+  `ErrTxRollbackOnly` and `ErrScopeConflict`. Its transactions are
+  location-independent: `Join` on it allows concurrent operations on one
+  transaction from any number of goroutines and nodes. A nil coordinator with
+  a nil error means the factory is not capable. The `Coordination/*`
+  conformance cases (`ScopeWritesBelongToScope`, `CompleteMergesIntoParent`,
+  `CompletedVisibleToParent`, `OpenScopeChecksAndAbsorbsMinor`,
+  `AdvanceStopsLowerMajor`, `CompleteRefusalOrder`, `RollbackOnlyMarksParent`,
+  `ProcessorScopeAbsorbsMark`, `SealCutsOff`, `ScopeConflict`) run only for a
+  capable factory and skip otherwise.
+
 ### Breaking
 
 - **A transaction's own delete is its latest state.** Deleting an entity

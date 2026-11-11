@@ -52,6 +52,27 @@ func TestConformance(t *testing.T) {
 }
 ```
 
+### Optional Capabilities
+
+A plugin may implement these interfaces in addition to the required ones.
+cyoda-go detects each by type assertion; a plugin without one is
+conformant.
+
+- `DescribablePlugin` (on the `Plugin`): lists the configuration variables
+  the plugin reads.
+- `Startable` (on the `StoreFactory`): `Start` runs after `NewFactory` and
+  before any store-facing call.
+- `CompositeUniqueKeyCapable` (on the `StoreFactory`): composite unique-key
+  support.
+- `TransactionCoordinationCapable` (on the `StoreFactory`): the store
+  coordinates a transaction's callouts and callback scopes itself, so a
+  transaction can be served by any cyoda-go node. A nil coordinator with a
+  nil error means "not capable". The `Coordination/*` conformance cases run
+  only for a capable factory.
+- `GroupedAggregator` (on the `EntityStore`): grouped aggregation in the
+  store. The `GroupedAggregator/*` conformance cases run only when the
+  store implements it.
+
 ### `AdvanceClock` Contract
 
 The harness calls `AdvanceClock(d time.Duration)` between writes that need distinct timestamps. After `AdvanceClock` returns, every subsequent timestamp the plugin assigns must strictly dominate every timestamp assigned before the call. `d > 0`.

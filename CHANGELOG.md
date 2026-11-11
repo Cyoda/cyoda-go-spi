@@ -50,8 +50,23 @@ MAINTAINING.md.
   conformance cases (`ScopeWritesBelongToScope`, `CompleteMergesIntoParent`,
   `CompletedVisibleToParent`, `OpenScopeChecksAndAbsorbsMinor`,
   `AdvanceStopsLowerMajor`, `CompleteRefusalOrder`, `RollbackOnlyMarksParent`,
+  `EmptyCodeDoesNotMark`, `FirstMarkCodeWins`, `RefusalNamesNearestMark`,
+  `DiscardAfterRefusedComplete`, `MarkCodeReachesSeal`,
   `ProcessorScopeAbsorbsMark`, `SealCutsOff`, `ScopeConflict`) run only for a
   capable factory and skip otherwise.
+
+  A mark carries the code the failed request was answered with:
+  `DiscardScope(ctx, failedCode string)` marks the parent when `failedCode`
+  is not empty and records the code; the first mark of a scope keeps its
+  code. `OpenScope`, `CheckScope`, `CompleteScope` and `Seal` refuse for a
+  mark with a `*RollbackOnlyError` (it matches `ErrTxRollbackOnly` under
+  `errors.Is`), whose `FailedCode` is the code of the nearest marked scope on
+  the chain checked; for `Seal`, the root's. `DiscardScope` of a scope whose
+  completion was refused is allowed: it removes nothing more, and with a
+  code it still marks the parent. The cases that conflict over a committed
+  entity (`ScopeConflict`, `CompleteRefusalOrder/RollbackOnlyBeforeScopeConflict`)
+  commit it before the case's transaction begins, so a store that reads at
+  the snapshot taken at `Begin` passes them.
 
 ### Breaking
 

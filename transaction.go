@@ -42,10 +42,10 @@ type TransactionManager interface {
 	// A store whose factory is [TransactionCoordinationCapable] (with a
 	// non-nil coordinator) is the exception: Join on it allows concurrent
 	// operations on one transaction from any number of goroutines and
-	// nodes, and the one-operation-at-a-time rule and the Application
-	// contract below do not apply to it.
+	// nodes, and the one-operation-at-a-time rule and the two contracts
+	// below do not apply to it.
 	//
-	// Two distinct contracts apply to a joined tx:
+	// For any other store, two distinct contracts apply to a joined tx:
 	//
 	//   - Plugin contract, for an implementation that keeps the
 	//     transaction's state in [TransactionState]'s mutable fields

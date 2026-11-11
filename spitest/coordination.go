@@ -168,7 +168,8 @@ func testCoordScopeWritesBelongToScope(t *testing.T, h Harness, co spi.Transacti
 }
 
 // Contract 2. A completed scope's writes become its parent's, so a later
-// discard of the parent removes them; a completed parent keeps them.
+// discard of the parent, or of any ancestor, removes them; a completed parent
+// keeps them.
 func testCoordCompleteMergesIntoParent(t *testing.T, h Harness, co spi.TransactionCoordinator) {
 	run := func(t *testing.T, completeProcessor bool) (root, w string, f *coordFixture) {
 		f = newCoordFixture(t, h, co)
@@ -199,6 +200,27 @@ func testCoordCompleteMergesIntoParent(t *testing.T, h Harness, co spi.Transacti
 		root, w, f := run(t, true)
 		f.requireExists(t, root, "the root's own write must commit")
 		f.requireExists(t, w, "a completed child of a completed parent must commit")
+	})
+	t.Run("GrandparentDiscarded", func(t *testing.T) {
+		f := newCoordFixture(t, h, co)
+		root := f.save(t, f.txCtx)
+		p, err := f.co.OpenChildScope(f.txCtx)
+		require.NoError(t, err)
+		c := f.callout(t, p)
+		s1 := f.open(t, pair(c, 1, 0))
+		n := f.callout(t, s1, pair(c, 1, 0))
+
+		s2 := f.open(t, pair(n, 1, 0), pair(c, 1, 0))
+		w := f.save(t, s2)
+		require.NoError(t, f.co.CompleteScope(s2))
+		require.NoError(t, f.co.EndCallout(s1, f.txID, n))
+		require.NoError(t, f.co.CompleteScope(s1))
+		require.NoError(t, f.co.EndCallout(p, f.txID, c))
+		require.NoError(t, f.co.DiscardScope(p, false))
+
+		f.sealAndCommit(t)
+		f.requireExists(t, root, "the root's own write must commit")
+		f.requireAbsent(t, w, "a completed grandchild's write must go with its discarded grandparent")
 	})
 }
 
@@ -331,13 +353,15 @@ func testCoordCompleteRefusalOrder(t *testing.T, h Harness, co spi.TransactionCo
 	})
 }
 
-// Contract 7. DiscardScope(ctx, true) marks the parent: a scope under it
-// cannot open or complete, CheckScope reports it, and with the root marked
-// Seal fails.
+// Contract 7. DiscardScope(ctx, true) marks the parent: a scope under it, at
+// any depth, cannot open or complete, CheckScope reports it, and with the root
+// marked Seal fails.
 func testCoordRollbackOnlyMarksParent(t *testing.T, h Harness, co spi.TransactionCoordinator) {
 	f := newCoordFixture(t, h, co)
 	c := f.callout(t, f.txCtx)
 	s0 := f.open(t, pair(c, 1, 0))
+	n := f.callout(t, s0, pair(c, 1, 0))
+	g := f.open(t, pair(n, 1, 0), pair(c, 1, 0))
 	s1 := f.open(t, pair(c, 1, 0))
 	f.save(t, s1)
 
@@ -346,6 +370,14 @@ func testCoordRollbackOnlyMarksParent(t *testing.T, h Harness, co spi.Transactio
 	_, err := f.tryOpen(t, pair(c, 1, 0))
 	require.ErrorIs(t, err, spi.ErrTxRollbackOnly,
 		"a scope whose parent (the root) is marked must not open")
+	_, err = f.tryOpen(t, pair(n, 1, 0), pair(c, 1, 0))
+	require.ErrorIs(t, err, spi.ErrTxRollbackOnly,
+		"a scope whose grandparent (the root) is marked must not open")
+	require.ErrorIs(t, f.co.CheckScope(g), spi.ErrTxRollbackOnly,
+		"CheckScope must report a marked grandparent")
+	require.ErrorIs(t, f.co.CompleteScope(g), spi.ErrTxRollbackOnly,
+		"a scope whose grandparent is marked must not complete")
+	require.NoError(t, f.co.EndCallout(s0, f.txID, n))
 	require.ErrorIs(t, f.co.CheckScope(s0), spi.ErrTxRollbackOnly,
 		"CheckScope must report a marked parent")
 	require.ErrorIs(t, f.co.CompleteScope(s0), spi.ErrTxRollbackOnly,

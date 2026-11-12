@@ -66,7 +66,11 @@ MAINTAINING.md.
   the chain checked; for `Seal`, the root's. `DiscardScope` of a scope whose
   completion was refused is allowed: it removes nothing more, and with a
   code it still marks the parent. DiscardScope is not called after a
-  successful `CompleteScope`; a coordinator may refuse it. The cases that conflict over a committed
+  successful `CompleteScope`; a coordinator may refuse it. A coordinator
+  must never let `Seal` succeed after a mark it failed to record: when
+  `DiscardScope` with a code cannot record the mark, `Seal` of the
+  transaction must still fail, and a `DiscardScope` error does not release
+  the coordinator from this. The cases that conflict over a committed
   entity (`ScopeConflict`, `CompleteRefusalOrder/RollbackOnlyBeforeScopeConflict`)
   commit it before the case's transaction begins, so a store that reads at
   the snapshot taken at `Begin` passes them.

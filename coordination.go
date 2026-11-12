@@ -86,6 +86,12 @@ type CalloutPair struct {
 // same scope keeps it. A marked scope cannot complete. The
 // transaction is rollback-only when the root is marked.
 //
+// A coordinator must never let Seal succeed after a mark it failed to
+// record. If DiscardScope with a non-empty failedCode cannot record the mark,
+// the coordinator must make the transaction's Seal fail: for example by
+// keeping the scope unresolved so that Seal fails, or by having Seal wait
+// until the scope's lease expires and then treat it as rollback-only.
+//
 // Every refusal for a mark (by OpenScope, CheckScope, CompleteScope or Seal)
 // is a *RollbackOnlyError, which matches ErrTxRollbackOnly under errors.Is.
 // Its FailedCode is the code recorded for the nearest marked scope on the
@@ -172,12 +178,17 @@ type TransactionCoordinator interface {
 	// other scope, is removed. With a non-empty failedCode it still marks the
 	// parent.
 	//
+	// A DiscardScope error does not release the coordinator from recording
+	// the mark: if it could not record it, Seal of the transaction must still
+	// fail (see "Rollback-only" on TransactionCoordinator).
+	//
 	// The caller does not call DiscardScope after a successful CompleteScope
 	// of the same scope; a coordinator may refuse such a call.
 	DiscardScope(ctx context.Context, failedCode string) error
 
 	// Seal is the owner's cut-off before commit or rollback. It fails with a
-	// *RollbackOnlyError, carrying the root's code, when the root is marked.
+	// *RollbackOnlyError, carrying the root's code, when the root is marked,
+	// including a mark that DiscardScope failed to record.
 	// After it returns, OpenScope and CompleteScope both refuse with
 	// ErrCalloutSuperseded. Commit after a successful Seal commits the root
 	// and every completed scope.

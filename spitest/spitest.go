@@ -204,6 +204,7 @@ func StoreFactoryConformance(t *testing.T, h Harness) {
 	t.Run("Ping", func(t *testing.T) { runPingSuite(t, h, tracker) })
 	t.Run("ConsistencyTime", func(t *testing.T) { runConsistencyTimeSuite(t, h, tracker) })
 	t.Run("Model", func(t *testing.T) { runModelSuite(t, h, tracker) })
+	t.Run("ModelExtend", func(t *testing.T) { runModelExtendSuite(t, h, tracker) })
 	t.Run("KeyValue", func(t *testing.T) { runKeyValueSuite(t, h, tracker) })
 	t.Run("Message", func(t *testing.T) { runMessageSuite(t, h, tracker) })
 	t.Run("Workflow", func(t *testing.T) { runWorkflowSuite(t, h, tracker) })

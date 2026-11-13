@@ -12,7 +12,22 @@ MAINTAINING.md.
 
 ## [Unreleased]
 
+### Breaking
+
+- **`ModelStore.ExtendSchema` commits in its own transaction.** It never
+  joins a transaction on ctx, is visible to every later `Get` on return,
+  treats an already-held delta as a no-op, never returns `ErrConflict` or
+  `ErrRetryExhausted` for contention (it waits or retries until ctx ends),
+  is loss-free, and refuses a model that is not LOCKED with
+  `ErrModelNotLocked`. `ModelStore.Get` reads the latest committed model
+  and ignores any transaction on ctx. `ErrRetryExhausted` no longer
+  documents schema extension.
+
 ### Added
+
+- **`ErrModelNotLocked`** and the `ModelExtend/ExtendSchema/*` and
+  `Model/Lock/NotFound` conformance cases. The `ModelExtend` suite is
+  skipped for a factory without `SetApplyFunc`.
 
 - **`Clock` and `WithClock`**: a factory option that gives a plugin the
   platform's business clock (`FactoryConfig.Clock`, nil when absent). A

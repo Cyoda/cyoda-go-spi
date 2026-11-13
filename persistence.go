@@ -548,6 +548,8 @@ type SchemaDelta []byte
 
 type ModelStore interface {
 	Save(ctx context.Context, desc *ModelDescriptor) error
+	// Get reads the latest committed model, with every committed schema
+	// extension folded in. It ignores any transaction on ctx.
 	Get(ctx context.Context, modelRef ModelRef) (*ModelDescriptor, error)
 	GetAll(ctx context.Context) ([]ModelRef, error)
 	Delete(ctx context.Context, modelRef ModelRef) error
@@ -555,27 +557,30 @@ type ModelStore interface {
 	Unlock(ctx context.Context, modelRef ModelRef) error
 	IsLocked(ctx context.Context, modelRef ModelRef) (bool, error)
 	SetChangeLevel(ctx context.Context, modelRef ModelRef, level ChangeLevel) error
-	// ExtendSchema appends a schema delta for the model at ref. The
-	// delta is an opaque, plugin-agnostic blob that the plugin stores
-	// verbatim in its extension log; folding the log into the current
-	// schema is done on read via a plugin-injected ApplyFunc.
+	// ExtendSchema adds a schema delta to the model at ref. The delta is an
+	// opaque, plugin-agnostic blob that the plugin stores verbatim; folding
+	// it into the current schema is done by a plugin-injected ApplyFunc.
 	//
-	// Contract:
-	//   - Success (nil return) means the extension is durably committed
-	//     and visible to subsequent reads on this node.
-	//   - A non-nil error means no persisted effect — no log entry,
-	//     no savepoint, no partial state.
-	//   - Plugins with a native conflict surface (sqlite SQLITE_BUSY,
-	//     cassandra LWT applied:false) retry transparently up to a
-	//     configurable budget. On exhaustion without ctx cancellation,
-	//     return ErrRetryExhausted.
-	//   - Context cancellation between retry attempts returns ctx.Err()
-	//     (wrapped with attempt count), not ErrRetryExhausted. Mid-attempt
-	//     cancellation follows backend-native behavior.
-	//   - Plugins without a conflict surface (memory, postgres) commit
-	//     immediately or fail with the backend's native error.
-	//
-	// Empty or nil deltas are a no-op and return nil.
+	//  1. It commits in its own transaction and never joins a transaction on
+	//     ctx. When it returns nil the delta is durably committed, whatever
+	//     then happens to the caller's transaction.
+	//  2. It is visible on return: after a nil return, every later Get on
+	//     any node of the store returns a schema that includes the delta. It
+	//     may be visible to others before the call returns.
+	//  3. It is idempotent: a delta the schema already holds, and an empty or
+	//     nil delta, is a successful no-op that changes and logs nothing.
+	//  4. It never conflicts: contention with other extenders or with entity
+	//     transactions never produces an error. The store waits or retries
+	//     until ctx ends, and never returns ErrConflict or ErrRetryExhausted
+	//     for contention. A store saturated by load keeps its own retryable
+	//     unavailable error, as any store operation does.
+	//  5. It is loss-free: the folded schema includes every delta whose call
+	//     returned nil.
+	//  6. Errors are ErrNotFound (no such model), ErrModelNotLocked (the model
+	//     is not LOCKED), an error from the ApplyFunc refusing the delta,
+	//     storage unavailable, and a ctx error. A non-nil error means the
+	//     outcome is unknown: the delta may or may not have been applied.
+	//     Retrying is safe, because a delta already applied is a no-op (3).
 	ExtendSchema(ctx context.Context, ref ModelRef, delta SchemaDelta) error
 }
 

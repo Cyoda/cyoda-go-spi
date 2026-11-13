@@ -3,7 +3,6 @@ package spitest
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -70,15 +69,16 @@ type applyFuncSetter interface {
 }
 
 func runModelExtendSuite(t *testing.T, h Harness, tracker *skipTracker) {
+	skipIfRegistered(t, h, tracker) // Harness.Skip["ModelExtend"] opts the whole suite out
 	setter, ok := h.Factory.(applyFuncSetter)
 	if !ok {
-		t.Skip("factory has no SetApplyFunc; ExtendSchema cases need the toy apply function installed")
+		t.Fatalf("the harness factory %T has no SetApplyFunc, so the ExtendSchema cases cannot install their apply function; "+
+			"expose SetApplyFunc on the harness factory (a wrapper must forward it), or opt out explicitly with Harness.Skip[%q]",
+			h.Factory, "ModelExtend")
 	}
 	// A factory accepts its apply function once, so it is wired once for the
 	// whole suite.
-	var once sync.Once
-	wire := func() { once.Do(func() { setter.SetApplyFunc(toyApply) }) }
-	wire()
+	setter.SetApplyFunc(toyApply)
 
 	run := func(name string, fn func(*testing.T, Harness)) {
 		runSubtest(t, h, tracker, name, fn)
@@ -87,6 +87,7 @@ func runModelExtendSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	run("ExtendSchema/IgnoresCallerTransaction", testExtendIgnoresCallerTx)
 	run("ExtendSchema/GetIgnoresCallerTransaction", testExtendGetIgnoresCallerTx)
 	run("ExtendSchema/NoOpWritesNothing", testExtendNoOp)
+	run("ExtendSchema/EmptyDeltaIsNoOp", testExtendEmptyDelta)
 	run("ExtendSchema/ConcurrentExtendersAllSucceed", testExtendConcurrent)
 	run("ExtendSchema/NotLockedRefused", testExtendNotLockedRefused)
 	run("ExtendSchema/MissingModel", testExtendMissingModel)
@@ -145,6 +146,8 @@ func testExtendGetIgnoresCallerTx(t *testing.T, h Harness) {
 		"Get reads the latest committed model whatever transaction ctx carries")
 }
 
+// testExtendNoOp is behavioural only: repeating a delta leaves the schema
+// right. That the repeat appends nothing is checked per plugin.
 func testExtendNoOp(t *testing.T, h Harness) {
 	ctx, ms, ref := lockedToyModel(t, h)
 	require.NoError(t, ms.ExtendSchema(ctx, ref, toyDelta("b")))
@@ -169,7 +172,6 @@ func testExtendConcurrent(t *testing.T, h Harness) {
 	wg.Wait()
 	for i, err := range errs {
 		require.NoError(t, err, "extender %d", i)
-		require.False(t, errors.Is(err, spi.ErrConflict) || errors.Is(err, spi.ErrRetryExhausted))
 	}
 	fields := []string{"a"}
 	for i := 0; i < n; i++ {
@@ -199,4 +201,11 @@ func testExtendMissingModel(t *testing.T, h Harness) {
 	require.NoError(t, err)
 	err = ms.ExtendSchema(ctx, spi.ModelRef{EntityName: "never", ModelVersion: "1"}, toyDelta("b"))
 	require.ErrorIs(t, err, spi.ErrNotFound)
+}
+
+func testExtendEmptyDelta(t *testing.T, h Harness) {
+	ctx, ms, ref := lockedToyModel(t, h)
+	require.NoError(t, ms.ExtendSchema(ctx, ref, spi.SchemaDelta{}))
+	require.NoError(t, ms.ExtendSchema(ctx, ref, nil))
+	require.Equal(t, toySchema("a"), schemaOf(t, ctx, ms, ref))
 }

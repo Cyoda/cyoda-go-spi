@@ -15,9 +15,10 @@ import (
 
 // toyApply is the schema fold the ExtendSchema cases install. A schema is
 // {"fields":[...]} (sorted, deduplicated); a delta is a JSON array of field
-// names; applying a delta is the sorted union. apply(s, nil) re-encodes s
-// identically.
-func toyApply(base []byte, delta spi.SchemaDelta) ([]byte, error) {
+// names; applying a list of deltas is the sorted union of the schema and every
+// delta. An empty list re-encodes the schema, and a re-encoded schema comes
+// back unchanged.
+func toyApply(base []byte, deltas []spi.SchemaDelta) ([]byte, error) {
 	var s struct {
 		Fields []string `json:"fields"`
 	}
@@ -30,7 +31,10 @@ func toyApply(base []byte, delta spi.SchemaDelta) ([]byte, error) {
 	for _, f := range s.Fields {
 		set[f] = struct{}{}
 	}
-	if len(delta) > 0 {
+	for _, delta := range deltas {
+		if len(delta) == 0 {
+			continue
+		}
 		var d []string
 		if err := json.Unmarshal(delta, &d); err != nil {
 			return nil, fmt.Errorf("toy delta: %w", err)
@@ -64,8 +68,10 @@ func toySchema(fields ...string) string {
 	return string(b)
 }
 
+// applyFuncSetter is how a harness factory takes the apply function: one
+// call replays a list of deltas, in order, onto a base schema.
 type applyFuncSetter interface {
-	SetApplyFunc(func(base []byte, delta spi.SchemaDelta) ([]byte, error))
+	SetApplyFunc(func(base []byte, deltas []spi.SchemaDelta) ([]byte, error))
 }
 
 func runModelExtendSuite(t *testing.T, h Harness, tracker *skipTracker) {
@@ -177,7 +183,7 @@ func testExtendConcurrent(t *testing.T, h Harness) {
 	for i := 0; i < n; i++ {
 		fields = append(fields, fmt.Sprintf("f%d", i))
 	}
-	want, err := toyApply(nil, toyDelta(fields...))
+	want, err := toyApply(nil, []spi.SchemaDelta{toyDelta(fields...)})
 	require.NoError(t, err)
 	require.Equal(t, string(want), schemaOf(t, ctx, ms, ref), "every extension that returned nil is in the schema")
 }

@@ -26,8 +26,12 @@ MAINTAINING.md.
 ### Added
 
 - **`ErrModelNotLocked`** and the `ModelExtend/ExtendSchema/*` and
-  `Model/Lock/NotFound` conformance cases. The `ModelExtend` suite is
-  skipped for a factory without `SetApplyFunc`.
+  `Model/Lock/NotFound` conformance cases. The `ModelExtend` suite installs
+  its apply function through
+  `SetApplyFunc(func(base []byte, deltas []SchemaDelta) ([]byte, error))` on
+  the harness factory: one call replays a list of deltas, in order, and an
+  empty list re-encodes the base. It fails for a factory without that method
+  unless `Harness.Skip["ModelExtend"]` opts it out.
 
 - **`Clock` and `WithClock`**: a factory option that gives a plugin the
   platform's business clock (`FactoryConfig.Clock`, nil when absent). A

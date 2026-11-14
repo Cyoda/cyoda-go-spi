@@ -19,6 +19,7 @@ func runModelSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Lock/Idempotent", testModelLockIdempotent)
 	runSubtest(t, h, tracker, "SetChangeLevel", testModelSetChangeLevel)
 	runSubtest(t, h, tracker, "TenantIsolation", testModelTenantIsolation)
+	runSubtest(t, h, tracker, "Lock/NotFound", testModelMissingRef)
 }
 
 func newModelDescriptor(name, version string) *spi.ModelDescriptor {
@@ -130,5 +131,16 @@ func testModelTenantIsolation(t *testing.T, h Harness) {
 	md := newModelDescriptor("same-name", "1")
 	require.NoError(t, msA.Save(ctxA, md))
 	_, err := msB.Get(ctxB, md.Ref)
+	require.ErrorIs(t, err, spi.ErrNotFound)
+}
+
+func testModelMissingRef(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	ms, _ := h.Factory.ModelStore(ctx)
+	ref := spi.ModelRef{EntityName: "never", ModelVersion: "1"}
+	require.ErrorIs(t, ms.Lock(ctx, ref), spi.ErrNotFound)
+	require.ErrorIs(t, ms.Unlock(ctx, ref), spi.ErrNotFound)
+	require.ErrorIs(t, ms.SetChangeLevel(ctx, ref, spi.ChangeLevelType), spi.ErrNotFound)
+	_, err := ms.IsLocked(ctx, ref)
 	require.ErrorIs(t, err, spi.ErrNotFound)
 }

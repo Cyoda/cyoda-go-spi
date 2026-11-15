@@ -33,7 +33,9 @@ MAINTAINING.md.
   `GetVersionByTransaction/LastSaveWins` and
   `GetVersionByTransaction/InsideWritingTxIsNotFound`) fail on a plugin that
   records more than one version per entity per transaction or returns an
-  uncommitted version.
+  uncommitted version. `Entity/PointInTime/DeleteRecreateSameTxVersionTiebreak`
+  is renamed `Entity/PointInTime/DeleteRecreateSameTxResolvesToRecreate`: the
+  transaction records one version, so there is no tiebreak.
 
 - **`ModelStore.ExtendSchema` commits in its own transaction.** It never
   joins a transaction on ctx, is visible to every later `Get` on return,

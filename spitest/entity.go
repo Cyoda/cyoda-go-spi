@@ -60,7 +60,7 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "GetPage/AsAtCommittedOnlyInTx", testEntityGetPageAsAtCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "GetPage/InTxWithStagedDeletes", testEntityGetPageInTxWithStagedDeletes)
 	runSubtest(t, h, tracker, "GetPage/InTxRecordsReadSet", testEntityGetPageInTxRecordsReadSet)
-	runSubtest(t, h, tracker, "PointInTime/DeleteRecreateSameTxVersionTiebreak", testEntityPITDeleteRecreateSameTxVersionTiebreak)
+	runSubtest(t, h, tracker, "PointInTime/DeleteRecreateSameTxResolvesToRecreate", testEntityPITDeleteRecreateSameTxResolvesToRecreate)
 	runSubtest(t, h, tracker, "GetVersionByTransaction/DeletedNeverMatches", testEntityGetVersionByTransactionDeletedNeverMatches)
 	runSubtest(t, h, tracker, "GetVersionByTransaction/EmptyTxID", testEntityGetVersionByTransactionEmptyTxID)
 	runSubtest(t, h, tracker, "GetVersionByTransaction/UnrelatedTxID", testEntityGetVersionByTransactionUnrelatedTxID)
@@ -208,9 +208,8 @@ func testEntitySaveIgnoresCallerCreationDate(t *testing.T, h Harness) {
 //   - the ordinary one, whose history begins with the create; and
 //   - one whose history begins with a TOMBSTONE, left by a create and a
 //     delete committed in the same transaction — the shape
-//     Save/ModelReferenceIsImmutableAfterSameTxCreateDelete and
-//     PointInTime/DeleteRecreateSameTxVersionTiebreak also exercise. A
-//     backend that asks for "the first version" instead of "the first
+//     Save/ModelReferenceIsImmutableAfterSameTxCreateDelete also
+//     exercises. A backend that asks for "the first version" instead of "the first
 //     version that still carries an entity" finds no entity there, and
 //     silently restamps the creation date on every subsequent update.
 //
@@ -1621,30 +1620,26 @@ func testEntityGetPageReadSetOutcome(t *testing.T, h Harness, conflictOnPage, wa
 	require.ErrorIs(t, err, spi.ErrConflict)
 }
 
-// testEntityPITDeleteRecreateSameTxVersionTiebreak pins the point-in-time
-// version tiebreak for a delete-then-recreate committed together in ONE
-// transaction, under the SAME model: Save, Delete, and Save again all happen
-// inside a single transaction that commits once. On a backend that stamps
-// every write of one transaction from a single reading of the clock (e.g.
-// postgres's CURRENT_TIMESTAMP), the tombstone and the recreate share the
-// transaction's one commit instant — a timestamp comparison alone cannot
-// order them, and only a version-level tiebreak can: the LATER write within
-// the transaction (the recreate) must win, never the tombstone.
+// testEntityPITDeleteRecreateSameTxResolvesToRecreate pins the point-in-time
+// reads of an entity that one transaction saves, deletes and saves again
+// under the SAME model, committing once. The transaction records one version
+// of the entity, its last write (see EntityStore), so a point-in-time read
+// after the commit must return the recreate, never the tombstone of the
+// intermediate delete or the first save.
 //
 // This is deliberately NOT the model-immutability shape covered by
 // testEntityModelImmutableAfterSameTxCreateDelete: that family recreates
 // under a DIFFERENT model and asserts rejection. Recreating under the SAME
-// model is a legitimate write; this test's whole point is the ordering of
-// the two committed rows it produces, not whether the write is allowed.
+// model is a legitimate write.
 //
 // Both instant-resolving read paths are exercised because they are separate
 // queries on at least one backend and must agree: GetAsAt (single-entity)
 // and GetPage(asAt) (the model-scoped list/page read).
-func testEntityPITDeleteRecreateSameTxVersionTiebreak(t *testing.T, h Harness) {
+func testEntityPITDeleteRecreateSameTxResolvesToRecreate(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
-	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-pit-recreate-tiebreak", ModelVersion: "1"})
-	const modelName = "m-pit-recreate-tiebreak"
+	const modelName = "m-pit-recreate"
 	mref := spi.ModelRef{EntityName: modelName, ModelVersion: "1"}
+	EnsureLockedModel(t, h.Factory, ctx, mref)
 	id := newID()
 
 	withTx(t, h, ctx, func(txCtx context.Context) {

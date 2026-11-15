@@ -37,6 +37,7 @@ func runOneVersionSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "OneVersionPerTx/VersionNumberIsPreviousPlusOne", testOneVersionVersionNumber)
 	runSubtest(t, h, tracker, "OneVersionPerTx/AttributionIsLastWrite", testOneVersionAttribution)
 	runSubtest(t, h, tracker, "OneVersionPerTx/SavepointRestoresReplacedPending", testOneVersionSavepointRestoresReplaced)
+	runSubtest(t, h, tracker, "OneVersionPerTx/SavepointRestoresPendingReplacedByDelete", testOneVersionSavepointRestoresReplacedByDelete)
 	runSubtest(t, h, tracker, "OneVersionPerTx/SavepointRestoresNoPending", testOneVersionSavepointRestoresNone)
 	runSubtest(t, h, tracker, "OneVersionPerTx/SavepointRollbackThenSaveAgain", testOneVersionSavepointThenSaveAgain)
 	runSubtest(t, h, tracker, "OneVersionPerTx/GetVersionByTransaction/LastSaveWins", testOneVersionGetVersionByTransactionLastSaveWins)
@@ -327,6 +328,35 @@ func testOneVersionSavepointRestoresReplaced(t *testing.T, h Harness) {
 	o.requireOneVersion(t, id, txID, "CREATED", "save v1, savepoint, save v2, rollback to the savepoint")
 	require.Len(t, o.history(t, id), 1, "the entity's whole history is the one version")
 	o.requireContent(t, id, "v", 1, "the rollback restores v1 as the pending version")
+}
+
+// save v1, savepoint, delete, rollback to the savepoint: the rollback restores
+// v1 as the pending version in place of the tombstone, so the commit records
+// one version with v1 — CREATED for a new entity, UPDATED for one that
+// existed.
+func testOneVersionSavepointRestoresReplacedByDelete(t *testing.T, h Harness) {
+	o := newOneVersion(t, h)
+	tm, err := h.Factory.TransactionManager(o.ctx)
+	require.NoError(t, err)
+	existing := o.seed(t, map[string]any{"v": 0})
+	fresh := newID()
+	txID := o.tx(t, func(txID string, txCtx spiCtx, es spi.EntityStore) {
+		o.save(t, txCtx, es, fresh, map[string]any{"v": 1})
+		o.save(t, txCtx, es, existing, map[string]any{"v": 1})
+		sp, err := tm.Savepoint(txCtx, txID)
+		require.NoError(t, err)
+		require.NoError(t, es.Delete(txCtx, fresh))
+		require.NoError(t, es.Delete(txCtx, existing))
+		require.NoError(t, tm.RollbackToSavepoint(txCtx, txID, sp))
+	})
+
+	o.requireOneVersion(t, fresh, txID, "CREATED", "new entity: save v1, savepoint, delete, rollback to the savepoint")
+	require.Len(t, o.history(t, fresh), 1, "the new entity's whole history is the one version")
+	o.requireContent(t, fresh, "v", 1, "the rollback restores the new entity's v1 as the pending version")
+
+	o.requireOneVersion(t, existing, txID, "UPDATED", "existing entity: save v1, savepoint, delete, rollback to the savepoint")
+	require.Len(t, o.history(t, existing), 2, "the seed version and the transaction's one version")
+	o.requireContent(t, existing, "v", 1, "the rollback restores the existing entity's v1 as the pending version")
 }
 
 // savepoint, save, rollback to the savepoint: the commit records no version

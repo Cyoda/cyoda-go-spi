@@ -215,7 +215,7 @@ func TestErrTxAborted_IsAConflict(t *testing.T) {
 }
 
 func TestModelHasEntitiesError_IsSentinel(t *testing.T) {
-	var err error = fmt.Errorf("unlock: %w", &ModelHasEntitiesError{
+	err := fmt.Errorf("unlock: %w", &ModelHasEntitiesError{
 		Ref:   ModelRef{EntityName: "m", ModelVersion: "1"},
 		Count: 2,
 	})

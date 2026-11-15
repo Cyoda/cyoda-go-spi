@@ -91,7 +91,8 @@ MAINTAINING.md.
   rule. New conformance cases `Unique/*` (`KeysFromStoredModel/Tx`,
   `KeysFromStoredModel/NonTx`, `SwapInTx`, `ChainInTx`,
   `FreeAfterClaimInTx`, `SameValueTwiceInTx`, `PartialKeyAtCommit`,
-  `SavepointRollbackRestoresClaim`, `KeylessModelCommitsNoClaims`) declare
+  `SavepointRollbackRestoresClaim`, `KeylessModelCommitsNoClaims`,
+  `KeysReadAtCommit/ModelLockedAfterBegin`) declare
   keys on the model only; the spitest fixture `EnsureLockedModel` saves and
   locks a model before a case writes entities of it.
 

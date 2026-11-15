@@ -9,12 +9,14 @@ package spi
 //
 // A transaction's claims are computed at commit, from its final entities:
 //
-//  1. The commit reads, inside the committing transaction, the unique keys
-//     of the model of every entity whose final write in the transaction is
-//     a save, one read per distinct model, in a fixed order (model name,
-//     then version). The model's state is not checked: the caller saves
-//     entities only into a LOCKED model (see ModelStore). An entity whose
-//     final write is a delete needs no model read.
+//  1. The commit reads the unique keys of the model of every entity whose
+//     final write in the transaction is a save, one read per distinct
+//     model, as the model store holds them at commit: never from a snapshot
+//     taken when the transaction began, so a model locked or re-keyed after
+//     that is enforced with its current keys. The model's state is not
+//     checked: the caller saves entities only into a LOCKED model (see
+//     ModelStore). An entity whose final write is a delete needs no model
+//     read.
 //  2. It releases the claims of every entity the transaction wrote or
 //     deleted.
 //  3. It computes the claims of every entity whose final write is a save
@@ -33,9 +35,10 @@ package spi
 // atomically with the write.
 //
 // Two commits that each claim a value the other frees in the same commit
-// can deadlock in a store that inserts claims under row locks; one of them
-// fails closed with the retryable ErrConflict in place of the answer above,
-// and its retry gets ErrUniqueViolation if the other committed.
+// can deadlock in a store that inserts claims under row locks. One of them
+// fails with the retryable ErrConflict, and the other with
+// ErrUniqueViolation, because the value it claims is still held when the
+// first rolls back; the retry gets ErrUniqueViolation.
 type UniqueKey struct {
 	ID     string
 	Fields []string

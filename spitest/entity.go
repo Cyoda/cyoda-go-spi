@@ -61,7 +61,6 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "GetPage/InTxWithStagedDeletes", testEntityGetPageInTxWithStagedDeletes)
 	runSubtest(t, h, tracker, "GetPage/InTxRecordsReadSet", testEntityGetPageInTxRecordsReadSet)
 	runSubtest(t, h, tracker, "PointInTime/DeleteRecreateSameTxVersionTiebreak", testEntityPITDeleteRecreateSameTxVersionTiebreak)
-	runSubtest(t, h, tracker, "GetVersionByTransaction/EarliestWins", testEntityGetVersionByTransactionEarliestWins)
 	runSubtest(t, h, tracker, "GetVersionByTransaction/DeletedNeverMatches", testEntityGetVersionByTransactionDeletedNeverMatches)
 	runSubtest(t, h, tracker, "GetVersionByTransaction/EmptyTxID", testEntityGetVersionByTransactionEmptyTxID)
 	runSubtest(t, h, tracker, "GetVersionByTransaction/UnrelatedTxID", testEntityGetVersionByTransactionUnrelatedTxID)
@@ -82,6 +81,9 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 
 	// Attribution group (follow-on-action attribution design)
 	runSubtest(t, h, tracker, "Attribution/ExecutorRoundTrip", testEntityExecutorRoundTrip)
+
+	// One version per entity per transaction
+	runOneVersionSuite(t, h, tracker)
 }
 
 func testEntityCreateAndGet(t *testing.T, h Harness) {
@@ -1678,39 +1680,6 @@ func testEntityPITDeleteRecreateSameTxVersionTiebreak(t *testing.T, h Harness) {
 	require.Equal(t, id, page[0].Meta.ID)
 	require.Contains(t, string(page[0].Data), `"gen":2`,
 		"GetPage(asAt) must resolve to the recreate (gen=2), not the tombstone")
-}
-
-// testEntityGetVersionByTransactionEarliestWins verifies that when one
-// transaction saves the same entity twice before committing, the earlier
-// (lower-Version) save is returned for that shared txID — not the latest,
-// which is what a naive "most recent row for this txID" implementation
-// would return.
-func testEntityGetVersionByTransactionEarliestWins(t *testing.T, h Harness) {
-	ctx := tenantContext(h.NewTenant())
-	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-gvbt", ModelVersion: "1"})
-	id := newID()
-	withTx(t, h, ctx, func(txCtx context.Context) {
-		es, err := h.Factory.EntityStore(txCtx)
-		require.NoError(t, err)
-		_, err = es.Save(txCtx, newEntity(t, "m-gvbt", id, map[string]any{"v": 1}))
-		require.NoError(t, err)
-		_, err = es.Save(txCtx, newEntity(t, "m-gvbt", id, map[string]any{"v": 2}))
-		require.NoError(t, err)
-	})
-
-	es, err := h.Factory.EntityStore(ctx)
-	require.NoError(t, err)
-	got, err := es.Get(ctx, id)
-	require.NoError(t, err)
-	txID := got.Meta.TransactionID
-	require.NotEmpty(t, txID)
-
-	v, err := es.GetVersionByTransaction(ctx, id, txID)
-	require.NoError(t, err)
-	require.NotNil(t, v)
-	require.NotNil(t, v.Entity)
-	require.Contains(t, string(v.Entity.Data), `"v":1`,
-		"same-tx double-save: GetVersionByTransaction must return the earlier version, not the latest")
 }
 
 // testEntityGetVersionByTransactionDeletedNeverMatches verifies that a

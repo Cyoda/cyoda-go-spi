@@ -14,6 +14,27 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **One version per entity per transaction.** Within one transaction an
+  entity has at most one pending version: a `Save`, `CompareAndSave` or
+  `Delete` of an entity the transaction already wrote replaces it, and
+  `SaveAll` and `DeleteAll` follow the rule per entity. The commit records
+  that one version, with the last write's content and attribution, the
+  previous version number + 1, and change type `DELETED` if the last write
+  is a delete, else `CREATED` for the entity's first version and `UPDATED`
+  after it. `RollbackToSavepoint` restores each entity's pending version as
+  it was at the savepoint. Outside a transaction every write is still its
+  own version. The `EntityStore` doc states the rule.
+
+- **`GetVersionByTransaction` reads committed versions only**, also inside a
+  transaction and inside `txID` itself, and returns the one version `txID`
+  wrote. The `Entity/GetVersionByTransaction/EarliestWins` conformance case
+  is removed; the new `Entity/OneVersionPerTx/*` cases (each sequence of
+  writes in one transaction, savepoints, `SaveAll`/`DeleteAll`,
+  `GetVersionByTransaction/LastSaveWins` and
+  `GetVersionByTransaction/InsideWritingTxIsNotFound`) fail on a plugin that
+  records more than one version per entity per transaction or returns an
+  uncommitted version.
+
 - **`ModelStore.ExtendSchema` commits in its own transaction.** It never
   joins a transaction on ctx, is visible to every later `Get` on return,
   treats an already-held delta as a no-op, never returns `ErrConflict` or

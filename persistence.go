@@ -584,9 +584,11 @@ type SchemaDelta []byte
 
 // ModelStore holds model descriptors per tenant.
 //
-// Entities exist only in a LOCKED model; a model's descriptor (unique keys
-// and state included) changes only while it is UNLOCKED; and a model is
-// unlocked only when it has no live entities. The store checks each of these
+// Entities exist only in a LOCKED model; Save, which replaces the whole
+// descriptor (unique keys and state included), never applies to a LOCKED
+// model, and a LOCKED model changes only through Unlock, SetChangeLevel and
+// ExtendSchema; a LOCKED model is never deleted; and a model is unlocked
+// only when it has no live entities. The store checks each of these
 // inside the operation that makes the change, atomically with it, so no
 // interleaving with entity commits can break them. A caller's own earlier
 // check is an early answer, never the guard.

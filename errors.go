@@ -36,8 +36,9 @@ var ErrModelNotLocked = errors.New("model is not locked")
 
 // ErrModelLocked is returned by ModelStore.Delete and by ModelStore.Save of
 // an existing model when the stored model is LOCKED. A LOCKED model is never
-// deleted, and its descriptor (unique keys and state included) changes only
-// while it is UNLOCKED.
+// deleted, and Save, which replaces the whole descriptor (unique keys and
+// state included), never applies to it: a LOCKED model changes only through
+// Unlock, SetChangeLevel and ExtendSchema.
 var ErrModelLocked = errors.New("model is locked")
 
 // ErrModelHasEntities is the sentinel a *ModelHasEntitiesError matches under
@@ -54,7 +55,7 @@ type ModelHasEntitiesError struct {
 }
 
 func (e *ModelHasEntitiesError) Error() string {
-	return fmt.Sprintf("%s: model %s has %d entities", ErrModelHasEntities.Error(), e.Ref, e.Count)
+	return fmt.Sprintf("%s: %s has %d", ErrModelHasEntities, e.Ref, e.Count)
 }
 
 // Is reports whether target is ErrModelHasEntities.

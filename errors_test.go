@@ -232,6 +232,9 @@ func TestModelHasEntitiesError_IsSentinel(t *testing.T) {
 	if mhe.Count != 2 {
 		t.Fatalf("Count = %d, want 2", mhe.Count)
 	}
+	if got, want := mhe.Error(), "model has entities: m.1 has 2"; got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
+	}
 	if errors.Is(ErrModelLocked, ErrModelNotLocked) || errors.Is(ErrModelNotLocked, ErrModelLocked) {
 		t.Fatal("ErrModelLocked and ErrModelNotLocked must be distinct")
 	}

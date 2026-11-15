@@ -276,39 +276,50 @@ func testOneVersionVersionNumber(t *testing.T, h Harness) {
 	require.Equal(t, n+2, got.Version, "the next transaction takes the next number: n+2")
 }
 
-// The one version carries the last write's attribution: a save's from the
-// entity it writes, a delete's from the caller.
+// The one version carries the last write's attribution as the SPI defines
+// it (spi.AttributionFor of the writing context): a save's from the entity it
+// writes, which the caller stamps from that rule, and a delete's from the
+// caller. The two writers are distinct users, so the first write's
+// attribution differs from the last's.
 func testOneVersionAttribution(t *testing.T, h Harness) {
 	o := newOneVersion(t, h)
-	alice := spi.Principal{ID: "alice", Kind: spi.PrincipalUser}
-	bob := spi.Principal{ID: "bob", Kind: spi.PrincipalService}
-	as := func(txCtx spiCtx, p spi.Principal) spiCtx {
-		return spi.WithUserContext(txCtx, spi.GetUserContext(tenantContextAs(o.tenant, p.ID, p.Kind)))
+	as := func(txCtx spiCtx, userID string) spiCtx {
+		return spi.WithUserContext(txCtx, spi.GetUserContext(tenantContextAs(o.tenant, userID, spi.PrincipalUser)))
+	}
+	attributed := func(ctx spiCtx, id string, payload map[string]any) *spi.Entity {
+		attr, exec := spi.AttributionFor(ctx)
+		return newAttributedEntity(t, oneVersionModel, id, payload, attr.ID, attr.Kind, exec)
 	}
 
 	saved := newID()
 	deleted := o.seed(t, map[string]any{"v": 1})
+	var firstAttr, firstExec, lastAttr, lastExec spi.Principal
 	txID := o.tx(t, func(_ string, txCtx spiCtx, es spi.EntityStore) {
-		aCtx, bCtx := as(txCtx, alice), as(txCtx, bob)
-		_, err := es.Save(aCtx, newAttributedEntity(t, oneVersionModel, saved, map[string]any{"v": 1}, alice.ID, alice.Kind, alice))
+		aCtx, bCtx := as(txCtx, "alice"), as(txCtx, "bob")
+		firstAttr, firstExec = spi.AttributionFor(aCtx)
+		lastAttr, lastExec = spi.AttributionFor(bCtx)
+
+		_, err := es.Save(aCtx, attributed(aCtx, saved, map[string]any{"v": 1}))
 		require.NoError(t, err)
-		_, err = es.Save(bCtx, newAttributedEntity(t, oneVersionModel, saved, map[string]any{"v": 2}, bob.ID, bob.Kind, bob))
+		_, err = es.Save(bCtx, attributed(bCtx, saved, map[string]any{"v": 2}))
 		require.NoError(t, err)
 
-		_, err = es.Save(aCtx, newAttributedEntity(t, oneVersionModel, deleted, map[string]any{"v": 2}, alice.ID, alice.Kind, alice))
+		_, err = es.Save(aCtx, attributed(aCtx, deleted, map[string]any{"v": 2}))
 		require.NoError(t, err)
 		require.NoError(t, es.Delete(bCtx, deleted))
 	})
+	require.NotEqual(t, firstAttr, lastAttr, "fixture: the two writers' attributions must differ")
+	require.NotEqual(t, firstExec, lastExec, "fixture: the two writers' executors must differ")
 
 	got := o.requireOneVersion(t, saved, txID, "CREATED", "save by alice, save by bob")
-	require.Equal(t, bob.ID, got.User, "the version's user is the last save's")
-	require.Equal(t, bob.Kind, got.AttributedKind, "the version's attributed kind is the last save's")
-	require.Equal(t, bob, got.Executor, "the version's executor is the last save's")
+	require.Equal(t, lastAttr.ID, got.User, "the version's user is the last save's")
+	require.Equal(t, lastAttr.Kind, got.AttributedKind, "the version's attributed kind is the last save's")
+	require.Equal(t, lastExec, got.Executor, "the version's executor is the last save's")
 
 	got = o.requireOneVersion(t, deleted, txID, "DELETED", "save by alice, delete by bob")
-	require.Equal(t, bob.ID, got.User, "the tombstone's user is the deleting caller")
-	require.Equal(t, bob.Kind, got.AttributedKind, "the tombstone's attributed kind is the deleting caller's")
-	require.Equal(t, bob, got.Executor, "the tombstone's executor is the deleting caller")
+	require.Equal(t, lastAttr.ID, got.User, "the tombstone's user is the deleting caller's attribution")
+	require.Equal(t, lastAttr.Kind, got.AttributedKind, "the tombstone's attributed kind is the deleting caller's attribution")
+	require.Equal(t, lastExec, got.Executor, "the tombstone's executor is the deleting caller")
 }
 
 // save v1, savepoint, save v2, rollback to the savepoint: the commit records

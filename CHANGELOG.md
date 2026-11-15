@@ -29,6 +29,18 @@ MAINTAINING.md.
   it was at the savepoint. Outside a transaction every write is still its
   own version. The `EntityStore` doc states the rule.
 
+- **A write's transaction ID and change type are the store's.** A write
+  outside a transaction records the empty transaction ID and a derived change
+  type (`CREATED` for the entity's first version, else `UPDATED`; `DELETED`
+  for a delete), whatever `Meta.TransactionID` or `Meta.ChangeType` the
+  caller left on the entity, so `GetVersionByTransaction` never matches it
+  and two such writes are two versions. Inside a transaction a caller's
+  change type is ignored too. The `EntityStore` and `EntityMeta` docs state
+  the rule; the new conformance cases `Entity/Save/NonTxIgnoresCallerTransactionID`,
+  `Entity/Save/NonTxEachWriteOwnVersion`, `Entity/Save/NonTxIgnoresCallerChangeType`
+  and `Entity/Save/InTxIgnoresCallerChangeType` fail on a plugin that stores
+  or matches a caller's transaction ID, or keeps a caller's change type.
+
 - **`GetVersionByTransaction` reads committed versions only**, also inside a
   transaction and inside `txID` itself, and returns the one version `txID`
   wrote. The `Entity/GetVersionByTransaction/EarliestWins` conformance case

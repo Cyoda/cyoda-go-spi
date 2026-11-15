@@ -28,6 +28,10 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutableAfterSameTxCreateDeleteAll", testEntityModelImmutableAfterSameTxCreateDeleteAll)
 	runSubtest(t, h, tracker, "Save/CallerCreationDateIgnored", testEntitySaveIgnoresCallerCreationDate)
 	runSubtest(t, h, tracker, "Save/UpdateDoesNotRestampCreationDate", testEntityUpdateDoesNotRestampCreationDate)
+	runSubtest(t, h, tracker, "Save/NonTxIgnoresCallerTransactionID", testEntityNonTxIgnoresCallerTransactionID)
+	runSubtest(t, h, tracker, "Save/NonTxEachWriteOwnVersion", testEntityNonTxEachWriteOwnVersion)
+	runSubtest(t, h, tracker, "Save/NonTxIgnoresCallerChangeType", testEntityNonTxIgnoresCallerChangeType)
+	runSubtest(t, h, tracker, "Save/InTxIgnoresCallerChangeType", testEntityInTxIgnoresCallerChangeType)
 	runSubtest(t, h, tracker, "SaveAll/Ordering", testEntitySaveAllOrdering)
 	runSubtest(t, h, tracker, "SaveAll/PartialFailureAtomicity", testEntitySaveAllAtomicity)
 	runSubtest(t, h, tracker, "Get/NotFound", testEntityGetNotFound)
@@ -1808,10 +1812,9 @@ func testEntityGetVersionByTransactionDeletedNeverMatches(t *testing.T, h Harnes
 // as a wildcard against an entity with a real, non-empty TransactionID, or
 // by matching a stored-empty TransactionID. The latter requires an entity
 // actually written with no ambient transaction — a plain Save on a bare
-// (non-tx) ctx is a legal SPI operation, and backends that record
-// TransactionID stamp an empty one for such writes (see
-// EntityVersionMeta.TransactionID's doc comment: "may be empty
-// (non-transactional writes)"). Both scenarios must return ErrNotFound.
+// (non-tx) ctx is a legal SPI operation, and it stamps an empty
+// TransactionID (see EntityVersionMeta.TransactionID's doc comment). Both
+// scenarios must return ErrNotFound.
 func testEntityGetVersionByTransactionEmptyTxID(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-gvbt-empty", ModelVersion: "1"})
@@ -1946,11 +1949,11 @@ func testEntityCompareAndSaveConflict(t *testing.T, h Harness) {
 // violation, pinned by CompareAndSave/EmptyExpectedIDRejected below.
 //
 // The "existing entity" is still seeded through a committed transaction, so
-// it carries a real, non-empty transaction ID. On a backend that stamps
-// none for non-transactional writes (see EntityVersionMeta.TransactionID's
-// doc comment) a non-transactionally seeded entity would carry the empty
-// ID, and this leg would degenerate into the same non-empty-versus-empty
-// comparison the missing-entity leg already makes.
+// it carries a real, non-empty transaction ID. A non-transactional write
+// stamps none (see EntityVersionMeta.TransactionID's doc comment), so a
+// non-transactionally seeded entity would carry the empty ID, and this leg
+// would degenerate into the same non-empty-versus-empty comparison the
+// missing-entity leg already makes.
 func testEntityCompareAndSaveExpectedIDIsLiteral(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cas-lit", ModelVersion: "1"})
@@ -1958,8 +1961,7 @@ func testEntityCompareAndSaveExpectedIDIsLiteral(t *testing.T, h Harness) {
 	// seedExistingTransactional creates an entity via its own committed
 	// transaction — separate from, and completed before, any transaction
 	// assertLiteralComparison itself runs under — so it carries a real
-	// transaction ID regardless of whether a backend stamps one on
-	// non-transactional writes.
+	// transaction ID, which a non-transactional write never stamps.
 	seedExistingTransactional := func() string {
 		id := newID()
 		withTx(t, h, ctx, func(txCtx spiCtx) {
@@ -2582,4 +2584,210 @@ func testEntityCountByStateEmptyStateFilter(t *testing.T, h Harness) {
 	got, err = es.CountByState(ctx, mref, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, map[string]int64{"": 1, "new": 1}, got)
+}
+
+// The NonTx cases pin the rule that an entity's metadata belongs to the
+// store, not the caller, on the write path that has no transaction: every
+// auto-commit write is its own transaction and its own version (see
+// EntityStore), so a transaction id or change type the caller left on the
+// entity is ignored. The stored transaction id is the empty one a
+// non-transactional write stamps (see EntityVersionMeta.TransactionID and
+// CompareAndSave), so GetVersionByTransaction never matches the write, and
+// the change type is derived: CREATED for the entity's first version, UPDATED
+// after it.
+//
+// Both non-transactional write paths are covered, Save and CompareAndSave,
+// because a backend can route them through different code.
+const nonTxModel = "m-non-tx-meta"
+
+// testEntityNonTxIgnoresCallerTransactionID: a caller-supplied transaction id
+// is neither stored nor matched.
+func testEntityNonTxIgnoresCallerTransactionID(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: nonTxModel, ModelVersion: "1"})
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+
+	// Save.
+	id := newID()
+	e := newEntity(t, nonTxModel, id, map[string]any{"v": 1})
+	e.Meta.TransactionID = "caller-x"
+	_, err = es.Save(ctx, e)
+	require.NoError(t, err)
+
+	got, err := es.Get(ctx, id)
+	require.NoError(t, err)
+	require.Empty(t, got.Meta.TransactionID,
+		"Save outside a transaction must not store the caller's transaction id")
+	metas, err := es.GetVersionMetadata(ctx, id, spi.VersionMetadataOptions{})
+	require.NoError(t, err)
+	require.Len(t, metas, 1)
+	require.Empty(t, metas[0].TransactionID,
+		"the version of a Save outside a transaction must not record the caller's transaction id")
+	_, err = es.GetVersionByTransaction(ctx, id, "caller-x")
+	require.ErrorIs(t, err, spi.ErrNotFound,
+		"GetVersionByTransaction must not match a Save outside a transaction by the caller's id")
+
+	// CompareAndSave: the expected id is the seeding transaction's, the
+	// caller's id on the entity is another value again.
+	casID := newID()
+	withTx(t, h, ctx, func(txCtx spiCtx) {
+		txEs, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = txEs.Save(txCtx, newEntity(t, nonTxModel, casID, map[string]any{"v": 1}))
+		require.NoError(t, err)
+	})
+	seeded, err := es.Get(ctx, casID)
+	require.NoError(t, err)
+	require.NotEmpty(t, seeded.Meta.TransactionID)
+	h.AdvanceClock(1 * time.Millisecond)
+
+	cas := newEntity(t, nonTxModel, casID, map[string]any{"v": 2})
+	cas.Meta.TransactionID = "caller-y"
+	_, err = es.CompareAndSave(ctx, cas, seeded.Meta.TransactionID)
+	require.NoError(t, err)
+
+	got, err = es.Get(ctx, casID)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"v":2}`, string(got.Data))
+	require.Empty(t, got.Meta.TransactionID,
+		"CompareAndSave outside a transaction must not store the caller's transaction id")
+	_, err = es.GetVersionByTransaction(ctx, casID, "caller-y")
+	require.ErrorIs(t, err, spi.ErrNotFound,
+		"GetVersionByTransaction must not match a CompareAndSave outside a transaction by the caller's id")
+}
+
+// testEntityNonTxEachWriteOwnVersion: two auto-commit writes that carry the
+// same caller transaction id are two transactions, not one with two versions.
+func testEntityNonTxEachWriteOwnVersion(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: nonTxModel, ModelVersion: "1"})
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+
+	id := newID()
+	for v := 1; v <= 2; v++ {
+		e := newEntity(t, nonTxModel, id, map[string]any{"v": v})
+		e.Meta.TransactionID = "caller-x"
+		_, err = es.Save(ctx, e)
+		require.NoError(t, err)
+		h.AdvanceClock(1 * time.Millisecond)
+	}
+
+	metas, err := es.GetVersionMetadata(ctx, id, spi.VersionMetadataOptions{})
+	require.NoError(t, err)
+	require.Len(t, metas, 2, "each auto-commit write records its own version")
+	for _, m := range metas {
+		require.NotEqual(t, "caller-x", m.TransactionID,
+			"version %d must not record the caller's transaction id", m.Version)
+	}
+	_, err = es.GetVersionByTransaction(ctx, id, "caller-x")
+	require.ErrorIs(t, err, spi.ErrNotFound,
+		"no auto-commit write matches GetVersionByTransaction by the caller's id")
+}
+
+// testEntityNonTxIgnoresCallerChangeType: the change type of an auto-commit
+// write is derived by the store, whatever the caller left on the entity.
+func testEntityNonTxIgnoresCallerChangeType(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: nonTxModel, ModelVersion: "1"})
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+
+	id := newID()
+	first := newEntity(t, nonTxModel, id, map[string]any{"v": 1})
+	first.Meta.ChangeType = "UPDATED"
+	_, err = es.Save(ctx, first)
+	require.NoError(t, err)
+	h.AdvanceClock(1 * time.Millisecond)
+
+	second := newEntity(t, nonTxModel, id, map[string]any{"v": 2})
+	second.Meta.ChangeType = "DELETED"
+	_, err = es.Save(ctx, second)
+	require.NoError(t, err)
+	h.AdvanceClock(1 * time.Millisecond)
+
+	// CompareAndSave needs a real expected id, so the third version comes
+	// from a transaction and the fourth is the auto-commit CompareAndSave.
+	withTx(t, h, ctx, func(txCtx spiCtx) {
+		txEs, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = txEs.Save(txCtx, newEntity(t, nonTxModel, id, map[string]any{"v": 3}))
+		require.NoError(t, err)
+	})
+	h.AdvanceClock(1 * time.Millisecond)
+	seeded, err := es.Get(ctx, id)
+	require.NoError(t, err)
+	cas := newEntity(t, nonTxModel, id, map[string]any{"v": 4})
+	cas.Meta.ChangeType = "DELETED"
+	_, err = es.CompareAndSave(ctx, cas, seeded.Meta.TransactionID)
+	require.NoError(t, err)
+
+	got, err := es.Get(ctx, id)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"v":4}`, string(got.Data), "a caller DELETED change type must not delete the entity")
+
+	byVersion := changeTypesByVersion(t, es, ctx, id)
+	require.Equal(t, map[int64]string{1: "CREATED", 2: "UPDATED", 3: "UPDATED", 4: "UPDATED"}, byVersion,
+		"the store derives the change type: CREATED for the first version, UPDATED after it")
+}
+
+// testEntityInTxIgnoresCallerChangeType: inside a transaction too the change
+// type of the transaction's one version is the store's (see EntityStore), not
+// a value the caller left on the entity.
+func testEntityInTxIgnoresCallerChangeType(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: nonTxModel, ModelVersion: "1"})
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+
+	id := newID()
+	withTx(t, h, ctx, func(txCtx spiCtx) {
+		txEs, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		e := newEntity(t, nonTxModel, id, map[string]any{"v": 1})
+		e.Meta.ChangeType = "UPDATED"
+		_, err = txEs.Save(txCtx, e)
+		require.NoError(t, err)
+	})
+	h.AdvanceClock(1 * time.Millisecond)
+	withTx(t, h, ctx, func(txCtx spiCtx) {
+		txEs, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		e := newEntity(t, nonTxModel, id, map[string]any{"v": 2})
+		e.Meta.ChangeType = "DELETED"
+		_, err = txEs.Save(txCtx, e)
+		require.NoError(t, err)
+	})
+	h.AdvanceClock(1 * time.Millisecond)
+	seeded, err := es.Get(ctx, id)
+	require.NoError(t, err)
+	withTx(t, h, ctx, func(txCtx spiCtx) {
+		txEs, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		e := newEntity(t, nonTxModel, id, map[string]any{"v": 3})
+		e.Meta.ChangeType = "DELETED"
+		_, err = txEs.CompareAndSave(txCtx, e, seeded.Meta.TransactionID)
+		require.NoError(t, err)
+	})
+
+	got, err := es.Get(ctx, id)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"v":3}`, string(got.Data), "a caller DELETED change type must not delete the entity")
+
+	byVersion := changeTypesByVersion(t, es, ctx, id)
+	require.Equal(t, map[int64]string{1: "CREATED", 2: "UPDATED", 3: "UPDATED"}, byVersion,
+		"the store derives the change type: CREATED for the first version, UPDATED after it")
+}
+
+// changeTypesByVersion maps each committed version of id to its change type.
+func changeTypesByVersion(t *testing.T, es spi.EntityStore, ctx spiCtx, id string) map[int64]string {
+	t.Helper()
+	metas, err := es.GetVersionMetadata(ctx, id, spi.VersionMetadataOptions{})
+	require.NoError(t, err)
+	out := make(map[int64]string, len(metas))
+	for _, m := range metas {
+		out[m.Version] = m.ChangeType
+	}
+	return out
 }

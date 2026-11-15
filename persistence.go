@@ -343,7 +343,11 @@ type ScheduledTaskStore interface {
 // entity's pending version to what it was at the savepoint, including no
 // pending version. Reads in the transaction return the pending version.
 // Outside a transaction every write is its own transaction and its own
-// version.
+// version. Such a write records the empty transaction ID and a change type
+// derived as above (DELETED for a delete, otherwise CREATED for the entity's
+// first version, else UPDATED), whatever transaction ID or change type the
+// caller left on the entity: so GetVersionByTransaction never returns it, and
+// two such writes are two versions however the caller labelled them.
 type EntityStore interface {
 	// Save writes entity. Inside a transaction it replaces the entity's
 	// pending version if the transaction already wrote the entity (see
@@ -361,7 +365,7 @@ type EntityStore interface {
 	// no sentinel (the same treatment Search gives Limit <= 0). The empty
 	// string is not a usable expectation: a missing entity, a deleted one,
 	// and an entity written outside any transaction all carry an empty
-	// EntityMeta.TransactionID — a non-transactional write may stamp none,
+	// EntityMeta.TransactionID — a non-transactional write stamps none,
 	// and EntityVersionMeta.TransactionID shows the same empty value on the
 	// audit row — so "" cannot tell the three apart, and an "expect no
 	// entity" reading of it would silently overwrite an entity that exists.

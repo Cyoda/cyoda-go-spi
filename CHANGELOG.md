@@ -14,6 +14,57 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **`WithUniqueKeys` and `UniqueKeysFromContext` are removed.** A storage
+  plugin reads the unique keys of the model it is writing from its own
+  stored model at commit; the caller no longer carries them on the context.
+
+- **One version per entity per transaction.** Within one transaction an
+  entity has at most one pending version: a `Save`, `CompareAndSave` or
+  `Delete` of an entity the transaction already wrote replaces it, and
+  `SaveAll` and `DeleteAll` follow the rule per entity. The commit records
+  that one version, with the last write's content and attribution, the
+  previous version number + 1, and change type `DELETED` if the last write
+  is a delete, else `CREATED` for the entity's first version and `UPDATED`
+  after it. `RollbackToSavepoint` restores each entity's pending version as
+  it was at the savepoint. Outside a transaction every write is still its
+  own version. The `EntityStore` doc states the rule.
+
+- **A write's transaction ID and change type are the store's.** A write
+  outside a transaction records the empty transaction ID and a derived change
+  type (`CREATED` for the entity's first version, else `UPDATED`; `DELETED`
+  for a delete), whatever `Meta.TransactionID` or `Meta.ChangeType` the
+  caller left on the entity, so `GetVersionByTransaction` never matches it
+  and two such writes are two versions. Inside a transaction a caller's
+  change type is ignored too. The `EntityStore` and `EntityMeta` docs state
+  the rule; the new conformance cases `Entity/Save/NonTxIgnoresCallerTransactionID`,
+  `Entity/Save/NonTxEachWriteOwnVersion`, `Entity/Save/NonTxIgnoresCallerChangeType`
+  and `Entity/Save/InTxIgnoresCallerChangeType` fail on a plugin that stores
+  or matches a caller's transaction ID, or keeps a caller's change type.
+  A read inside the transaction of its pending version returns the store's
+  metadata too (transaction ID, tenant, derived change type, the version
+  number the commit records, store dates), pinned by
+  `Entity/Save/PendingReadCarriesStoreMetadata`, including that a new
+  entity saved, deleted and saved again in one transaction keeps the first
+  save's pending creation date.
+
+- **`GetVersionByTransaction` reads committed versions only**, also inside a
+  transaction and inside `txID` itself, and returns the one version `txID`
+  wrote. The `Entity/GetVersionByTransaction/EarliestWins` conformance case
+  is removed; the new `Entity/OneVersionPerTx/*` cases (each sequence of
+  writes in one transaction, savepoints, `SaveAll`/`DeleteAll`,
+  `GetVersionByTransaction/LastSaveWins` and
+  `GetVersionByTransaction/InsideWritingTxIsNotFound`) fail on a plugin that
+  records more than one version per entity per transaction or returns an
+  uncommitted version. `Entity/PointInTime/DeleteRecreateSameTxVersionTiebreak`
+  is renamed `Entity/PointInTime/DeleteRecreateSameTxResolvesToRecreate`: the
+  transaction records one version, so there is no tiebreak.
+
+- **A delete does not free an entity's model inside the transaction.** After
+  a create and a delete of an id in one transaction, a `Save` of that id
+  under a different model returns `ErrEntityModelMismatch`, as without the
+  delete. New conformance case
+  `Entity/Save/ModelReferenceIsImmutableWithinTxAfterDelete`.
+
 - **`ModelStore.ExtendSchema` commits in its own transaction.** It never
   joins a transaction on ctx, is visible to every later `Get` on return,
   treats an already-held delta as a no-op, never returns `ErrConflict` or
@@ -22,6 +73,45 @@ MAINTAINING.md.
   `ErrModelNotLocked`. `ModelStore.Get` reads the latest committed model
   and ignores any transaction on ctx. `ErrRetryExhausted` no longer
   documents schema extension.
+
+- **`ModelStore` refuses changes under live entities and over a locked
+  model**, each check atomic with the change it guards. `Unlock` of a model
+  with live entities changes nothing and returns a `*ModelHasEntitiesError`
+  (new; it carries `Ref` and `Count` and matches the new
+  `ErrModelHasEntities` under `errors.Is`). `Delete` of a `LOCKED` model and
+  `Save` over a stored `LOCKED` model change nothing and return the new
+  `ErrModelLocked`. `Delete` counts no entities: an `UNLOCKED` model has
+  none. `ErrModelNotLocked` now also covers an entity commit, and a
+  non-transactional entity save, into a model that does not exist or is not
+  `LOCKED`, so an entity commit and an `Unlock` of its model never both
+  succeed. New conformance cases `Model/Unlock/RefusesLiveEntities`,
+  `Model/Delete/RefusesLocked`, `Model/Save/RefusesOverLocked` and
+  `Model/Interleave/UnlockVsUncommittedWrite`.
+
+- **Unique keys are computed at commit from the store's own model.** A
+  store reads a model's unique keys from its stored model
+  (`ModelDescriptor.UniqueKeys`) when it enforces them; no caller passes
+  keys. A save inside a transaction does no claim work: at commit the
+  claims are computed from the transaction's final entities, from the bytes
+  each final save was given, so a swap of values, a chain of moves and a
+  claim before the holder's free all commit when the final state is unique.
+  A value two final entities claim, or one an entity outside the
+  transaction's writes holds, fails the commit with `ErrUniqueViolation`; a
+  partial composite key fails it with `ErrPartialUniqueKey`. The commit
+  reads the model of every entity whose final write is a save and refuses
+  one that does not exist or is not `LOCKED` with `ErrModelNotLocked`; an
+  entity whose final write is a delete needs no model. A refused commit
+  stores nothing. A write outside a transaction does the same checks on its
+  own. A store whose transaction reads from a snapshot may answer the
+  retryable `ErrConflict` instead when a model changed after it. The
+  `UniqueKey` doc states the rule. New conformance cases `Unique/*`
+  (`KeysFromStoredModel/Tx`, `KeysFromStoredModel/NonTx`, `SwapInTx`,
+  `ChainInTx`, `FreeAfterClaimInTx`, `SameValueTwiceInTx`,
+  `PartialKeyAtCommit`, `SavepointRollbackRestoresClaim`,
+  `KeylessModelCommitsNoClaims`, `CommitRefusesModelNotLocked`,
+  `CommitRefusesIfAnyModelNotLocked`, `CommitRefusesMissingModel`,
+  `CreateThenDeleteCommitsOnUnlockedModel`,
+  `NonTxSaveRefusesModelNotLocked`) declare keys on the model only.
 
 ### Added
 
@@ -569,13 +659,15 @@ MAINTAINING.md.
   begins with a **tombstone** left by a create and a delete committed in
   the same transaction. A backend that asks for "the first version" rather
   than "the first version that still carries an entity" finds no entity
-  there and restamps the creation date on every later update. The
-  tombstone shape asserts *stability* rather than a particular instant:
-  which instant a recreate establishes after a tombstone is a documented
-  per-backend difference, but no backend may move it afterwards.
+  there and restamps the creation date on every later update. In the
+  tombstone shape the entity was created by the transaction that also
+  deleted it, so a re-create keeps that transaction's commit instant (the
+  tombstone's timestamp), and no later update moves it.
 
-  Migration: derive the carried-forward creation date from the entity's
-  earliest still-recoverable snapshot, not from its first version row.
+  Migration: carry forward the creation date the entity got when its first
+  version committed — for a history that begins with a create-and-delete
+  tombstone, that tombstone's commit instant — never the instant of a
+  re-create or of a later write.
 
 ### Changed
 

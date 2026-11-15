@@ -83,6 +83,7 @@ func newSeededCoordFixture(t *testing.T, h Harness, co spi.TransactionCoordinato
 // beginCoordFixture begins the fixture's transaction for the tenant on ctx.
 func beginCoordFixture(t *testing.T, h Harness, co spi.TransactionCoordinator, ctx spiCtx) *coordFixture {
 	t.Helper()
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: coordModel, ModelVersion: "1"})
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 	txID, txCtx := beginGuarded(t, tm, ctx)
@@ -703,6 +704,7 @@ func testCoordScopeConflict(t *testing.T, h Harness, co spi.TransactionCoordinat
 // transaction begins.
 func seedCoordEntity(t *testing.T, h Harness, ctx spiCtx) string {
 	t.Helper()
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: coordModel, ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx spiCtx) {
 		es, err := h.Factory.EntityStore(txCtx)

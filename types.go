@@ -30,10 +30,14 @@ type EntityMeta struct {
 	// committed. LastModifiedDate is the instant the transaction that wrote
 	// this revision committed. Both are assigned by the store, never by the
 	// caller; a value supplied on Save is ignored.
-	CreationDate            time.Time
-	LastModifiedDate        time.Time
+	CreationDate     time.Time
+	LastModifiedDate time.Time
+	// TransactionID is the transaction that wrote this revision, empty for
+	// a write outside a transaction. ChangeType is "CREATED", "UPDATED" or
+	// "DELETED" (see EntityStore). Both are assigned by the store, never by
+	// the caller; a value supplied on Save or CompareAndSave is ignored.
 	TransactionID           string
-	ChangeType              string        // "CREATED", "UPDATED", "DELETED"
+	ChangeType              string
 	ChangeUser              string        // user ID who performed the change
 	ChangeUserKind          PrincipalKind // kind of the attributed ChangeUser; empty on legacy rows
 	ChangeExecutor          Principal     // the actual caller that performed the change, independent of attribution
@@ -93,7 +97,7 @@ type EntityVersionMeta struct {
 	// Executor is the actual caller that performed the change, independent
 	// of attribution.
 	Executor Principal
-	// TransactionID may be empty for non-transactional writes.
+	// TransactionID is empty for a write outside a transaction.
 	TransactionID string
 	// Deleted is canonical: derived from ChangeType == "DELETED", not a
 	// separately-stamped flag. True only on the tombstone row.

@@ -19,12 +19,20 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Update", testEntityUpdate)
 	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutable", testEntityModelImmutable)
 	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutableWithinTx", testEntityModelImmutableWithinTx)
+	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutableWithinTxAfterDelete", testEntityModelImmutableWithinTxAfterDelete)
+	runSubtest(t, h, tracker, "Save/ModelReferenceFreedBySavepointRollback", testEntityModelFreedBySavepointRollbackAfterDelete)
+	runSubtest(t, h, tracker, "Save/ModelReferenceFreedBySavepointRollbackNoDelete", testEntityModelFreedBySavepointRollbackNoDelete)
 	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutableAfterSameTxCreateDelete", testEntityModelImmutableAfterSameTxCreateDelete)
 	runSubtest(t, h, tracker, "CompareAndSave/ModelReferenceIsImmutable", testEntityCompareAndSaveModelImmutable)
 	runSubtest(t, h, tracker, "CompareAndSave/ModelReferenceIsImmutableWithinTx", testEntityCompareAndSaveModelImmutableWithinTx)
 	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutableAfterSameTxCreateDeleteAll", testEntityModelImmutableAfterSameTxCreateDeleteAll)
 	runSubtest(t, h, tracker, "Save/CallerCreationDateIgnored", testEntitySaveIgnoresCallerCreationDate)
 	runSubtest(t, h, tracker, "Save/UpdateDoesNotRestampCreationDate", testEntityUpdateDoesNotRestampCreationDate)
+	runSubtest(t, h, tracker, "Save/NonTxIgnoresCallerTransactionID", testEntityNonTxIgnoresCallerTransactionID)
+	runSubtest(t, h, tracker, "Save/NonTxEachWriteOwnVersion", testEntityNonTxEachWriteOwnVersion)
+	runSubtest(t, h, tracker, "Save/NonTxIgnoresCallerChangeType", testEntityNonTxIgnoresCallerChangeType)
+	runSubtest(t, h, tracker, "Save/InTxIgnoresCallerChangeType", testEntityInTxIgnoresCallerChangeType)
+	runSubtest(t, h, tracker, "Save/PendingReadCarriesStoreMetadata", testEntityPendingReadCarriesStoreMetadata)
 	runSubtest(t, h, tracker, "SaveAll/Ordering", testEntitySaveAllOrdering)
 	runSubtest(t, h, tracker, "SaveAll/PartialFailureAtomicity", testEntitySaveAllAtomicity)
 	runSubtest(t, h, tracker, "Get/NotFound", testEntityGetNotFound)
@@ -60,8 +68,7 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "GetPage/AsAtCommittedOnlyInTx", testEntityGetPageAsAtCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "GetPage/InTxWithStagedDeletes", testEntityGetPageInTxWithStagedDeletes)
 	runSubtest(t, h, tracker, "GetPage/InTxRecordsReadSet", testEntityGetPageInTxRecordsReadSet)
-	runSubtest(t, h, tracker, "PointInTime/DeleteRecreateSameTxVersionTiebreak", testEntityPITDeleteRecreateSameTxVersionTiebreak)
-	runSubtest(t, h, tracker, "GetVersionByTransaction/EarliestWins", testEntityGetVersionByTransactionEarliestWins)
+	runSubtest(t, h, tracker, "PointInTime/DeleteRecreateSameTxResolvesToRecreate", testEntityPITDeleteRecreateSameTxResolvesToRecreate)
 	runSubtest(t, h, tracker, "GetVersionByTransaction/DeletedNeverMatches", testEntityGetVersionByTransactionDeletedNeverMatches)
 	runSubtest(t, h, tracker, "GetVersionByTransaction/EmptyTxID", testEntityGetVersionByTransactionEmptyTxID)
 	runSubtest(t, h, tracker, "GetVersionByTransaction/UnrelatedTxID", testEntityGetVersionByTransactionUnrelatedTxID)
@@ -82,10 +89,14 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 
 	// Attribution group (follow-on-action attribution design)
 	runSubtest(t, h, tracker, "Attribution/ExecutorRoundTrip", testEntityExecutorRoundTrip)
+
+	// One version per entity per transaction
+	runOneVersionSuite(t, h, tracker)
 }
 
 func testEntityCreateAndGet(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-crud", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -111,6 +122,7 @@ func testEntityCreateAndGet(t *testing.T, h Harness) {
 
 func testEntityUpdate(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-upd", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -153,6 +165,7 @@ func testEntityUpdate(t *testing.T, h Harness) {
 // one.
 func testEntitySaveIgnoresCallerCreationDate(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "caller-creation-date", ModelVersion: "1"})
 	planted := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
 
 	txEntityID := newID()
@@ -203,17 +216,18 @@ func testEntitySaveIgnoresCallerCreationDate(t *testing.T, h Harness) {
 //   - the ordinary one, whose history begins with the create; and
 //   - one whose history begins with a TOMBSTONE, left by a create and a
 //     delete committed in the same transaction — the shape
-//     Save/ModelReferenceIsImmutableAfterSameTxCreateDelete and
-//     PointInTime/DeleteRecreateSameTxVersionTiebreak also exercise. A
-//     backend that asks for "the first version" instead of "the first
+//     Save/ModelReferenceIsImmutableAfterSameTxCreateDelete also exercises.
+//     A backend that asks for "the first version" instead of "the first
 //     version that still carries an entity" finds no entity there, and
 //     silently restamps the creation date on every subsequent update.
 //
-// The second shape asserts STABILITY rather than a particular instant:
-// which instant a recreate establishes after a tombstone is a documented
-// per-backend difference, but no backend may move it afterwards.
+// In the second shape the entity was created by the transaction that also
+// deleted it, so its creation date is that transaction's commit instant —
+// the tombstone's timestamp — and the recreate and every later update keep
+// it.
 func testEntityUpdateDoesNotRestampCreationDate(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "update-creation-date", ModelVersion: "1"})
 	planted := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
 
 	es, err := h.Factory.EntityStore(ctx)
@@ -257,6 +271,10 @@ func testEntityUpdateDoesNotRestampCreationDate(t *testing.T, h Harness) {
 		require.NoError(t, err)
 		require.NoError(t, txEs.Delete(txCtx, tombID))
 	})
+	tombstones, err := es.GetVersionMetadata(ctx, tombID, spi.VersionMetadataOptions{})
+	require.NoError(t, err)
+	require.Len(t, tombstones, 1, "a create and a delete in one transaction record one version")
+	firstCreatedAt := tombstones[0].Timestamp
 
 	h.AdvanceClock(1 * time.Millisecond)
 
@@ -269,7 +287,9 @@ func testEntityUpdateDoesNotRestampCreationDate(t *testing.T, h Harness) {
 	recreated, err := es.Get(ctx, tombID)
 	require.NoError(t, err)
 	recreatedAt := recreated.Meta.CreationDate
-	require.False(t, recreatedAt.IsZero(), "CreationDate must be populated after a recreate")
+	require.True(t, recreatedAt.Equal(firstCreatedAt),
+		"a recreate must keep the creation date of the transaction that created the entity: got %v, want %v",
+		recreatedAt, firstCreatedAt)
 
 	h.AdvanceClock(1 * time.Millisecond)
 
@@ -298,6 +318,8 @@ func testEntityUpdateDoesNotRestampCreationDate(t *testing.T, h Harness) {
 // takes), so this pins the check against COMMITTED state.
 func testEntityModelImmutable(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model", ModelVersion: "1"})
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model", ModelVersion: "2"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -325,6 +347,8 @@ func testEntityModelImmutable(t *testing.T, h Harness) {
 // write succeeded. Save must reject it at the call that makes it.
 func testEntityModelImmutableWithinTx(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-tx", ModelVersion: "1"})
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-tx", ModelVersion: "2"})
 	id := newID()
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
@@ -345,6 +369,93 @@ func testEntityModelImmutableWithinTx(t *testing.T, h Harness) {
 		"must wrap ErrEntityModelMismatch; got: %v", err)
 }
 
+// testEntityModelImmutableWithinTxAfterDelete pins that a delete does not free
+// an entity's model inside the transaction either: create an id under one
+// model and delete it in the same transaction, and a Save of that id under a
+// different model is rejected at buffer time, as it is without the delete
+// (Save/ModelReferenceIsImmutableWithinTx) and after the commit
+// (Save/ModelReferenceIsImmutableAfterSameTxCreateDelete). The model is fixed
+// at creation for the life of the id, including across delete and recreate.
+//
+// There is no CompareAndSave variant: after a delete staged in the caller's
+// transaction no CompareAndSave can succeed (see its doc), so it never
+// reaches a model check.
+func testEntityModelImmutableWithinTxAfterDelete(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-tx-del", ModelVersion: "1"})
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-tx-del", ModelVersion: "2"})
+	id := newID()
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	_, txCtx := beginGuarded(t, tm, ctx) // rolled back at cleanup: a failed write aborts a postgres transaction
+
+	es, err := h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+	_, err = es.Save(txCtx, newEntity(t, "immutable-model-tx-del", id, map[string]any{"n": 1}))
+	require.NoError(t, err)
+	require.NoError(t, es.Delete(txCtx, id))
+
+	second := newEntity(t, "immutable-model-tx-del", id, map[string]any{"n": 2})
+	second.Meta.ModelRef.ModelVersion = "2"
+	_, err = es.Save(txCtx, second)
+	require.Error(t, err, "a same-transaction Save under a different model after create and delete must be rejected at buffer time")
+	require.True(t, errors.Is(err, spi.ErrEntityModelMismatch),
+		"must wrap ErrEntityModelMismatch; got: %v", err)
+}
+
+// testEntityModelFreedBySavepointRollbackAfterDelete pins that a rollback to a
+// savepoint undoes a create completely, its model included: savepoint, create
+// an id under model A, delete it, roll back to the savepoint, and the id was
+// never created, so a Save under model B creates it under model B.
+func testEntityModelFreedBySavepointRollbackAfterDelete(t *testing.T, h Harness) {
+	testEntityModelFreedBySavepointRollback(t, h, true)
+}
+
+// testEntityModelFreedBySavepointRollbackNoDelete is the same without the
+// delete: savepoint, create under model A, roll back, Save under model B.
+func testEntityModelFreedBySavepointRollbackNoDelete(t *testing.T, h Harness) {
+	testEntityModelFreedBySavepointRollback(t, h, false)
+}
+
+func testEntityModelFreedBySavepointRollback(t *testing.T, h Harness, deleteBeforeRollback bool) {
+	ctx := tenantContext(h.NewTenant())
+	refA := spi.ModelRef{EntityName: "model-freed-by-sp", ModelVersion: "1"}
+	refB := spi.ModelRef{EntityName: "model-freed-by-sp", ModelVersion: "2"}
+	EnsureLockedModel(t, h.Factory, ctx, refA)
+	EnsureLockedModel(t, h.Factory, ctx, refB)
+	id := newID()
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
+	es, err := h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+
+	sp, err := tm.Savepoint(txCtx, txID)
+	require.NoError(t, err)
+	_, err = es.Save(txCtx, newEntity(t, refA.EntityName, id, map[string]any{"n": 1}))
+	require.NoError(t, err)
+	if deleteBeforeRollback {
+		require.NoError(t, es.Delete(txCtx, id))
+	}
+	require.NoError(t, tm.RollbackToSavepoint(txCtx, txID, sp))
+
+	second := newEntity(t, refB.EntityName, id, map[string]any{"n": 2})
+	second.Meta.ModelRef = refB
+	_, err = es.Save(txCtx, second)
+	require.NoError(t, err, "the rollback undid the create under model A, so a Save under model B creates the entity")
+	require.NoError(t, tm.Commit(txCtx, txID))
+
+	readEs, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	got, err := readEs.Get(ctx, id)
+	require.NoError(t, err)
+	require.Equal(t, refB, got.Meta.ModelRef, "the entity is stored under model B")
+	metas, err := readEs.GetVersionMetadata(ctx, id, spi.VersionMetadataOptions{})
+	require.NoError(t, err)
+	require.Len(t, metas, 1, "one version: the create under model B")
+	require.Equal(t, "CREATED", metas[0].ChangeType)
+}
+
 // testEntityModelImmutableAfterSameTxCreateDelete pins the rejection for the
 // shape that most naturally hides it from a naive implementation: create and
 // delete the same id inside ONE transaction, commit, then try to recreate it
@@ -358,6 +469,8 @@ func testEntityModelImmutableWithinTx(t *testing.T, h Harness) {
 // ever rolls back, so it never commits the tombstone this case depends on.)
 func testEntityModelImmutableAfterSameTxCreateDelete(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-cd", ModelVersion: "1"})
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-cd", ModelVersion: "2"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -388,6 +501,8 @@ func testEntityModelImmutableAfterSameTxCreateDelete(t *testing.T, h Harness) {
 // regardless of which check it runs first internally.
 func testEntityCompareAndSaveModelImmutable(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-cas", ModelVersion: "1"})
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-cas", ModelVersion: "2"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -424,6 +539,8 @@ func testEntityCompareAndSaveModelImmutable(t *testing.T, h Harness) {
 // still passes because expectedTxID is that real committed value.
 func testEntityCompareAndSaveModelImmutableWithinTx(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-cas-tx", ModelVersion: "1"})
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-cas-tx", ModelVersion: "2"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -467,6 +584,8 @@ func testEntityCompareAndSaveModelImmutableWithinTx(t *testing.T, h Harness) {
 // id as belonging to its original model.
 func testEntityModelImmutableAfterSameTxCreateDeleteAll(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-cda", ModelVersion: "1"})
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-cda", ModelVersion: "2"})
 	id := newID()
 	mref := spi.ModelRef{EntityName: "immutable-model-cda", ModelVersion: "1"}
 	withTx(t, h, ctx, func(txCtx context.Context) {
@@ -496,6 +615,7 @@ func testEntityGetNotFound(t *testing.T, h Harness) {
 
 func testEntityDelete(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-del", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -524,6 +644,7 @@ func testEntityDeleteNotFound(t *testing.T, h Harness) {
 
 func testEntityDeleteAll(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-delall", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-delall", ModelVersion: "1"}
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -546,6 +667,7 @@ func testEntityDeleteAll(t *testing.T, h Harness) {
 
 func testEntityExists(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-ex", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -568,6 +690,7 @@ func testEntityExists(t *testing.T, h Harness) {
 
 func testEntityCount(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cnt", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-cnt", ModelVersion: "1"}
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -584,6 +707,7 @@ func testEntityCount(t *testing.T, h Harness) {
 
 func testEntityCountByState(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cbs", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-cbs", ModelVersion: "1"}
 
 	// Empty model: nil filter -> empty map.
@@ -727,6 +851,7 @@ func testEntityCountByState(t *testing.T, h Harness) {
 // committed entity, create-then-delete, delete-then-save, and DeleteAll.
 func testEntityCountInTxBufferShapes(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cnt-tx", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-cnt-tx", ModelVersion: "1"}
 	ids := make([]string, 4)
 	withTx(t, h, ctx, func(txCtx context.Context) {
@@ -794,6 +919,7 @@ func testEntityCountInTxBufferShapes(t *testing.T, h Harness) {
 func testEntitySaveAllOrdering(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	mref := spi.ModelRef{EntityName: "m-sa", ModelVersion: "1"}
+	EnsureLockedModel(t, h.Factory, ctx, mref)
 	ents := []*spi.Entity{
 		newEntity(t, "m-sa", newID(), map[string]any{"i": 0}),
 		newEntity(t, "m-sa", newID(), map[string]any{"i": 1}),
@@ -816,6 +942,7 @@ func testEntitySaveAllOrdering(t *testing.T, h Harness) {
 func testEntitySaveAllAtomicity(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	mref := spi.ModelRef{EntityName: "m-saa", ModelVersion: "1"}
+	EnsureLockedModel(t, h.Factory, ctx, mref)
 	tm, _ := h.Factory.TransactionManager(ctx)
 	txID, txCtx, err := tm.Begin(ctx)
 	require.NoError(t, err)
@@ -836,6 +963,7 @@ func testEntitySaveAllAtomicity(t *testing.T, h Harness) {
 
 func testEntityJSONFidelity(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-json", ModelVersion: "1"})
 	id := newID()
 	payload := map[string]any{
 		"nested": map[string]any{
@@ -864,6 +992,7 @@ func testEntityJSONFidelity(t *testing.T, h Harness) {
 
 func testEntityGetAsAtHistorical(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-asat", ModelVersion: "1"})
 	id := newID()
 	// Write v=1, advance, capture tBetween12, advance, write v=2, advance.
 	withTx(t, h, ctx, func(txCtx context.Context) {
@@ -890,6 +1019,7 @@ func testEntityGetAsAtHistorical(t *testing.T, h Harness) {
 
 func testEntityGetAsAtMeta(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-meta", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -968,6 +1098,7 @@ const (
 func newPITCommittedOnlyFixture(t *testing.T, h Harness, ctx spiCtx, modelName string) pitFixture {
 	t.Helper()
 	mref := spi.ModelRef{EntityName: modelName, ModelVersion: "1"}
+	EnsureLockedModel(t, h.Factory, ctx, mref)
 
 	committedID := newID()
 	withTx(t, h, ctx, func(txCtx spiCtx) {
@@ -1055,6 +1186,7 @@ func testEntityGetPageAsAtCommittedOnlyInTx(t *testing.T, h Harness) {
 // every row, including the tombstone.
 func testEntityVersionMetadataOrdering(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-hist", ModelVersion: "1"})
 	id := newID()
 	for i := 0; i < 3; i++ {
 		withTx(t, h, ctx, func(txCtx context.Context) {
@@ -1097,6 +1229,7 @@ func testEntityVersionMetadataOrdering(t *testing.T, h Harness) {
 // the tombstone's, so (entity id, version) names exactly one history row.
 func testEntityVersionMetadataRecreateAfterDelete(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-recreate", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -1137,6 +1270,7 @@ func testEntityVersionMetadataRecreateAfterDelete(t *testing.T, h Harness) {
 // window" with "no such entity" fails the first assertion below.
 func testEntityGetVersionMetadataEmptyWindowIsNotAnError(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-vmw", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -1173,6 +1307,7 @@ func testEntityGetVersionMetadataEmptyWindowIsNotAnError(t *testing.T, h Harness
 // but reorders or drops the wrong rows fails the prefix-equality assertion.
 func testEntityGetVersionMetadataLimitCaps(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-vlim", ModelVersion: "1"})
 	id := newID()
 	const n = 6
 	for i := 0; i < n; i++ {
@@ -1209,6 +1344,7 @@ func testEntityGetVersionMetadataLimitCaps(t *testing.T, h Harness) {
 // returns every version instead of only the pre-cutoff one.
 func testEntityGetVersionMetadataUntilBound(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-vuntil", ModelVersion: "1"})
 	id := newID()
 
 	withTx(t, h, ctx, func(txCtx context.Context) {
@@ -1250,6 +1386,7 @@ func testEntityGetVersionMetadataUntilBound(t *testing.T, h Harness) {
 // violations.
 func testEntityGetPageOrderAndBounds(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-page", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-page", ModelVersion: "1"}
 	const n = 5
 	withTx(t, h, ctx, func(txCtx context.Context) {
@@ -1301,6 +1438,7 @@ func testEntityGetPageOrderAndBounds(t *testing.T, h Harness) {
 // through a transaction's own context.
 func testEntityGetPageAsAtSnapshot(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-page-asat", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-page-asat", ModelVersion: "1"}
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -1402,6 +1540,9 @@ func entityIDs(es []*spi.Entity) []string {
 // page position.
 func testEntityGetPageInTxWithStagedDeletes(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-page-txdel-a", ModelVersion: "1"})
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-page-txdel-b", ModelVersion: "1"})
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-page-txdel-c", ModelVersion: "1"})
 
 	// idOrderSort sorts ids in place by h.IDOrder — used only where the
 	// expected order cannot be read directly off an already-ordered
@@ -1533,6 +1674,7 @@ func testEntityGetPageInTxRecordsReadSet(t *testing.T, h Harness) {
 func testEntityGetPageReadSetOutcome(t *testing.T, h Harness, conflictOnPage, wantCommitSucceeds bool) {
 	t.Helper()
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-page-readset", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-page-readset", ModelVersion: "1"}
 
 	// Seed 4 entities and read back committed canonical order so we know
@@ -1580,29 +1722,26 @@ func testEntityGetPageReadSetOutcome(t *testing.T, h Harness, conflictOnPage, wa
 	require.ErrorIs(t, err, spi.ErrConflict)
 }
 
-// testEntityPITDeleteRecreateSameTxVersionTiebreak pins the point-in-time
-// version tiebreak for a delete-then-recreate committed together in ONE
-// transaction, under the SAME model: Save, Delete, and Save again all happen
-// inside a single transaction that commits once. On a backend that stamps
-// every write of one transaction from a single reading of the clock (e.g.
-// postgres's CURRENT_TIMESTAMP), the tombstone and the recreate share the
-// transaction's one commit instant — a timestamp comparison alone cannot
-// order them, and only a version-level tiebreak can: the LATER write within
-// the transaction (the recreate) must win, never the tombstone.
+// testEntityPITDeleteRecreateSameTxResolvesToRecreate pins the point-in-time
+// reads of an entity that one transaction saves, deletes and saves again
+// under the SAME model, committing once. The transaction records one version
+// of the entity, its last write (see EntityStore), so a point-in-time read
+// after the commit must return the recreate, never the tombstone of the
+// intermediate delete or the first save.
 //
 // This is deliberately NOT the model-immutability shape covered by
 // testEntityModelImmutableAfterSameTxCreateDelete: that family recreates
 // under a DIFFERENT model and asserts rejection. Recreating under the SAME
-// model is a legitimate write; this test's whole point is the ordering of
-// the two committed rows it produces, not whether the write is allowed.
+// model is a legitimate write.
 //
 // Both instant-resolving read paths are exercised because they are separate
 // queries on at least one backend and must agree: GetAsAt (single-entity)
 // and GetPage(asAt) (the model-scoped list/page read).
-func testEntityPITDeleteRecreateSameTxVersionTiebreak(t *testing.T, h Harness) {
+func testEntityPITDeleteRecreateSameTxResolvesToRecreate(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
-	const modelName = "m-pit-recreate-tiebreak"
+	const modelName = "m-pit-recreate"
 	mref := spi.ModelRef{EntityName: modelName, ModelVersion: "1"}
+	EnsureLockedModel(t, h.Factory, ctx, mref)
 	id := newID()
 
 	withTx(t, h, ctx, func(txCtx context.Context) {
@@ -1640,44 +1779,13 @@ func testEntityPITDeleteRecreateSameTxVersionTiebreak(t *testing.T, h Harness) {
 		"GetPage(asAt) must resolve to the recreate (gen=2), not the tombstone")
 }
 
-// testEntityGetVersionByTransactionEarliestWins verifies that when one
-// transaction saves the same entity twice before committing, the earlier
-// (lower-Version) save is returned for that shared txID — not the latest,
-// which is what a naive "most recent row for this txID" implementation
-// would return.
-func testEntityGetVersionByTransactionEarliestWins(t *testing.T, h Harness) {
-	ctx := tenantContext(h.NewTenant())
-	id := newID()
-	withTx(t, h, ctx, func(txCtx context.Context) {
-		es, err := h.Factory.EntityStore(txCtx)
-		require.NoError(t, err)
-		_, err = es.Save(txCtx, newEntity(t, "m-gvbt", id, map[string]any{"v": 1}))
-		require.NoError(t, err)
-		_, err = es.Save(txCtx, newEntity(t, "m-gvbt", id, map[string]any{"v": 2}))
-		require.NoError(t, err)
-	})
-
-	es, err := h.Factory.EntityStore(ctx)
-	require.NoError(t, err)
-	got, err := es.Get(ctx, id)
-	require.NoError(t, err)
-	txID := got.Meta.TransactionID
-	require.NotEmpty(t, txID)
-
-	v, err := es.GetVersionByTransaction(ctx, id, txID)
-	require.NoError(t, err)
-	require.NotNil(t, v)
-	require.NotNil(t, v.Entity)
-	require.Contains(t, string(v.Entity.Data), `"v":1`,
-		"same-tx double-save: GetVersionByTransaction must return the earlier version, not the latest")
-}
-
 // testEntityGetVersionByTransactionDeletedNeverMatches verifies that a
 // DELETED tombstone never matches GetVersionByTransaction, even queried by
 // its own deleting transaction's ID: this method surfaces entity content,
 // and a tombstone has none.
 func testEntityGetVersionByTransactionDeletedNeverMatches(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-gvbt-del", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -1712,12 +1820,12 @@ func testEntityGetVersionByTransactionDeletedNeverMatches(t *testing.T, h Harnes
 // as a wildcard against an entity with a real, non-empty TransactionID, or
 // by matching a stored-empty TransactionID. The latter requires an entity
 // actually written with no ambient transaction — a plain Save on a bare
-// (non-tx) ctx is a legal SPI operation, and backends that record
-// TransactionID stamp an empty one for such writes (see
-// EntityVersionMeta.TransactionID's doc comment: "may be empty
-// (non-transactional writes)"). Both scenarios must return ErrNotFound.
+// (non-tx) ctx is a legal SPI operation, and it stamps an empty
+// TransactionID (see EntityVersionMeta.TransactionID's doc comment). Both
+// scenarios must return ErrNotFound.
 func testEntityGetVersionByTransactionEmptyTxID(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-gvbt-empty", ModelVersion: "1"})
 	es, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
 
@@ -1757,6 +1865,7 @@ func testEntityGetVersionByTransactionEmptyTxID(t *testing.T, h Harness) {
 // ErrNotFound.
 func testEntityGetVersionByTransactionUnrelatedTxID(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-gvbt-unrel", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -1789,6 +1898,7 @@ func testEntityGetVersionByTransactionUnrelatedTxID(t *testing.T, h Harness) {
 
 func testEntityCompareAndSaveSuccess(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cas", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -1816,6 +1926,7 @@ func testEntityCompareAndSaveSuccess(t *testing.T, h Harness) {
 
 func testEntityCompareAndSaveConflict(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cas", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -1846,19 +1957,19 @@ func testEntityCompareAndSaveConflict(t *testing.T, h Harness) {
 // violation, pinned by CompareAndSave/EmptyExpectedIDRejected below.
 //
 // The "existing entity" is still seeded through a committed transaction, so
-// it carries a real, non-empty transaction ID. On a backend that stamps
-// none for non-transactional writes (see EntityVersionMeta.TransactionID's
-// doc comment) a non-transactionally seeded entity would carry the empty
-// ID, and this leg would degenerate into the same non-empty-versus-empty
-// comparison the missing-entity leg already makes.
+// it carries a real, non-empty transaction ID. A non-transactional write
+// stamps none (see EntityVersionMeta.TransactionID's doc comment), so a
+// non-transactionally seeded entity would carry the empty ID, and this leg
+// would degenerate into the same non-empty-versus-empty comparison the
+// missing-entity leg already makes.
 func testEntityCompareAndSaveExpectedIDIsLiteral(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cas-lit", ModelVersion: "1"})
 
 	// seedExistingTransactional creates an entity via its own committed
 	// transaction — separate from, and completed before, any transaction
 	// assertLiteralComparison itself runs under — so it carries a real
-	// transaction ID regardless of whether a backend stamps one on
-	// non-transactional writes.
+	// transaction ID, which a non-transactional write never stamps.
 	seedExistingTransactional := func() string {
 		id := newID()
 		withTx(t, h, ctx, func(txCtx spiCtx) {
@@ -1923,6 +2034,7 @@ func testEntityCompareAndSaveExpectedIDIsLiteral(t *testing.T, h Harness) {
 // re-reads afterwards, so a backend that errors AFTER writing fails here.
 func testEntityCompareAndSaveEmptyExpectedIDRejected(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cas-empty", ModelVersion: "1"})
 
 	seedExisting := func() string {
 		id := newID()
@@ -1985,6 +2097,7 @@ func testEntityCompareAndSaveEmptyExpectedIDRejected(t *testing.T, h Harness) {
 
 func testEntityConcurrentConflict(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cc", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -2041,6 +2154,7 @@ func testEntityConcurrentConflict(t *testing.T, h Harness) {
 
 func testEntityConcurrentDifferent(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cd", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-cd", ModelVersion: "1"}
 	const n = 8
 	errs := make(chan error, n)
@@ -2084,6 +2198,7 @@ func testEntityTenantIsolationGet(t *testing.T, h Harness) {
 	tA := h.NewTenant()
 	tB := h.NewTenant()
 	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
+	EnsureLockedModel(t, h.Factory, ctxA, spi.ModelRef{EntityName: "m-ti", ModelVersion: "1"})
 	id := newID()
 
 	withTx(t, h, ctxA, func(txCtx context.Context) {
@@ -2100,6 +2215,7 @@ func testEntityTenantIsolationGet(t *testing.T, h Harness) {
 func testEntityTenantIsolationDelete(t *testing.T, h Harness) {
 	tA, tB := h.NewTenant(), h.NewTenant()
 	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
+	EnsureLockedModel(t, h.Factory, ctxA, spi.ModelRef{EntityName: "m-tidel", ModelVersion: "1"})
 	id := newID()
 
 	withTx(t, h, ctxA, func(txCtx context.Context) {
@@ -2124,6 +2240,7 @@ func testEntityTenantIsolationDelete(t *testing.T, h Harness) {
 func testEntityTenantIsolationGetPage(t *testing.T, h Harness) {
 	tA, tB := h.NewTenant(), h.NewTenant()
 	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
+	EnsureLockedModel(t, h.Factory, ctxA, spi.ModelRef{EntityName: "m-tigetpage", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-tigetpage", ModelVersion: "1"}
 
 	withTx(t, h, ctxA, func(txCtx context.Context) {
@@ -2158,6 +2275,7 @@ func testEntityTenantIsolationGetPage(t *testing.T, h Harness) {
 func testEntityTenantIsolationSearch(t *testing.T, h Harness) {
 	tA, tB := h.NewTenant(), h.NewTenant()
 	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
+	EnsureLockedModel(t, h.Factory, ctxA, spi.ModelRef{EntityName: "m-tisearch", ModelVersion: "1"})
 	const model = "m-tisearch"
 	filter := spi.Filter{
 		Op:       spi.FilterEq,
@@ -2197,6 +2315,7 @@ func testEntityTenantIsolationSearch(t *testing.T, h Harness) {
 func testEntityTenantIsolationCount(t *testing.T, h Harness) {
 	tA, tB := h.NewTenant(), h.NewTenant()
 	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
+	EnsureLockedModel(t, h.Factory, ctxA, spi.ModelRef{EntityName: "m-ticount", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-ticount", ModelVersion: "1"}
 
 	withTx(t, h, ctxA, func(txCtx context.Context) {
@@ -2239,6 +2358,7 @@ func testEntityTenantIsolationCount(t *testing.T, h Harness) {
 func testEntityExecutorRoundTrip(t *testing.T, h Harness) {
 	tenant := h.NewTenant()
 	ctx := tenantContext(tenant)
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-exec", ModelVersion: "1"})
 	id := newID()
 	createdExecutor := spi.Principal{ID: "svc-1", Kind: spi.PrincipalService}
 
@@ -2300,6 +2420,7 @@ func testEntityEmptyTenant(t *testing.T, h Harness) {
 
 func testEntityCountAsAt(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cnt-at", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-cnt-at", ModelVersion: "1"}
 	var ids []string
 	withTx(t, h, ctx, func(txCtx context.Context) {
@@ -2350,6 +2471,7 @@ func testEntityCountAsAtCommittedOnlyInTx(t *testing.T, h Harness) {
 
 func testEntityCountByStateAsAt(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cbs-at", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-cbs-at", ModelVersion: "1"}
 	keepID, deletedEarlyID, deletedLateID := newID(), newID(), newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
@@ -2418,6 +2540,7 @@ func testEntityCountByStateAsAtCommittedOnlyInTx(t *testing.T, h Harness) {
 
 func testEntityVersionMetadataCommittedOnlyInTx(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-vm-tx", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -2441,6 +2564,7 @@ func testEntityVersionMetadataCommittedOnlyInTx(t *testing.T, h Harness) {
 // under "", so a filter naming "" finds it, live and at an instant.
 func testEntityCountByStateEmptyStateFilter(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cbs-empty", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-cbs-empty", ModelVersion: "1"}
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -2468,4 +2592,350 @@ func testEntityCountByStateEmptyStateFilter(t *testing.T, h Harness) {
 	got, err = es.CountByState(ctx, mref, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, map[string]int64{"": 1, "new": 1}, got)
+}
+
+// The NonTx cases pin the rule that an entity's metadata belongs to the
+// store, not the caller, on the write path that has no transaction: every
+// auto-commit write is its own transaction and its own version (see
+// EntityStore), so a transaction id or change type the caller left on the
+// entity is ignored. The stored transaction id is the empty one a
+// non-transactional write stamps (see EntityVersionMeta.TransactionID and
+// CompareAndSave), so GetVersionByTransaction never matches the write, and
+// the change type is derived: CREATED for the entity's first version, UPDATED
+// after it.
+//
+// Both non-transactional write paths are covered, Save and CompareAndSave,
+// because a backend can route them through different code.
+const nonTxModel = "m-non-tx-meta"
+
+// testEntityNonTxIgnoresCallerTransactionID: a caller-supplied transaction id
+// is neither stored nor matched.
+func testEntityNonTxIgnoresCallerTransactionID(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: nonTxModel, ModelVersion: "1"})
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+
+	// Save.
+	id := newID()
+	e := newEntity(t, nonTxModel, id, map[string]any{"v": 1})
+	e.Meta.TransactionID = "caller-x"
+	_, err = es.Save(ctx, e)
+	require.NoError(t, err)
+
+	got, err := es.Get(ctx, id)
+	require.NoError(t, err)
+	require.Empty(t, got.Meta.TransactionID,
+		"Save outside a transaction must not store the caller's transaction id")
+	metas, err := es.GetVersionMetadata(ctx, id, spi.VersionMetadataOptions{})
+	require.NoError(t, err)
+	require.Len(t, metas, 1)
+	require.Empty(t, metas[0].TransactionID,
+		"the version of a Save outside a transaction must not record the caller's transaction id")
+	_, err = es.GetVersionByTransaction(ctx, id, "caller-x")
+	require.ErrorIs(t, err, spi.ErrNotFound,
+		"GetVersionByTransaction must not match a Save outside a transaction by the caller's id")
+
+	// CompareAndSave: the expected id is the seeding transaction's, the
+	// caller's id on the entity is another value again.
+	casID := newID()
+	withTx(t, h, ctx, func(txCtx spiCtx) {
+		txEs, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = txEs.Save(txCtx, newEntity(t, nonTxModel, casID, map[string]any{"v": 1}))
+		require.NoError(t, err)
+	})
+	seeded, err := es.Get(ctx, casID)
+	require.NoError(t, err)
+	require.NotEmpty(t, seeded.Meta.TransactionID)
+	h.AdvanceClock(1 * time.Millisecond)
+
+	cas := newEntity(t, nonTxModel, casID, map[string]any{"v": 2})
+	cas.Meta.TransactionID = "caller-y"
+	_, err = es.CompareAndSave(ctx, cas, seeded.Meta.TransactionID)
+	require.NoError(t, err)
+
+	got, err = es.Get(ctx, casID)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"v":2}`, string(got.Data))
+	require.Empty(t, got.Meta.TransactionID,
+		"CompareAndSave outside a transaction must not store the caller's transaction id")
+	_, err = es.GetVersionByTransaction(ctx, casID, "caller-y")
+	require.ErrorIs(t, err, spi.ErrNotFound,
+		"GetVersionByTransaction must not match a CompareAndSave outside a transaction by the caller's id")
+}
+
+// testEntityNonTxEachWriteOwnVersion: two auto-commit writes that carry the
+// same caller transaction id are two transactions, not one with two versions.
+func testEntityNonTxEachWriteOwnVersion(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: nonTxModel, ModelVersion: "1"})
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+
+	id := newID()
+	for v := 1; v <= 2; v++ {
+		e := newEntity(t, nonTxModel, id, map[string]any{"v": v})
+		e.Meta.TransactionID = "caller-x"
+		_, err = es.Save(ctx, e)
+		require.NoError(t, err)
+		h.AdvanceClock(1 * time.Millisecond)
+	}
+
+	metas, err := es.GetVersionMetadata(ctx, id, spi.VersionMetadataOptions{})
+	require.NoError(t, err)
+	require.Len(t, metas, 2, "each auto-commit write records its own version")
+	for _, m := range metas {
+		require.NotEqual(t, "caller-x", m.TransactionID,
+			"version %d must not record the caller's transaction id", m.Version)
+	}
+	_, err = es.GetVersionByTransaction(ctx, id, "caller-x")
+	require.ErrorIs(t, err, spi.ErrNotFound,
+		"no auto-commit write matches GetVersionByTransaction by the caller's id")
+}
+
+// testEntityNonTxIgnoresCallerChangeType: the change type of an auto-commit
+// write is derived by the store, whatever the caller left on the entity.
+func testEntityNonTxIgnoresCallerChangeType(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: nonTxModel, ModelVersion: "1"})
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+
+	id := newID()
+	first := newEntity(t, nonTxModel, id, map[string]any{"v": 1})
+	first.Meta.ChangeType = "UPDATED"
+	_, err = es.Save(ctx, first)
+	require.NoError(t, err)
+	h.AdvanceClock(1 * time.Millisecond)
+
+	second := newEntity(t, nonTxModel, id, map[string]any{"v": 2})
+	second.Meta.ChangeType = "DELETED"
+	_, err = es.Save(ctx, second)
+	require.NoError(t, err)
+	h.AdvanceClock(1 * time.Millisecond)
+
+	// CompareAndSave needs a real expected id, so the third version comes
+	// from a transaction and the fourth is the auto-commit CompareAndSave.
+	withTx(t, h, ctx, func(txCtx spiCtx) {
+		txEs, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		_, err = txEs.Save(txCtx, newEntity(t, nonTxModel, id, map[string]any{"v": 3}))
+		require.NoError(t, err)
+	})
+	h.AdvanceClock(1 * time.Millisecond)
+	seeded, err := es.Get(ctx, id)
+	require.NoError(t, err)
+	cas := newEntity(t, nonTxModel, id, map[string]any{"v": 4})
+	cas.Meta.ChangeType = "DELETED"
+	_, err = es.CompareAndSave(ctx, cas, seeded.Meta.TransactionID)
+	require.NoError(t, err)
+
+	got, err := es.Get(ctx, id)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"v":4}`, string(got.Data), "a caller DELETED change type must not delete the entity")
+
+	byVersion := changeTypesByVersion(t, es, ctx, id)
+	require.Equal(t, map[int64]string{1: "CREATED", 2: "UPDATED", 3: "UPDATED", 4: "UPDATED"}, byVersion,
+		"the store derives the change type: CREATED for the first version, UPDATED after it")
+}
+
+// testEntityInTxIgnoresCallerChangeType: inside a transaction too the change
+// type of the transaction's one version is the store's (see EntityStore), not
+// a value the caller left on the entity.
+func testEntityInTxIgnoresCallerChangeType(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: nonTxModel, ModelVersion: "1"})
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+
+	id := newID()
+	withTx(t, h, ctx, func(txCtx spiCtx) {
+		txEs, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		e := newEntity(t, nonTxModel, id, map[string]any{"v": 1})
+		e.Meta.ChangeType = "UPDATED"
+		_, err = txEs.Save(txCtx, e)
+		require.NoError(t, err)
+	})
+	h.AdvanceClock(1 * time.Millisecond)
+	withTx(t, h, ctx, func(txCtx spiCtx) {
+		txEs, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		e := newEntity(t, nonTxModel, id, map[string]any{"v": 2})
+		e.Meta.ChangeType = "DELETED"
+		_, err = txEs.Save(txCtx, e)
+		require.NoError(t, err)
+	})
+	h.AdvanceClock(1 * time.Millisecond)
+	seeded, err := es.Get(ctx, id)
+	require.NoError(t, err)
+	withTx(t, h, ctx, func(txCtx spiCtx) {
+		txEs, err := h.Factory.EntityStore(txCtx)
+		require.NoError(t, err)
+		e := newEntity(t, nonTxModel, id, map[string]any{"v": 3})
+		e.Meta.ChangeType = "DELETED"
+		_, err = txEs.CompareAndSave(txCtx, e, seeded.Meta.TransactionID)
+		require.NoError(t, err)
+	})
+
+	got, err := es.Get(ctx, id)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"v":3}`, string(got.Data), "a caller DELETED change type must not delete the entity")
+
+	byVersion := changeTypesByVersion(t, es, ctx, id)
+	require.Equal(t, map[int64]string{1: "CREATED", 2: "UPDATED", 3: "UPDATED"}, byVersion,
+		"the store derives the change type: CREATED for the first version, UPDATED after it")
+}
+
+// changeTypesByVersion maps each committed version of id to its change type.
+func changeTypesByVersion(t *testing.T, es spi.EntityStore, ctx spiCtx, id string) map[int64]string {
+	t.Helper()
+	metas, err := es.GetVersionMetadata(ctx, id, spi.VersionMetadataOptions{})
+	require.NoError(t, err)
+	out := make(map[int64]string, len(metas))
+	for _, m := range metas {
+		out[m.Version] = m.ChangeType
+	}
+	return out
+}
+
+// testEntityPendingReadCarriesStoreMetadata pins that a read inside the
+// transaction of the transaction's pending version returns the store's
+// metadata for it, never the values the caller left on the entity: the
+// transaction id is the transaction's, the tenant is the transaction's, the
+// change type is derived (see EntityStore), the version number is the one
+// the commit records, and the dates are the store's. The dates of a pending
+// version are provisional until the commit stamps them, so the case asserts
+// what holds before the stamp: neither is the caller's value, and an existing
+// entity keeps its committed creation date.
+func testEntityPendingReadCarriesStoreMetadata(t *testing.T, h Harness) {
+	tenant := h.NewTenant()
+	ctx := tenantContext(tenant)
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: nonTxModel, ModelVersion: "1"})
+	planted := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	withCallerMeta := func(id string, payload map[string]any) *spi.Entity {
+		e := newEntity(t, nonTxModel, id, payload)
+		e.Meta.TenantID = "caller-tenant"
+		e.Meta.TransactionID = "caller-x"
+		e.Meta.ChangeType = "DELETED"
+		e.Meta.Version = 99
+		e.Meta.CreationDate = planted
+		e.Meta.LastModifiedDate = planted
+		return e
+	}
+	assertPending := func(label string, got *spi.Entity, txID, changeType string, version int64) {
+		t.Helper()
+		require.Equal(t, txID, got.Meta.TransactionID, "%s: pending transaction id", label)
+		require.Equal(t, tenant, got.Meta.TenantID, "%s: pending tenant", label)
+		require.Equal(t, changeType, got.Meta.ChangeType, "%s: pending change type", label)
+		require.Equal(t, version, got.Meta.Version, "%s: pending version", label)
+		require.False(t, got.Meta.CreationDate.IsZero(), "%s: pending creation date", label)
+		require.False(t, got.Meta.CreationDate.Equal(planted), "%s: the caller's creation date must be ignored", label)
+		require.False(t, got.Meta.LastModifiedDate.IsZero(), "%s: pending last-modified date", label)
+		require.False(t, got.Meta.LastModifiedDate.Equal(planted), "%s: the caller's last-modified date must be ignored", label)
+	}
+	assertCommitted := func(label, id, changeType string, version int64) {
+		t.Helper()
+		metas := changeTypesByVersion(t, mustEntityStore(t, h, ctx), ctx, id)
+		require.Equal(t, changeType, metas[version], "%s: committed change type of version %d", label, version)
+		require.Len(t, metas, int(version), "%s: committed versions", label)
+	}
+
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+
+	// A new entity: CREATED, version 1.
+	newID1 := newID()
+	txID, txCtx := beginGuarded(t, tm, ctx)
+	es, err := h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+	_, err = es.Save(txCtx, withCallerMeta(newID1, map[string]any{"v": 1}))
+	require.NoError(t, err)
+	got, err := es.Get(txCtx, newID1)
+	require.NoError(t, err)
+	assertPending("new entity", got, txID, "CREATED", 1)
+	require.False(t, got.Meta.CreationDate.After(got.Meta.LastModifiedDate),
+		"new entity: pending creation date must not follow its last-modified date")
+	require.NoError(t, tm.Commit(txCtx, txID))
+	h.AdvanceClock(1 * time.Millisecond)
+	assertCommitted("new entity", newID1, "CREATED", 1)
+
+	// An existing entity: UPDATED, the next version number, and its
+	// committed creation date — also when the transaction's second write
+	// replaces its pending version.
+	committed, err := mustEntityStore(t, h, ctx).Get(ctx, newID1)
+	require.NoError(t, err)
+	txID, txCtx = beginGuarded(t, tm, ctx)
+	es, err = h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+	for i, payload := range []map[string]any{{"v": 2}, {"v": 3}} {
+		label := []string{"existing entity", "existing entity, replaced pending"}[i]
+		_, err = es.Save(txCtx, withCallerMeta(newID1, payload))
+		require.NoError(t, err)
+		got, err = es.Get(txCtx, newID1)
+		require.NoError(t, err)
+		assertPending(label, got, txID, "UPDATED", 2)
+		require.True(t, got.Meta.CreationDate.Equal(committed.Meta.CreationDate),
+			"%s: pending creation date %v, want the committed creation date %v", label, got.Meta.CreationDate, committed.Meta.CreationDate)
+	}
+	// A CompareAndSave naming the transaction's own id replaces the pending
+	// version the same way.
+	_, err = es.CompareAndSave(txCtx, withCallerMeta(newID1, map[string]any{"v": 4}), txID)
+	require.NoError(t, err)
+	got, err = es.Get(txCtx, newID1)
+	require.NoError(t, err)
+	assertPending("existing entity, CompareAndSave", got, txID, "UPDATED", 2)
+	require.NoError(t, tm.Commit(txCtx, txID))
+	h.AdvanceClock(1 * time.Millisecond)
+	assertCommitted("existing entity", newID1, "UPDATED", 2)
+
+	// A CompareAndSave as the transaction's first write of an existing
+	// entity.
+	committed, err = mustEntityStore(t, h, ctx).Get(ctx, newID1)
+	require.NoError(t, err)
+	txID, txCtx = beginGuarded(t, tm, ctx)
+	es, err = h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+	_, err = es.CompareAndSave(txCtx, withCallerMeta(newID1, map[string]any{"v": 5}), committed.Meta.TransactionID)
+	require.NoError(t, err)
+	got, err = es.Get(txCtx, newID1)
+	require.NoError(t, err)
+	assertPending("existing entity, first write a CompareAndSave", got, txID, "UPDATED", 3)
+	require.True(t, got.Meta.CreationDate.Equal(committed.Meta.CreationDate),
+		"first write a CompareAndSave: pending creation date %v, want the committed creation date %v", got.Meta.CreationDate, committed.Meta.CreationDate)
+	require.NoError(t, tm.Commit(txCtx, txID))
+	h.AdvanceClock(1 * time.Millisecond)
+	assertCommitted("existing entity, first write a CompareAndSave", newID1, "UPDATED", 3)
+
+	// A new entity saved, deleted and saved again in one transaction keeps
+	// the first save's pending creation date.
+	newID2 := newID()
+	txID, txCtx = beginGuarded(t, tm, ctx)
+	es, err = h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+	_, err = es.Save(txCtx, withCallerMeta(newID2, map[string]any{"v": 1}))
+	require.NoError(t, err)
+	first, err := es.Get(txCtx, newID2)
+	require.NoError(t, err)
+	h.AdvanceClock(1 * time.Millisecond)
+	require.NoError(t, es.Delete(txCtx, newID2))
+	h.AdvanceClock(1 * time.Millisecond)
+	_, err = es.Save(txCtx, withCallerMeta(newID2, map[string]any{"v": 2}))
+	require.NoError(t, err)
+	got, err = es.Get(txCtx, newID2)
+	require.NoError(t, err)
+	assertPending("new entity saved, deleted, saved", got, txID, "CREATED", 1)
+	require.True(t, got.Meta.CreationDate.Equal(first.Meta.CreationDate),
+		"new entity saved, deleted, saved: pending creation date %v, want the first save's %v", got.Meta.CreationDate, first.Meta.CreationDate)
+	require.NoError(t, tm.Commit(txCtx, txID))
+	assertCommitted("new entity saved, deleted, saved", newID2, "CREATED", 1)
+}
+
+// mustEntityStore returns the factory's entity store for ctx.
+func mustEntityStore(t *testing.T, h Harness, ctx spiCtx) spi.EntityStore {
+	t.Helper()
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	return es
 }

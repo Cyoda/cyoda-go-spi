@@ -35,6 +35,7 @@ func testGroupedAggregatorTenantIsolation(t *testing.T, h Harness) {
 	tA, tB := h.NewTenant(), h.NewTenant()
 	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
 	mref := spi.ModelRef{EntityName: "m-ga-ti", ModelVersion: "1"}
+	EnsureLockedModel(t, h.Factory, ctxA, mref)
 
 	withTx(t, h, ctxA, func(txCtx spiCtx) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -94,6 +95,7 @@ func testGroupedAggregatorTenantIsolation(t *testing.T, h Harness) {
 func testGroupedAggregatorInTxRecordsNothing(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	mref := spi.ModelRef{EntityName: "m-ga-tx", ModelVersion: "1"}
+	EnsureLockedModel(t, h.Factory, ctx, mref)
 	id := newID()
 	withTx(t, h, ctx, func(txCtx spiCtx) {
 		es, err := h.Factory.EntityStore(txCtx)

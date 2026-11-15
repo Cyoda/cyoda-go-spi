@@ -23,6 +23,7 @@ type savepointNesting struct {
 func newSavepointNesting(t *testing.T, h Harness) *savepointNesting {
 	t.Helper()
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-sp", ModelVersion: "1"})
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 	txID, txCtx := beginGuarded(t, tm, ctx)

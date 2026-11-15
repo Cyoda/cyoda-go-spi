@@ -213,3 +213,29 @@ func TestErrTxAborted_IsAConflict(t *testing.T) {
 		t.Error("an aborted transaction has not ended; ErrTxAborted must not match ErrTxTerminated")
 	}
 }
+
+func TestModelHasEntitiesError_IsSentinel(t *testing.T) {
+	err := fmt.Errorf("unlock: %w", &ModelHasEntitiesError{
+		Ref:   ModelRef{EntityName: "m", ModelVersion: "1"},
+		Count: 2,
+	})
+	if !errors.Is(err, ErrModelHasEntities) {
+		t.Fatal("a *ModelHasEntitiesError must match ErrModelHasEntities under errors.Is")
+	}
+	if errors.Is(err, ErrModelLocked) || errors.Is(err, ErrModelNotLocked) {
+		t.Fatal("a *ModelHasEntitiesError must match no other model sentinel")
+	}
+	var mhe *ModelHasEntitiesError
+	if !errors.As(err, &mhe) {
+		t.Fatal("errors.As must recover the *ModelHasEntitiesError")
+	}
+	if mhe.Count != 2 {
+		t.Fatalf("Count = %d, want 2", mhe.Count)
+	}
+	if got, want := mhe.Error(), "model has entities: m.1 has 2"; got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
+	}
+	if errors.Is(ErrModelLocked, ErrModelNotLocked) || errors.Is(ErrModelNotLocked, ErrModelLocked) {
+		t.Fatal("ErrModelLocked and ErrModelNotLocked must be distinct")
+	}
+}

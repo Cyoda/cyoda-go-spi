@@ -320,7 +320,42 @@ type ScheduledTaskStore interface {
 	SchedulerActivity(ctx context.Context) (SchedulerActivityReport, error)
 }
 
+// EntityStore stores entities and their version history.
+//
+// One version per entity per transaction. Within one transaction an entity
+// has at most one pending version. A Save, CompareAndSave or Delete of an
+// entity the transaction already wrote replaces that pending version; it does
+// not add one. SaveAll and DeleteAll follow the same rule per entity. At
+// commit the transaction records that one version, which carries:
+//
+//   - content: the transaction's last write of the entity;
+//   - change type: DELETED if the last write is a delete; otherwise CREATED
+//     if this is the entity's first version, else UPDATED (a re-create after
+//     a delete that an earlier transaction committed is UPDATED);
+//   - version number: the entity's previous version number + 1;
+//   - creation date, last-modified date, transaction ID and submit time as
+//     for a single write in the transaction;
+//   - attribution (user, attributed kind, executor): the last write's.
+//
+// So a create and a delete of an entity in one transaction record one
+// version, the DELETED tombstone, and a delete and a save of an existing
+// entity record one UPDATED version. RollbackToSavepoint restores each
+// entity's pending version to what it was at the savepoint, including no
+// pending version. Reads in the transaction return the pending version,
+// carrying the store's metadata for it: the transaction's ID and tenant, the
+// change type and version number the commit records, and provisional dates
+// that the commit replaces with its instant (an existing entity keeps its
+// creation date throughout).
+// Outside a transaction every write is its own transaction and its own
+// version. Such a write records the empty transaction ID and a change type
+// derived as above (DELETED for a delete, otherwise CREATED for the entity's
+// first version, else UPDATED), whatever transaction ID or change type the
+// caller left on the entity: so GetVersionByTransaction never returns it, and
+// two such writes are two versions however the caller labelled them.
 type EntityStore interface {
+	// Save writes entity. Inside a transaction it replaces the entity's
+	// pending version if the transaction already wrote the entity (see
+	// EntityStore).
 	Save(ctx context.Context, entity *Entity) (int64, error)
 	// CompareAndSave saves the entity only if expectedTxID equals the
 	// entity's current transaction ID as the caller's own transaction sees
@@ -334,7 +369,7 @@ type EntityStore interface {
 	// no sentinel (the same treatment Search gives Limit <= 0). The empty
 	// string is not a usable expectation: a missing entity, a deleted one,
 	// and an entity written outside any transaction all carry an empty
-	// EntityMeta.TransactionID — a non-transactional write may stamp none,
+	// EntityMeta.TransactionID — a non-transactional write stamps none,
 	// and EntityVersionMeta.TransactionID shows the same empty value on the
 	// audit row — so "" cannot tell the three apart, and an "expect no
 	// entity" reading of it would silently overwrite an entity that exists.
@@ -357,11 +392,16 @@ type EntityStore interface {
 	// empty transaction ID as a matchable value. There it is a lookup key
 	// that matches nothing and returns ErrNotFound; here it is rejected
 	// outright as a caller error.
+	//
+	// A CompareAndSave naming the caller's own transaction, after that
+	// transaction wrote the entity, replaces the pending version like Save
+	// (see EntityStore).
 	CompareAndSave(ctx context.Context, entity *Entity, expectedTxID string) (int64, error)
 	// SaveAll saves multiple entities, returning versions in iteration order.
 	// Backends may execute saves concurrently. On error, returns the first
 	// error encountered; partially-saved entities within an uncommitted
-	// transaction are invisible to readers.
+	// transaction are invisible to readers. Each entity follows Save's
+	// one-version rule (see EntityStore).
 	SaveAll(ctx context.Context, entities iter.Seq[*Entity]) ([]int64, error)
 	Get(ctx context.Context, entityID string) (*Entity, error)
 	// GetAsAt returns entityID as of asAt. Like every point-in-time read in
@@ -376,11 +416,13 @@ type EntityStore interface {
 	// Delete deletes entityID. Inside a transaction the transaction's own
 	// writes are its latest state: an entity it already deleted is
 	// ErrNotFound, and one it deleted and then saved again can be deleted
-	// again.
+	// again. A delete of an entity the transaction already wrote replaces
+	// the pending version with the tombstone (see EntityStore).
 	Delete(ctx context.Context, entityID string) error
 	// DeleteAll deletes every entity of modelRef. Inside a transaction an
 	// entity whose latest state in the transaction is deleted is left as it
-	// is: that delete, and the attribution recorded with it, stand.
+	// is: that delete, and the attribution recorded with it, stand. Every
+	// other entity follows Delete's one-version rule (see EntityStore).
 	DeleteAll(ctx context.Context, modelRef ModelRef) error
 	Exists(ctx context.Context, entityID string) (bool, error)
 	// Count returns the number of non-deleted entities of modelRef.
@@ -445,11 +487,13 @@ type EntityStore interface {
 	// and reads committed-only state as of that instant.
 	GetPage(ctx context.Context, modelRef ModelRef, limit, offset int, asAt *time.Time) ([]*Entity, error)
 
-	// GetVersionByTransaction returns the earliest version of entityID
-	// written by transaction txID. A transaction that saved the same
-	// entity more than once before committing (e.g. two Save calls inside
-	// one commit) may produce more than one matching version; the
-	// earliest (lowest Version) is returned.
+	// GetVersionByTransaction returns the version of entityID that
+	// transaction txID wrote; a transaction writes at most one version of
+	// an entity (see EntityStore). It reads committed versions only, inside
+	// a transaction too, including inside txID itself: before txID commits
+	// it is ErrNotFound for every caller. A backend whose ordinary reads
+	// join the caller's transaction must route this read off it, as for
+	// GetAsAt.
 	//
 	// Versions with no entity payload — DELETED tombstones — never match,
 	// even when txID is the deleting transaction's own ID: this method
@@ -546,14 +590,41 @@ type EntityStore interface {
 // NOT interpret them.
 type SchemaDelta []byte
 
+// ModelStore holds model descriptors per tenant.
+//
+// Entities exist only in a LOCKED model; Save, which replaces the whole
+// descriptor (unique keys and state included), never applies to a LOCKED
+// model, and a LOCKED model changes only through Unlock, SetChangeLevel and
+// ExtendSchema; a LOCKED model is never deleted; and a model is unlocked
+// only when it has no live entities. The store checks each of these
+// inside the operation that makes the change, atomically with it, so no
+// interleaving with entity commits can break them. A caller's own earlier
+// check is an early answer, never the guard.
 type ModelStore interface {
+	// Save stores desc. A new model is created; an existing model is
+	// replaced whole, unless the stored model is LOCKED: then Save changes
+	// nothing and returns ErrModelLocked, checked atomically with the write.
 	Save(ctx context.Context, desc *ModelDescriptor) error
 	// Get reads the latest committed model, with every committed schema
 	// extension folded in. It ignores any transaction on ctx.
 	Get(ctx context.Context, modelRef ModelRef) (*ModelDescriptor, error)
 	GetAll(ctx context.Context) ([]ModelRef, error)
+	// Delete removes the model. A missing model is ErrNotFound. A LOCKED
+	// model is not deleted: Delete changes nothing and returns
+	// ErrModelLocked, checked atomically with the delete.
+	//
+	// Delete counts no entities. An UNLOCKED model has no live entity,
+	// because Unlock refuses a model that has one and an entity commit
+	// refuses a model that is not LOCKED, each atomically; so refusing a
+	// LOCKED model is the whole check.
 	Delete(ctx context.Context, modelRef ModelRef) error
 	Lock(ctx context.Context, modelRef ModelRef) error
+	// Unlock sets the model UNLOCKED. A missing model is ErrNotFound. A
+	// model with live entities is not unlocked: Unlock changes nothing and
+	// returns a *ModelHasEntitiesError carrying the count (it matches
+	// ErrModelHasEntities under errors.Is). The count and the state change
+	// are atomic against entity commits: an entity commit and an Unlock of
+	// its model never both succeed.
 	Unlock(ctx context.Context, modelRef ModelRef) error
 	IsLocked(ctx context.Context, modelRef ModelRef) (bool, error)
 	SetChangeLevel(ctx context.Context, modelRef ModelRef, level ChangeLevel) error

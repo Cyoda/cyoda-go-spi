@@ -59,6 +59,7 @@ func testTxLostRaceNoRival(t *testing.T, h Harness) {
 // raced nothing: the transaction sees its write.
 func testTxLostRaceRivalBeforeBegin(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-lost-race", ModelVersion: "1"})
 	model, target := "m-lost-race", newID()
 	for _, v := range []string{"seed", "rival"} {
 		withTx(t, h, ctx, func(txCtx spiCtx) {

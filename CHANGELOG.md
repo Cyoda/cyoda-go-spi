@@ -40,6 +40,10 @@ MAINTAINING.md.
   `Entity/Save/NonTxEachWriteOwnVersion`, `Entity/Save/NonTxIgnoresCallerChangeType`
   and `Entity/Save/InTxIgnoresCallerChangeType` fail on a plugin that stores
   or matches a caller's transaction ID, or keeps a caller's change type.
+  A read inside the transaction of its pending version returns the store's
+  metadata too (transaction ID, tenant, derived change type, the version
+  number the commit records, store dates), pinned by
+  `Entity/Save/PendingReadCarriesStoreMetadata`.
 
 - **`GetVersionByTransaction` reads committed versions only**, also inside a
   transaction and inside `txID` itself, and returns the one version `txID`

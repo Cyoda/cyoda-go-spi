@@ -32,6 +32,7 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Save/NonTxEachWriteOwnVersion", testEntityNonTxEachWriteOwnVersion)
 	runSubtest(t, h, tracker, "Save/NonTxIgnoresCallerChangeType", testEntityNonTxIgnoresCallerChangeType)
 	runSubtest(t, h, tracker, "Save/InTxIgnoresCallerChangeType", testEntityInTxIgnoresCallerChangeType)
+	runSubtest(t, h, tracker, "Save/PendingReadCarriesStoreMetadata", testEntityPendingReadCarriesStoreMetadata)
 	runSubtest(t, h, tracker, "SaveAll/Ordering", testEntitySaveAllOrdering)
 	runSubtest(t, h, tracker, "SaveAll/PartialFailureAtomicity", testEntitySaveAllAtomicity)
 	runSubtest(t, h, tracker, "Get/NotFound", testEntityGetNotFound)
@@ -2790,4 +2791,120 @@ func changeTypesByVersion(t *testing.T, es spi.EntityStore, ctx spiCtx, id strin
 		out[m.Version] = m.ChangeType
 	}
 	return out
+}
+
+// testEntityPendingReadCarriesStoreMetadata pins that a read inside the
+// transaction of the transaction's pending version returns the store's
+// metadata for it, never the values the caller left on the entity: the
+// transaction id is the transaction's, the tenant is the transaction's, the
+// change type is derived (see EntityStore), the version number is the one
+// the commit records, and the dates are the store's. The dates of a pending
+// version are provisional until the commit stamps them, so the case asserts
+// what holds before the stamp: neither is the caller's value, and an existing
+// entity keeps its committed creation date.
+func testEntityPendingReadCarriesStoreMetadata(t *testing.T, h Harness) {
+	tenant := h.NewTenant()
+	ctx := tenantContext(tenant)
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: nonTxModel, ModelVersion: "1"})
+	planted := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	withCallerMeta := func(id string, payload map[string]any) *spi.Entity {
+		e := newEntity(t, nonTxModel, id, payload)
+		e.Meta.TenantID = "caller-tenant"
+		e.Meta.TransactionID = "caller-x"
+		e.Meta.ChangeType = "DELETED"
+		e.Meta.Version = 99
+		e.Meta.CreationDate = planted
+		e.Meta.LastModifiedDate = planted
+		return e
+	}
+	assertPending := func(label string, got *spi.Entity, txID, changeType string, version int64) {
+		t.Helper()
+		require.Equal(t, txID, got.Meta.TransactionID, "%s: pending transaction id", label)
+		require.Equal(t, tenant, got.Meta.TenantID, "%s: pending tenant", label)
+		require.Equal(t, changeType, got.Meta.ChangeType, "%s: pending change type", label)
+		require.Equal(t, version, got.Meta.Version, "%s: pending version", label)
+		require.False(t, got.Meta.CreationDate.IsZero(), "%s: pending creation date", label)
+		require.False(t, got.Meta.CreationDate.Equal(planted), "%s: the caller's creation date must be ignored", label)
+		require.False(t, got.Meta.LastModifiedDate.IsZero(), "%s: pending last-modified date", label)
+		require.False(t, got.Meta.LastModifiedDate.Equal(planted), "%s: the caller's last-modified date must be ignored", label)
+	}
+	assertCommitted := func(label, id, changeType string, version int64) {
+		t.Helper()
+		metas := changeTypesByVersion(t, mustEntityStore(t, h, ctx), ctx, id)
+		require.Equal(t, changeType, metas[version], "%s: committed change type of version %d", label, version)
+		require.Len(t, metas, int(version), "%s: committed versions", label)
+	}
+
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+
+	// A new entity: CREATED, version 1.
+	newID1 := newID()
+	txID, txCtx := beginGuarded(t, tm, ctx)
+	es, err := h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+	_, err = es.Save(txCtx, withCallerMeta(newID1, map[string]any{"v": 1}))
+	require.NoError(t, err)
+	got, err := es.Get(txCtx, newID1)
+	require.NoError(t, err)
+	assertPending("new entity", got, txID, "CREATED", 1)
+	require.False(t, got.Meta.CreationDate.After(got.Meta.LastModifiedDate),
+		"new entity: pending creation date must not follow its last-modified date")
+	require.NoError(t, tm.Commit(txCtx, txID))
+	h.AdvanceClock(1 * time.Millisecond)
+	assertCommitted("new entity", newID1, "CREATED", 1)
+
+	// An existing entity: UPDATED, the next version number, and its
+	// committed creation date — also when the transaction's second write
+	// replaces its pending version.
+	committed, err := mustEntityStore(t, h, ctx).Get(ctx, newID1)
+	require.NoError(t, err)
+	txID, txCtx = beginGuarded(t, tm, ctx)
+	es, err = h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+	for i, payload := range []map[string]any{{"v": 2}, {"v": 3}} {
+		label := []string{"existing entity", "existing entity, replaced pending"}[i]
+		_, err = es.Save(txCtx, withCallerMeta(newID1, payload))
+		require.NoError(t, err)
+		got, err = es.Get(txCtx, newID1)
+		require.NoError(t, err)
+		assertPending(label, got, txID, "UPDATED", 2)
+		require.True(t, got.Meta.CreationDate.Equal(committed.Meta.CreationDate),
+			"%s: pending creation date %v, want the committed creation date %v", label, got.Meta.CreationDate, committed.Meta.CreationDate)
+	}
+	// A CompareAndSave naming the transaction's own id replaces the pending
+	// version the same way.
+	_, err = es.CompareAndSave(txCtx, withCallerMeta(newID1, map[string]any{"v": 4}), txID)
+	require.NoError(t, err)
+	got, err = es.Get(txCtx, newID1)
+	require.NoError(t, err)
+	assertPending("existing entity, CompareAndSave", got, txID, "UPDATED", 2)
+	require.NoError(t, tm.Commit(txCtx, txID))
+	h.AdvanceClock(1 * time.Millisecond)
+	assertCommitted("existing entity", newID1, "UPDATED", 2)
+
+	// A CompareAndSave as the transaction's first write of an existing
+	// entity.
+	committed, err = mustEntityStore(t, h, ctx).Get(ctx, newID1)
+	require.NoError(t, err)
+	txID, txCtx = beginGuarded(t, tm, ctx)
+	es, err = h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+	_, err = es.CompareAndSave(txCtx, withCallerMeta(newID1, map[string]any{"v": 5}), committed.Meta.TransactionID)
+	require.NoError(t, err)
+	got, err = es.Get(txCtx, newID1)
+	require.NoError(t, err)
+	assertPending("existing entity, first write a CompareAndSave", got, txID, "UPDATED", 3)
+	require.True(t, got.Meta.CreationDate.Equal(committed.Meta.CreationDate),
+		"first write a CompareAndSave: pending creation date %v, want the committed creation date %v", got.Meta.CreationDate, committed.Meta.CreationDate)
+	require.NoError(t, tm.Commit(txCtx, txID))
+	assertCommitted("existing entity, first write a CompareAndSave", newID1, "UPDATED", 3)
+}
+
+// mustEntityStore returns the factory's entity store for ctx.
+func mustEntityStore(t *testing.T, h Harness, ctx spiCtx) spi.EntityStore {
+	t.Helper()
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	return es
 }

@@ -341,7 +341,11 @@ type ScheduledTaskStore interface {
 // version, the DELETED tombstone, and a delete and a save of an existing
 // entity record one UPDATED version. RollbackToSavepoint restores each
 // entity's pending version to what it was at the savepoint, including no
-// pending version. Reads in the transaction return the pending version.
+// pending version. Reads in the transaction return the pending version,
+// carrying the store's metadata for it: the transaction's ID and tenant, the
+// change type and version number the commit records, and provisional dates
+// that the commit replaces with its instant (an existing entity keeps its
+// creation date throughout).
 // Outside a transaction every write is its own transaction and its own
 // version. Such a write records the empty transaction ID and a change type
 // derived as above (DELETED for a delete, otherwise CREATED for the entity's

@@ -22,10 +22,45 @@ var ErrEpochMismatch = errors.New("shard epoch mismatch")
 // entity's history belongs to.
 var ErrEntityModelMismatch = errors.New("entity model mismatch")
 
-// ErrModelNotLocked is returned by ExtendSchema when the model exists but is
-// not LOCKED. An extension is a change to a locked model's schema; an
-// unlocked model changes through Save.
+// ErrModelNotLocked is returned when an operation needs a LOCKED model and
+// the model is not LOCKED:
+//
+//   - by ExtendSchema when the model exists but is not LOCKED. An extension
+//     is a change to a locked model's schema; an unlocked model changes
+//     through Save.
+//   - by a transaction commit that writes an entity, and by a
+//     non-transactional entity save, when the entity's model does not exist
+//     or is not LOCKED. The check is atomic with the write: entities exist
+//     only in a LOCKED model.
 var ErrModelNotLocked = errors.New("model is not locked")
+
+// ErrModelLocked is returned by ModelStore.Delete and by ModelStore.Save of
+// an existing model when the stored model is LOCKED. A LOCKED model is never
+// deleted, and its descriptor (unique keys and state included) changes only
+// while it is UNLOCKED.
+var ErrModelLocked = errors.New("model is locked")
+
+// ErrModelHasEntities is the sentinel a *ModelHasEntitiesError matches under
+// errors.Is. ModelStore.Unlock refuses a model that has live entities.
+var ErrModelHasEntities = errors.New("model has entities")
+
+// ModelHasEntitiesError is ModelStore.Unlock's refusal for a model that has
+// live entities. Count is the number of live entities the store counted,
+// atomically with the refusal. It matches ErrModelHasEntities under
+// errors.Is; find it with errors.As on a *ModelHasEntitiesError.
+type ModelHasEntitiesError struct {
+	Ref   ModelRef
+	Count int64
+}
+
+func (e *ModelHasEntitiesError) Error() string {
+	return fmt.Sprintf("%s: model %s has %d entities", ErrModelHasEntities.Error(), e.Ref, e.Count)
+}
+
+// Is reports whether target is ErrModelHasEntities.
+func (e *ModelHasEntitiesError) Is(target error) bool {
+	return target == ErrModelHasEntities
+}
 
 // ErrRetryExhausted indicates the plugin's retry budget for a
 // transparently-retried operation was consumed without success and the

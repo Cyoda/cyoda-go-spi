@@ -52,6 +52,20 @@ MAINTAINING.md.
   and ignores any transaction on ctx. `ErrRetryExhausted` no longer
   documents schema extension.
 
+- **`ModelStore` refuses changes under live entities and over a locked
+  model**, each check atomic with the change it guards. `Unlock` of a model
+  with live entities changes nothing and returns a `*ModelHasEntitiesError`
+  (new; it carries `Ref` and `Count` and matches the new
+  `ErrModelHasEntities` under `errors.Is`). `Delete` of a `LOCKED` model and
+  `Save` over a stored `LOCKED` model change nothing and return the new
+  `ErrModelLocked`. `Delete` counts no entities: an `UNLOCKED` model has
+  none. `ErrModelNotLocked` now also covers an entity commit, and a
+  non-transactional entity save, into a model that does not exist or is not
+  `LOCKED`, so an entity commit and an `Unlock` of its model never both
+  succeed. New conformance cases `Model/Unlock/RefusesLiveEntities`,
+  `Model/Delete/RefusesLocked`, `Model/Save/RefusesOverLocked` and
+  `Model/Interleave/UnlockVsUncommittedWrite`.
+
 ### Added
 
 - **`ErrModelNotLocked`** and the `ModelExtend/ExtendSchema/*` and

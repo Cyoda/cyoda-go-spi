@@ -211,8 +211,8 @@ func testEntitySaveIgnoresCallerCreationDate(t *testing.T, h Harness) {
 //   - the ordinary one, whose history begins with the create; and
 //   - one whose history begins with a TOMBSTONE, left by a create and a
 //     delete committed in the same transaction — the shape
-//     Save/ModelReferenceIsImmutableAfterSameTxCreateDelete also
-//     exercises. A backend that asks for "the first version" instead of "the first
+//     Save/ModelReferenceIsImmutableAfterSameTxCreateDelete also exercises.
+//     A backend that asks for "the first version" instead of "the first
 //     version that still carries an entity" finds no entity there, and
 //     silently restamps the creation date on every subsequent update.
 //

@@ -582,14 +582,39 @@ type EntityStore interface {
 // NOT interpret them.
 type SchemaDelta []byte
 
+// ModelStore holds model descriptors per tenant.
+//
+// Entities exist only in a LOCKED model; a model's descriptor (unique keys
+// and state included) changes only while it is UNLOCKED; and a model is
+// unlocked only when it has no live entities. The store checks each of these
+// inside the operation that makes the change, atomically with it, so no
+// interleaving with entity commits can break them. A caller's own earlier
+// check is an early answer, never the guard.
 type ModelStore interface {
+	// Save stores desc. A new model is created; an existing model is
+	// replaced whole, unless the stored model is LOCKED: then Save changes
+	// nothing and returns ErrModelLocked, checked atomically with the write.
 	Save(ctx context.Context, desc *ModelDescriptor) error
 	// Get reads the latest committed model, with every committed schema
 	// extension folded in. It ignores any transaction on ctx.
 	Get(ctx context.Context, modelRef ModelRef) (*ModelDescriptor, error)
 	GetAll(ctx context.Context) ([]ModelRef, error)
+	// Delete removes the model. A missing model is ErrNotFound. A LOCKED
+	// model is not deleted: Delete changes nothing and returns
+	// ErrModelLocked, checked atomically with the delete.
+	//
+	// Delete counts no entities. An UNLOCKED model has no live entity,
+	// because Unlock refuses a model that has one and an entity commit
+	// refuses a model that is not LOCKED, each atomically; so refusing a
+	// LOCKED model is the whole check.
 	Delete(ctx context.Context, modelRef ModelRef) error
 	Lock(ctx context.Context, modelRef ModelRef) error
+	// Unlock sets the model UNLOCKED. A missing model is ErrNotFound. A
+	// model with live entities is not unlocked: Unlock changes nothing and
+	// returns a *ModelHasEntitiesError carrying the count (it matches
+	// ErrModelHasEntities under errors.Is). The count and the state change
+	// are atomic against entity commits: an entity commit and an Unlock of
+	// its model never both succeed.
 	Unlock(ctx context.Context, modelRef ModelRef) error
 	IsLocked(ctx context.Context, modelRef ModelRef) (bool, error)
 	SetChangeLevel(ctx context.Context, modelRef ModelRef, level ChangeLevel) error

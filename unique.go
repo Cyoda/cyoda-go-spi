@@ -9,13 +9,12 @@ package spi
 //
 // A transaction's claims are computed at commit, from its final entities:
 //
-//  1. The commit reads, inside the committing transaction, the model of
-//     every entity whose final write in the transaction is a save, one read
-//     per distinct model, in a fixed order (model name, then version). A
-//     model that does not exist or is not LOCKED fails the commit with
-//     ErrModelNotLocked. An entity whose final write is a delete needs no
-//     model, so a transaction that only deletes commits whatever the state
-//     of its entities' models.
+//  1. The commit reads, inside the committing transaction, the unique keys
+//     of the model of every entity whose final write in the transaction is
+//     a save, one read per distinct model, in a fixed order (model name,
+//     then version). The model's state is not checked: the caller saves
+//     entities only into a LOCKED model (see ModelStore). An entity whose
+//     final write is a delete needs no model read.
 //  2. It releases the claims of every entity the transaction wrote or
 //     deleted.
 //  3. It computes the claims of every entity whose final write is a save
@@ -33,14 +32,10 @@ package spi
 // write outside a transaction is its own transaction and does steps 1-4
 // atomically with the write.
 //
-// Two transient answers fail closed the same way, with the retryable
-// ErrConflict in place of the answer above, which the retry then gets:
-//
-//   - in step 1, from a store whose transaction reads from a snapshot taken
-//     when it began, when an entity's model was created or changed after
-//     that snapshot;
-//   - in step 4, when two concurrent commits, each inserting a value the
-//     other has just inserted, deadlock; the retry gets ErrUniqueViolation.
+// Two commits that each claim a value the other frees in the same commit
+// can deadlock in a store that inserts claims under row locks; one of them
+// fails closed with the retryable ErrConflict in place of the answer above,
+// and its retry gets ErrUniqueViolation if the other committed.
 type UniqueKey struct {
 	ID     string
 	Fields []string

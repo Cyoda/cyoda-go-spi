@@ -86,6 +86,7 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 
 func testEntityCreateAndGet(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-crud", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -111,6 +112,7 @@ func testEntityCreateAndGet(t *testing.T, h Harness) {
 
 func testEntityUpdate(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-upd", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -153,6 +155,7 @@ func testEntityUpdate(t *testing.T, h Harness) {
 // one.
 func testEntitySaveIgnoresCallerCreationDate(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "caller-creation-date", ModelVersion: "1"})
 	planted := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
 
 	txEntityID := newID()
@@ -214,6 +217,7 @@ func testEntitySaveIgnoresCallerCreationDate(t *testing.T, h Harness) {
 // per-backend difference, but no backend may move it afterwards.
 func testEntityUpdateDoesNotRestampCreationDate(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "update-creation-date", ModelVersion: "1"})
 	planted := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
 
 	es, err := h.Factory.EntityStore(ctx)
@@ -298,6 +302,8 @@ func testEntityUpdateDoesNotRestampCreationDate(t *testing.T, h Harness) {
 // takes), so this pins the check against COMMITTED state.
 func testEntityModelImmutable(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model", ModelVersion: "1"})
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model", ModelVersion: "2"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -325,6 +331,8 @@ func testEntityModelImmutable(t *testing.T, h Harness) {
 // write succeeded. Save must reject it at the call that makes it.
 func testEntityModelImmutableWithinTx(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-tx", ModelVersion: "1"})
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-tx", ModelVersion: "2"})
 	id := newID()
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
@@ -358,6 +366,8 @@ func testEntityModelImmutableWithinTx(t *testing.T, h Harness) {
 // ever rolls back, so it never commits the tombstone this case depends on.)
 func testEntityModelImmutableAfterSameTxCreateDelete(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-cd", ModelVersion: "1"})
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-cd", ModelVersion: "2"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -388,6 +398,8 @@ func testEntityModelImmutableAfterSameTxCreateDelete(t *testing.T, h Harness) {
 // regardless of which check it runs first internally.
 func testEntityCompareAndSaveModelImmutable(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-cas", ModelVersion: "1"})
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-cas", ModelVersion: "2"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -424,6 +436,8 @@ func testEntityCompareAndSaveModelImmutable(t *testing.T, h Harness) {
 // still passes because expectedTxID is that real committed value.
 func testEntityCompareAndSaveModelImmutableWithinTx(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-cas-tx", ModelVersion: "1"})
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-cas-tx", ModelVersion: "2"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -467,6 +481,8 @@ func testEntityCompareAndSaveModelImmutableWithinTx(t *testing.T, h Harness) {
 // id as belonging to its original model.
 func testEntityModelImmutableAfterSameTxCreateDeleteAll(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-cda", ModelVersion: "1"})
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-cda", ModelVersion: "2"})
 	id := newID()
 	mref := spi.ModelRef{EntityName: "immutable-model-cda", ModelVersion: "1"}
 	withTx(t, h, ctx, func(txCtx context.Context) {
@@ -496,6 +512,7 @@ func testEntityGetNotFound(t *testing.T, h Harness) {
 
 func testEntityDelete(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-del", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -524,6 +541,7 @@ func testEntityDeleteNotFound(t *testing.T, h Harness) {
 
 func testEntityDeleteAll(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-delall", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-delall", ModelVersion: "1"}
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -546,6 +564,7 @@ func testEntityDeleteAll(t *testing.T, h Harness) {
 
 func testEntityExists(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-ex", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -568,6 +587,7 @@ func testEntityExists(t *testing.T, h Harness) {
 
 func testEntityCount(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cnt", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-cnt", ModelVersion: "1"}
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -584,6 +604,7 @@ func testEntityCount(t *testing.T, h Harness) {
 
 func testEntityCountByState(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cbs", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-cbs", ModelVersion: "1"}
 
 	// Empty model: nil filter -> empty map.
@@ -727,6 +748,7 @@ func testEntityCountByState(t *testing.T, h Harness) {
 // committed entity, create-then-delete, delete-then-save, and DeleteAll.
 func testEntityCountInTxBufferShapes(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cnt-tx", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-cnt-tx", ModelVersion: "1"}
 	ids := make([]string, 4)
 	withTx(t, h, ctx, func(txCtx context.Context) {
@@ -794,6 +816,7 @@ func testEntityCountInTxBufferShapes(t *testing.T, h Harness) {
 func testEntitySaveAllOrdering(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	mref := spi.ModelRef{EntityName: "m-sa", ModelVersion: "1"}
+	EnsureLockedModel(t, h.Factory, ctx, mref)
 	ents := []*spi.Entity{
 		newEntity(t, "m-sa", newID(), map[string]any{"i": 0}),
 		newEntity(t, "m-sa", newID(), map[string]any{"i": 1}),
@@ -816,6 +839,7 @@ func testEntitySaveAllOrdering(t *testing.T, h Harness) {
 func testEntitySaveAllAtomicity(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	mref := spi.ModelRef{EntityName: "m-saa", ModelVersion: "1"}
+	EnsureLockedModel(t, h.Factory, ctx, mref)
 	tm, _ := h.Factory.TransactionManager(ctx)
 	txID, txCtx, err := tm.Begin(ctx)
 	require.NoError(t, err)
@@ -836,6 +860,7 @@ func testEntitySaveAllAtomicity(t *testing.T, h Harness) {
 
 func testEntityJSONFidelity(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-json", ModelVersion: "1"})
 	id := newID()
 	payload := map[string]any{
 		"nested": map[string]any{
@@ -864,6 +889,7 @@ func testEntityJSONFidelity(t *testing.T, h Harness) {
 
 func testEntityGetAsAtHistorical(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-asat", ModelVersion: "1"})
 	id := newID()
 	// Write v=1, advance, capture tBetween12, advance, write v=2, advance.
 	withTx(t, h, ctx, func(txCtx context.Context) {
@@ -890,6 +916,7 @@ func testEntityGetAsAtHistorical(t *testing.T, h Harness) {
 
 func testEntityGetAsAtMeta(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-meta", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -968,6 +995,7 @@ const (
 func newPITCommittedOnlyFixture(t *testing.T, h Harness, ctx spiCtx, modelName string) pitFixture {
 	t.Helper()
 	mref := spi.ModelRef{EntityName: modelName, ModelVersion: "1"}
+	EnsureLockedModel(t, h.Factory, ctx, mref)
 
 	committedID := newID()
 	withTx(t, h, ctx, func(txCtx spiCtx) {
@@ -1055,6 +1083,7 @@ func testEntityGetPageAsAtCommittedOnlyInTx(t *testing.T, h Harness) {
 // every row, including the tombstone.
 func testEntityVersionMetadataOrdering(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-hist", ModelVersion: "1"})
 	id := newID()
 	for i := 0; i < 3; i++ {
 		withTx(t, h, ctx, func(txCtx context.Context) {
@@ -1097,6 +1126,7 @@ func testEntityVersionMetadataOrdering(t *testing.T, h Harness) {
 // the tombstone's, so (entity id, version) names exactly one history row.
 func testEntityVersionMetadataRecreateAfterDelete(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-recreate", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -1137,6 +1167,7 @@ func testEntityVersionMetadataRecreateAfterDelete(t *testing.T, h Harness) {
 // window" with "no such entity" fails the first assertion below.
 func testEntityGetVersionMetadataEmptyWindowIsNotAnError(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-vmw", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -1173,6 +1204,7 @@ func testEntityGetVersionMetadataEmptyWindowIsNotAnError(t *testing.T, h Harness
 // but reorders or drops the wrong rows fails the prefix-equality assertion.
 func testEntityGetVersionMetadataLimitCaps(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-vlim", ModelVersion: "1"})
 	id := newID()
 	const n = 6
 	for i := 0; i < n; i++ {
@@ -1209,6 +1241,7 @@ func testEntityGetVersionMetadataLimitCaps(t *testing.T, h Harness) {
 // returns every version instead of only the pre-cutoff one.
 func testEntityGetVersionMetadataUntilBound(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-vuntil", ModelVersion: "1"})
 	id := newID()
 
 	withTx(t, h, ctx, func(txCtx context.Context) {
@@ -1250,6 +1283,7 @@ func testEntityGetVersionMetadataUntilBound(t *testing.T, h Harness) {
 // violations.
 func testEntityGetPageOrderAndBounds(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-page", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-page", ModelVersion: "1"}
 	const n = 5
 	withTx(t, h, ctx, func(txCtx context.Context) {
@@ -1301,6 +1335,7 @@ func testEntityGetPageOrderAndBounds(t *testing.T, h Harness) {
 // through a transaction's own context.
 func testEntityGetPageAsAtSnapshot(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-page-asat", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-page-asat", ModelVersion: "1"}
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -1402,6 +1437,9 @@ func entityIDs(es []*spi.Entity) []string {
 // page position.
 func testEntityGetPageInTxWithStagedDeletes(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-page-txdel-a", ModelVersion: "1"})
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-page-txdel-b", ModelVersion: "1"})
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-page-txdel-c", ModelVersion: "1"})
 
 	// idOrderSort sorts ids in place by h.IDOrder — used only where the
 	// expected order cannot be read directly off an already-ordered
@@ -1533,6 +1571,7 @@ func testEntityGetPageInTxRecordsReadSet(t *testing.T, h Harness) {
 func testEntityGetPageReadSetOutcome(t *testing.T, h Harness, conflictOnPage, wantCommitSucceeds bool) {
 	t.Helper()
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-page-readset", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-page-readset", ModelVersion: "1"}
 
 	// Seed 4 entities and read back committed canonical order so we know
@@ -1601,6 +1640,7 @@ func testEntityGetPageReadSetOutcome(t *testing.T, h Harness, conflictOnPage, wa
 // and GetPage(asAt) (the model-scoped list/page read).
 func testEntityPITDeleteRecreateSameTxVersionTiebreak(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-pit-recreate-tiebreak", ModelVersion: "1"})
 	const modelName = "m-pit-recreate-tiebreak"
 	mref := spi.ModelRef{EntityName: modelName, ModelVersion: "1"}
 	id := newID()
@@ -1647,6 +1687,7 @@ func testEntityPITDeleteRecreateSameTxVersionTiebreak(t *testing.T, h Harness) {
 // would return.
 func testEntityGetVersionByTransactionEarliestWins(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-gvbt", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -1678,6 +1719,7 @@ func testEntityGetVersionByTransactionEarliestWins(t *testing.T, h Harness) {
 // and a tombstone has none.
 func testEntityGetVersionByTransactionDeletedNeverMatches(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-gvbt-del", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -1718,6 +1760,7 @@ func testEntityGetVersionByTransactionDeletedNeverMatches(t *testing.T, h Harnes
 // (non-transactional writes)"). Both scenarios must return ErrNotFound.
 func testEntityGetVersionByTransactionEmptyTxID(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-gvbt-empty", ModelVersion: "1"})
 	es, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
 
@@ -1757,6 +1800,7 @@ func testEntityGetVersionByTransactionEmptyTxID(t *testing.T, h Harness) {
 // ErrNotFound.
 func testEntityGetVersionByTransactionUnrelatedTxID(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-gvbt-unrel", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
@@ -1789,6 +1833,7 @@ func testEntityGetVersionByTransactionUnrelatedTxID(t *testing.T, h Harness) {
 
 func testEntityCompareAndSaveSuccess(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cas", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -1816,6 +1861,7 @@ func testEntityCompareAndSaveSuccess(t *testing.T, h Harness) {
 
 func testEntityCompareAndSaveConflict(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cas", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -1853,6 +1899,7 @@ func testEntityCompareAndSaveConflict(t *testing.T, h Harness) {
 // comparison the missing-entity leg already makes.
 func testEntityCompareAndSaveExpectedIDIsLiteral(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cas-lit", ModelVersion: "1"})
 
 	// seedExistingTransactional creates an entity via its own committed
 	// transaction — separate from, and completed before, any transaction
@@ -1923,6 +1970,7 @@ func testEntityCompareAndSaveExpectedIDIsLiteral(t *testing.T, h Harness) {
 // re-reads afterwards, so a backend that errors AFTER writing fails here.
 func testEntityCompareAndSaveEmptyExpectedIDRejected(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cas-empty", ModelVersion: "1"})
 
 	seedExisting := func() string {
 		id := newID()
@@ -1985,6 +2033,7 @@ func testEntityCompareAndSaveEmptyExpectedIDRejected(t *testing.T, h Harness) {
 
 func testEntityConcurrentConflict(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cc", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -2041,6 +2090,7 @@ func testEntityConcurrentConflict(t *testing.T, h Harness) {
 
 func testEntityConcurrentDifferent(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cd", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-cd", ModelVersion: "1"}
 	const n = 8
 	errs := make(chan error, n)
@@ -2084,6 +2134,7 @@ func testEntityTenantIsolationGet(t *testing.T, h Harness) {
 	tA := h.NewTenant()
 	tB := h.NewTenant()
 	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
+	EnsureLockedModel(t, h.Factory, ctxA, spi.ModelRef{EntityName: "m-ti", ModelVersion: "1"})
 	id := newID()
 
 	withTx(t, h, ctxA, func(txCtx context.Context) {
@@ -2100,6 +2151,7 @@ func testEntityTenantIsolationGet(t *testing.T, h Harness) {
 func testEntityTenantIsolationDelete(t *testing.T, h Harness) {
 	tA, tB := h.NewTenant(), h.NewTenant()
 	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
+	EnsureLockedModel(t, h.Factory, ctxA, spi.ModelRef{EntityName: "m-tidel", ModelVersion: "1"})
 	id := newID()
 
 	withTx(t, h, ctxA, func(txCtx context.Context) {
@@ -2124,6 +2176,7 @@ func testEntityTenantIsolationDelete(t *testing.T, h Harness) {
 func testEntityTenantIsolationGetPage(t *testing.T, h Harness) {
 	tA, tB := h.NewTenant(), h.NewTenant()
 	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
+	EnsureLockedModel(t, h.Factory, ctxA, spi.ModelRef{EntityName: "m-tigetpage", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-tigetpage", ModelVersion: "1"}
 
 	withTx(t, h, ctxA, func(txCtx context.Context) {
@@ -2158,6 +2211,7 @@ func testEntityTenantIsolationGetPage(t *testing.T, h Harness) {
 func testEntityTenantIsolationSearch(t *testing.T, h Harness) {
 	tA, tB := h.NewTenant(), h.NewTenant()
 	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
+	EnsureLockedModel(t, h.Factory, ctxA, spi.ModelRef{EntityName: "m-tisearch", ModelVersion: "1"})
 	const model = "m-tisearch"
 	filter := spi.Filter{
 		Op:       spi.FilterEq,
@@ -2197,6 +2251,7 @@ func testEntityTenantIsolationSearch(t *testing.T, h Harness) {
 func testEntityTenantIsolationCount(t *testing.T, h Harness) {
 	tA, tB := h.NewTenant(), h.NewTenant()
 	ctxA, ctxB := tenantContext(tA), tenantContext(tB)
+	EnsureLockedModel(t, h.Factory, ctxA, spi.ModelRef{EntityName: "m-ticount", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-ticount", ModelVersion: "1"}
 
 	withTx(t, h, ctxA, func(txCtx context.Context) {
@@ -2239,6 +2294,7 @@ func testEntityTenantIsolationCount(t *testing.T, h Harness) {
 func testEntityExecutorRoundTrip(t *testing.T, h Harness) {
 	tenant := h.NewTenant()
 	ctx := tenantContext(tenant)
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-exec", ModelVersion: "1"})
 	id := newID()
 	createdExecutor := spi.Principal{ID: "svc-1", Kind: spi.PrincipalService}
 
@@ -2300,6 +2356,7 @@ func testEntityEmptyTenant(t *testing.T, h Harness) {
 
 func testEntityCountAsAt(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cnt-at", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-cnt-at", ModelVersion: "1"}
 	var ids []string
 	withTx(t, h, ctx, func(txCtx context.Context) {
@@ -2350,6 +2407,7 @@ func testEntityCountAsAtCommittedOnlyInTx(t *testing.T, h Harness) {
 
 func testEntityCountByStateAsAt(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cbs-at", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-cbs-at", ModelVersion: "1"}
 	keepID, deletedEarlyID, deletedLateID := newID(), newID(), newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
@@ -2418,6 +2476,7 @@ func testEntityCountByStateAsAtCommittedOnlyInTx(t *testing.T, h Harness) {
 
 func testEntityVersionMetadataCommittedOnlyInTx(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-vm-tx", ModelVersion: "1"})
 	id := newID()
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, _ := h.Factory.EntityStore(txCtx)
@@ -2441,6 +2500,7 @@ func testEntityVersionMetadataCommittedOnlyInTx(t *testing.T, h Harness) {
 // under "", so a filter naming "" finds it, live and at an instant.
 func testEntityCountByStateEmptyStateFilter(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-cbs-empty", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-cbs-empty", ModelVersion: "1"}
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)

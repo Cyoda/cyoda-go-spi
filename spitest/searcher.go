@@ -143,6 +143,7 @@ func testSearcherBoundedOrFailInTx(t *testing.T, h Harness) {
 func searcherBoundedOrFail(t *testing.T, h Harness, inTx bool) {
 	t.Helper()
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: searcherModel, ModelVersion: "1"})
 
 	committed, staged := searcherSeedOrder, []bool(nil)
 	if inTx {
@@ -464,6 +465,7 @@ func runFilterPathGrammar(t *testing.T, entry string, exec filterPathExec) {
 // refusal when the model is non-empty.
 func testSearcherFilterPathGrammar(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: searcherModel, ModelVersion: "1"})
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
 		require.NoError(t, err)

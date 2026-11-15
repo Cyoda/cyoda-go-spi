@@ -82,6 +82,7 @@ func testPatternMalformedLike(t *testing.T, h Harness) {
 
 func seedPatternEntities(t *testing.T, h Harness, ctx context.Context) spi.EntityStore {
 	t.Helper()
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: patternModel, ModelVersion: "1"})
 	withTx(t, h, ctx, func(txCtx context.Context) {
 		es, err := h.Factory.EntityStore(txCtx)
 		require.NoError(t, err)

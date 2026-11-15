@@ -86,6 +86,7 @@ func runTransactionSuite(t *testing.T, h Harness, tracker *skipTracker) {
 // they are visible.
 func testTxCommitVisibility(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-commit", ModelVersion: "1"})
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 
@@ -116,6 +117,7 @@ func testTxCommitVisibility(t *testing.T, h Harness) {
 
 func testTxRollbackDiscards(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-rb", ModelVersion: "1"})
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 
@@ -138,6 +140,7 @@ func testTxRollbackDiscards(t *testing.T, h Harness) {
 
 func testTxJoin(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-join", ModelVersion: "1"})
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 
@@ -183,6 +186,7 @@ func testTxSubmitTime(t *testing.T, h Harness) {
 
 func testTxSavepointRelease(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-sp", ModelVersion: "1"})
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 
@@ -218,6 +222,7 @@ func testTxSavepointRelease(t *testing.T, h Harness) {
 
 func testTxSavepointRollback(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-sp", ModelVersion: "1"})
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 
@@ -266,6 +271,7 @@ type savepointRace struct {
 func newSavepointRace(t *testing.T, h Harness) *savepointRace {
 	t.Helper()
 	r := &savepointRace{ctx: tenantContext(h.NewTenant()), model: "m-sp-race", target: newID(), pre: newID()}
+	EnsureLockedModel(t, h.Factory, r.ctx, spi.ModelRef{EntityName: r.model, ModelVersion: "1"})
 	withTx(t, h, r.ctx, func(txCtx spiCtx) {
 		es, err := h.Factory.EntityStore(txCtx)
 		require.NoError(t, err)
@@ -491,6 +497,7 @@ func testTxStateCommitAfterRollback(t *testing.T, h Harness) {
 // ErrTxTerminated godoc caveat.
 func testTxStateOpAfterRollback(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-op-after-rb", ModelVersion: "1"})
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 
@@ -532,6 +539,7 @@ func requireTxAlreadyCommittedOrPurged(t *testing.T, err error, op string) {
 // this pins the specific already-committed/purged pair.
 func testTxStateOpAfterCommit(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-op-after-commit", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-op-after-commit", ModelVersion: "1"}
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
@@ -807,6 +815,7 @@ func testTxOriginAmbientRoot(t *testing.T, h Harness) {
 func testTxDeleteAttributionSavepoint(t *testing.T, h Harness) {
 	tenant := h.NewTenant()
 	rootCtx := tenantContextAs(tenant, "root-user", spi.PrincipalUser)
+	EnsureLockedModel(t, h.Factory, rootCtx, spi.ModelRef{EntityName: "m-delattr", ModelVersion: "1"})
 	origin := spi.Principal{ID: "root-user", Kind: spi.PrincipalUser}
 	idA := newID()
 	idB := newID()
@@ -905,6 +914,7 @@ func testTxDeleteAttributionSavepoint(t *testing.T, h Harness) {
 // conflict on every backend, and the delete must stand at commit.
 func testTxDeleteThenCompareAndSave(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-tx-dcas", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-tx-dcas", ModelVersion: "1"}
 	id := newID()
 	withTx(t, h, ctx, func(txCtx spiCtx) {
@@ -948,6 +958,7 @@ func testTxDeleteThenCompareAndSave(t *testing.T, h Harness) {
 // coverage of it.
 func testTxDeleteThenSave(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-tx-dsave", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-tx-dsave", ModelVersion: "1"}
 	id := newID()
 	withTx(t, h, ctx, func(txCtx spiCtx) {
@@ -975,6 +986,7 @@ func testTxDeleteThenSave(t *testing.T, h Harness) {
 // again in that transaction finds it gone, on every backend.
 func testTxDeleteThenDelete(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-tx-ddel", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-tx-ddel", ModelVersion: "1"}
 	id := newID()
 	withTx(t, h, ctx, func(txCtx spiCtx) {
@@ -1004,6 +1016,7 @@ func testTxDeleteThenDelete(t *testing.T, h Harness) {
 func testTxDeleteThenDeleteAll(t *testing.T, h Harness) {
 	tenant := h.NewTenant()
 	rootCtx := tenantContextAs(tenant, "root-user", spi.PrincipalUser)
+	EnsureLockedModel(t, h.Factory, rootCtx, spi.ModelRef{EntityName: "m-tx-ddall", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-tx-ddall", ModelVersion: "1"}
 	idA := newID()
 	idB := newID()
@@ -1063,6 +1076,7 @@ func testTxDeleteThenDeleteAll(t *testing.T, h Harness) {
 // second delete stands at commit.
 func testTxDeleteSaveDelete(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-tx-dsd", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-tx-dsd", ModelVersion: "1"}
 	id := newID()
 	withTx(t, h, ctx, func(txCtx spiCtx) {
@@ -1092,6 +1106,7 @@ func testTxDeleteSaveDelete(t *testing.T, h Harness) {
 // and the Save must stand at commit.
 func testTxSaveThenCompareAndSave(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-tx-scas", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "m-tx-scas", ModelVersion: "1"}
 	id := newID()
 	withTx(t, h, ctx, func(txCtx spiCtx) {

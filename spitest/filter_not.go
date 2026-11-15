@@ -160,6 +160,7 @@ func runFilterNotConformance(t *testing.T, entry string, exec filterNotExec) {
 // reading and arity guard.
 func testSearcherFilterNot(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: filterNotModel, ModelVersion: "1"})
 	withTx(t, h, ctx, func(txCtx spiCtx) {
 		es, err := h.Factory.EntityStore(txCtx)
 		require.NoError(t, err)
@@ -184,6 +185,7 @@ func testSearcherFilterNot(t *testing.T, h Harness) {
 // of runFilterPathGrammar).
 func testIterableFilterNot(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: filterNotModel, ModelVersion: "1"})
 	withTx(t, h, ctx, func(txCtx spiCtx) {
 		es, err := h.Factory.EntityStore(txCtx)
 		require.NoError(t, err)

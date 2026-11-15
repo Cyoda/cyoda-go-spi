@@ -111,6 +111,7 @@ func iterableStatus(t *testing.T, e *spi.Entity) string {
 // under a committed transaction.
 func seedIterable(t *testing.T, h Harness, ctx spiCtx) {
 	t.Helper()
+	EnsureLockedModel(t, h.Factory, ctx, iterableModelRef)
 	withTx(t, h, ctx, func(txCtx spiCtx) {
 		es, err := h.Factory.EntityStore(txCtx)
 		require.NoError(t, err)
@@ -307,6 +308,7 @@ func testIterableCloseIdempotent(t *testing.T, h Harness) {
 // saves must yield the pre-cutoff state, exactly like Search/GetAsAt.
 func testIterablePITSnapshotVariant(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "iterable-pit", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "iterable-pit", ModelVersion: "1"}
 	id := newID()
 
@@ -366,6 +368,7 @@ func testIterablePITCommittedOnlyInTx(t *testing.T, h Harness) {
 // merged committed+buffer overlay exactly once.
 func testIterableOverlaySnapshotAtOpen(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "iterable-overlay", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: "iterable-overlay", ModelVersion: "1"}
 
 	committedID := newID()

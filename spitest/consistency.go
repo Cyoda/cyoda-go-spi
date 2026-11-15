@@ -25,6 +25,7 @@ func runConsistencyTimeSuite(t *testing.T, h Harness, tracker *skipTracker) {
 
 func commitOne(t *testing.T, h Harness, ctx context.Context, model string) (txID, entityID string) {
 	t.Helper()
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: model, ModelVersion: "1"})
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 	txID, txCtx := beginGuarded(t, tm, ctx)
@@ -139,6 +140,7 @@ func testCTFinalUnderConcurrentWrites(t *testing.T, h Harness) {
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 	mref := spi.ModelRef{EntityName: "m-ct-final", ModelVersion: "1"}
+	EnsureLockedModel(t, h.Factory, ctx, mref)
 	var acked atomic.Int64
 	stop := make(chan struct{})
 	errCh := make(chan error, 4)
@@ -227,6 +229,7 @@ func testCTFinalUnderConcurrentWrites(t *testing.T, h Harness) {
 
 func testCTNonTransactionalSaveIncluded(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-ct-nontx", ModelVersion: "1"})
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 	es, err := h.Factory.EntityStore(ctx)
@@ -243,6 +246,7 @@ func testCTNonTransactionalSaveIncluded(t *testing.T, h Harness) {
 
 func testCTCalledInsideTransaction(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-ct-intx", ModelVersion: "1"})
 	tm, err := h.Factory.TransactionManager(ctx)
 	require.NoError(t, err)
 	txID, txCtx := beginGuarded(t, tm, ctx)

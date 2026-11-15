@@ -20,6 +20,8 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutable", testEntityModelImmutable)
 	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutableWithinTx", testEntityModelImmutableWithinTx)
 	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutableWithinTxAfterDelete", testEntityModelImmutableWithinTxAfterDelete)
+	runSubtest(t, h, tracker, "Save/ModelReferenceFreedBySavepointRollback", testEntityModelFreedBySavepointRollbackAfterDelete)
+	runSubtest(t, h, tracker, "Save/ModelReferenceFreedBySavepointRollbackNoDelete", testEntityModelFreedBySavepointRollbackNoDelete)
 	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutableAfterSameTxCreateDelete", testEntityModelImmutableAfterSameTxCreateDelete)
 	runSubtest(t, h, tracker, "CompareAndSave/ModelReferenceIsImmutable", testEntityCompareAndSaveModelImmutable)
 	runSubtest(t, h, tracker, "CompareAndSave/ModelReferenceIsImmutableWithinTx", testEntityCompareAndSaveModelImmutableWithinTx)
@@ -387,6 +389,59 @@ func testEntityModelImmutableWithinTxAfterDelete(t *testing.T, h Harness) {
 	require.Error(t, err, "a same-transaction Save under a different model after create and delete must be rejected at buffer time")
 	require.True(t, errors.Is(err, spi.ErrEntityModelMismatch),
 		"must wrap ErrEntityModelMismatch; got: %v", err)
+}
+
+// testEntityModelFreedBySavepointRollbackAfterDelete pins that a rollback to a
+// savepoint undoes a create completely, its model included: savepoint, create
+// an id under model A, delete it, roll back to the savepoint, and the id was
+// never created, so a Save under model B creates it under model B.
+func testEntityModelFreedBySavepointRollbackAfterDelete(t *testing.T, h Harness) {
+	testEntityModelFreedBySavepointRollback(t, h, true)
+}
+
+// testEntityModelFreedBySavepointRollbackNoDelete is the same without the
+// delete: savepoint, create under model A, roll back, Save under model B.
+func testEntityModelFreedBySavepointRollbackNoDelete(t *testing.T, h Harness) {
+	testEntityModelFreedBySavepointRollback(t, h, false)
+}
+
+func testEntityModelFreedBySavepointRollback(t *testing.T, h Harness, deleteBeforeRollback bool) {
+	ctx := tenantContext(h.NewTenant())
+	refA := spi.ModelRef{EntityName: "model-freed-by-sp", ModelVersion: "1"}
+	refB := spi.ModelRef{EntityName: "model-freed-by-sp", ModelVersion: "2"}
+	EnsureLockedModel(t, h.Factory, ctx, refA)
+	EnsureLockedModel(t, h.Factory, ctx, refB)
+	id := newID()
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	txID, txCtx := beginGuarded(t, tm, ctx)
+	es, err := h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+
+	sp, err := tm.Savepoint(txCtx, txID)
+	require.NoError(t, err)
+	_, err = es.Save(txCtx, newEntity(t, refA.EntityName, id, map[string]any{"n": 1}))
+	require.NoError(t, err)
+	if deleteBeforeRollback {
+		require.NoError(t, es.Delete(txCtx, id))
+	}
+	require.NoError(t, tm.RollbackToSavepoint(txCtx, txID, sp))
+
+	second := newEntity(t, refB.EntityName, id, map[string]any{"n": 2})
+	second.Meta.ModelRef = refB
+	_, err = es.Save(txCtx, second)
+	require.NoError(t, err, "the rollback undid the create under model A, so a Save under model B creates the entity")
+	require.NoError(t, tm.Commit(txCtx, txID))
+
+	readEs, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	got, err := readEs.Get(ctx, id)
+	require.NoError(t, err)
+	require.Equal(t, refB, got.Meta.ModelRef, "the entity is stored under model B")
+	metas, err := readEs.GetVersionMetadata(ctx, id, spi.VersionMetadataOptions{})
+	require.NoError(t, err)
+	require.Len(t, metas, 1, "one version: the create under model B")
+	require.Equal(t, "CREATED", metas[0].ChangeType)
 }
 
 // testEntityModelImmutableAfterSameTxCreateDelete pins the rejection for the

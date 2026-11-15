@@ -30,7 +30,7 @@ func EnsureLockedModel(t testing.TB, f spi.StoreFactory, ctx context.Context, re
 		require.Equal(t, normalizeKeys(keys), normalizeKeys(got.UniqueKeys), "model %v exists with different unique keys", ref)
 		return
 	}
-	require.ErrorIs(t, err, spi.ErrNotFound)
+	require.ErrorIs(t, err, spi.ErrNotFound, "model Get failed for %v", ref)
 	desc := newModelDescriptor(ref.EntityName, ref.ModelVersion)
 	desc.UniqueKeys = keys
 	require.NoError(t, ms.Save(ctx, desc))

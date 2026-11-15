@@ -215,8 +215,8 @@ type trackingReadCase struct {
 func trackingReadOutcome(t *testing.T, h Harness, read trackingReader, c trackingReadCase) {
 	t.Helper()
 	ctx := tenantContext(h.NewTenant())
-	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "tracking-read", ModelVersion: "1"})
 	mref := spi.ModelRef{EntityName: trackingReadModel, ModelVersion: "1"}
+	EnsureLockedModel(t, h.Factory, ctx, mref)
 	matchID, decoyID := newID(), newID()
 
 	withTx(t, h, ctx, func(txCtx spiCtx) {

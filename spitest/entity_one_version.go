@@ -39,7 +39,6 @@ func runOneVersionSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "OneVersionPerTx/SavepointRestoresReplacedPending", testOneVersionSavepointRestoresReplaced)
 	runSubtest(t, h, tracker, "OneVersionPerTx/SavepointRestoresPendingReplacedByDelete", testOneVersionSavepointRestoresReplacedByDelete)
 	runSubtest(t, h, tracker, "OneVersionPerTx/SavepointRestoresNoPending", testOneVersionSavepointRestoresNone)
-	runSubtest(t, h, tracker, "OneVersionPerTx/SavepointRestoresDeletedCreateTombstone", testOneVersionSavepointRestoresDeletedCreateTombstone)
 	runSubtest(t, h, tracker, "OneVersionPerTx/SavepointRollbackThenSaveAgain", testOneVersionSavepointThenSaveAgain)
 	runSubtest(t, h, tracker, "OneVersionPerTx/GetVersionByTransaction/LastSaveWins", testOneVersionGetVersionByTransactionLastSaveWins)
 	runSubtest(t, h, tracker, "OneVersionPerTx/GetVersionByTransaction/InsideWritingTxIsNotFound", testOneVersionGetVersionByTransactionInsideWritingTx)
@@ -395,59 +394,6 @@ func testOneVersionSavepointRestoresNone(t *testing.T, h Harness) {
 	require.NoError(t, err)
 	_, err = es.GetVersionMetadata(o.ctx, fresh, spi.VersionMetadataOptions{})
 	require.ErrorIs(t, err, spi.ErrNotFound, "a rolled-back create must leave no version history")
-}
-
-// create under model A, delete, savepoint, create under model B, delete,
-// rollback to the savepoint: the rollback restores the pending tombstone of
-// the model-A create, so the commit records one DELETED version that binds
-// the id to model A. A later save under model A succeeds; one under model B
-// is refused with ErrEntityModelMismatch.
-func testOneVersionSavepointRestoresDeletedCreateTombstone(t *testing.T, h Harness) {
-	o := newOneVersion(t, h)
-	refA := o.mref
-	refB := spi.ModelRef{EntityName: oneVersionModel, ModelVersion: "2"}
-	EnsureLockedModel(t, h.Factory, o.ctx, refB)
-	underModel := func(ref spi.ModelRef, id string, payload map[string]any) *spi.Entity {
-		e := newEntity(t, ref.EntityName, id, payload)
-		e.Meta.ModelRef = ref
-		return e
-	}
-	tm, err := h.Factory.TransactionManager(o.ctx)
-	require.NoError(t, err)
-
-	id := newID()
-	txID := o.tx(t, func(txID string, txCtx spiCtx, es spi.EntityStore) {
-		_, err := es.Save(txCtx, underModel(refA, id, map[string]any{"v": 1}))
-		require.NoError(t, err)
-		require.NoError(t, es.Delete(txCtx, id))
-		sp, err := tm.Savepoint(txCtx, txID)
-		require.NoError(t, err)
-		_, err = es.Save(txCtx, underModel(refB, id, map[string]any{"v": 2}))
-		require.NoError(t, err, "after a same-transaction create and delete, a create under another model is not refused before commit")
-		require.NoError(t, es.Delete(txCtx, id))
-		require.NoError(t, tm.RollbackToSavepoint(txCtx, txID, sp))
-	})
-	o.requireOneVersion(t, id, txID, "DELETED", "create A, delete, savepoint, create B, delete, rollback to the savepoint")
-	require.Len(t, o.history(t, id), 1, "the entity's whole history is the one tombstone")
-	o.requireGone(t, id, "the committed version is a tombstone")
-
-	// Model B first, in a transaction that is rolled back: a committed save
-	// under model A would itself bind the id to model A.
-	func() {
-		txID, txCtx := beginGuarded(t, tm, o.ctx)
-		es, err := h.Factory.EntityStore(txCtx)
-		require.NoError(t, err)
-		_, err = es.Save(txCtx, underModel(refB, id, map[string]any{"v": 3}))
-		require.ErrorIs(t, err, spi.ErrEntityModelMismatch,
-			"the tombstone binds the id to model A: a save under model B must be refused")
-		_ = tm.Rollback(txCtx, txID)
-	}()
-
-	o.tx(t, func(_ string, txCtx spiCtx, es spi.EntityStore) {
-		_, err := es.Save(txCtx, underModel(refA, id, map[string]any{"v": 4}))
-		require.NoError(t, err, "the tombstone binds the id to model A: a save under model A must succeed")
-	})
-	o.requireContent(t, id, "v", 4, "the re-create under model A")
 }
 
 // savepoint, save, rollback to the savepoint, save again: the rollback left

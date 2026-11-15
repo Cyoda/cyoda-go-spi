@@ -37,6 +37,12 @@ MAINTAINING.md.
   is renamed `Entity/PointInTime/DeleteRecreateSameTxResolvesToRecreate`: the
   transaction records one version, so there is no tiebreak.
 
+- **A delete does not free an entity's model inside the transaction.** After
+  a create and a delete of an id in one transaction, a `Save` of that id
+  under a different model returns `ErrEntityModelMismatch`, as without the
+  delete. New conformance case
+  `Entity/Save/ModelReferenceIsImmutableWithinTxAfterDelete`.
+
 - **`ModelStore.ExtendSchema` commits in its own transaction.** It never
   joins a transaction on ctx, is visible to every later `Get` on return,
   treats an already-held delta as a no-op, never returns `ErrConflict` or

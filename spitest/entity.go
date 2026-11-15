@@ -19,6 +19,7 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Update", testEntityUpdate)
 	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutable", testEntityModelImmutable)
 	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutableWithinTx", testEntityModelImmutableWithinTx)
+	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutableWithinTxAfterDelete", testEntityModelImmutableWithinTxAfterDelete)
 	runSubtest(t, h, tracker, "Save/ModelReferenceIsImmutableAfterSameTxCreateDelete", testEntityModelImmutableAfterSameTxCreateDelete)
 	runSubtest(t, h, tracker, "CompareAndSave/ModelReferenceIsImmutable", testEntityCompareAndSaveModelImmutable)
 	runSubtest(t, h, tracker, "CompareAndSave/ModelReferenceIsImmutableWithinTx", testEntityCompareAndSaveModelImmutableWithinTx)
@@ -350,6 +351,40 @@ func testEntityModelImmutableWithinTx(t *testing.T, h Harness) {
 	second.Meta.ModelRef.ModelVersion = "2"
 	_, err = es.Save(txCtx, second)
 	require.Error(t, err, "a same-transaction Save under a different model must be rejected at buffer time")
+	require.True(t, errors.Is(err, spi.ErrEntityModelMismatch),
+		"must wrap ErrEntityModelMismatch; got: %v", err)
+}
+
+// testEntityModelImmutableWithinTxAfterDelete pins that a delete does not free
+// an entity's model inside the transaction either: create an id under one
+// model and delete it in the same transaction, and a Save of that id under a
+// different model is rejected at buffer time, as it is without the delete
+// (Save/ModelReferenceIsImmutableWithinTx) and after the commit
+// (Save/ModelReferenceIsImmutableAfterSameTxCreateDelete). The model is fixed
+// at creation for the life of the id, including across delete and recreate.
+//
+// There is no CompareAndSave variant: after a delete staged in the caller's
+// transaction no CompareAndSave can succeed (see its doc), so it never
+// reaches a model check.
+func testEntityModelImmutableWithinTxAfterDelete(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-tx-del", ModelVersion: "1"})
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "immutable-model-tx-del", ModelVersion: "2"})
+	id := newID()
+	tm, err := h.Factory.TransactionManager(ctx)
+	require.NoError(t, err)
+	_, txCtx := beginGuarded(t, tm, ctx) // rolled back at cleanup: a failed write aborts a postgres transaction
+
+	es, err := h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+	_, err = es.Save(txCtx, newEntity(t, "immutable-model-tx-del", id, map[string]any{"n": 1}))
+	require.NoError(t, err)
+	require.NoError(t, es.Delete(txCtx, id))
+
+	second := newEntity(t, "immutable-model-tx-del", id, map[string]any{"n": 2})
+	second.Meta.ModelRef.ModelVersion = "2"
+	_, err = es.Save(txCtx, second)
+	require.Error(t, err, "a same-transaction Save under a different model after create and delete must be rejected at buffer time")
 	require.True(t, errors.Is(err, spi.ErrEntityModelMismatch),
 		"must wrap ErrEntityModelMismatch; got: %v", err)
 }

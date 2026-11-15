@@ -45,11 +45,7 @@ MAINTAINING.md.
   number the commit records, store dates), pinned by
   `Entity/Save/PendingReadCarriesStoreMetadata`, including that a new
   entity saved, deleted and saved again in one transaction keeps the first
-  save's pending creation date. `Entity/Save/UpdateDoesNotRestampCreationDate`
-  now also requires that an entity re-created after a history beginning with
-  a same-transaction create and delete keeps that transaction's creation date
-  (the tombstone's timestamp); it previously asserted only that the date did
-  not move afterwards.
+  save's pending creation date.
 
 - **`GetVersionByTransaction` reads committed versions only**, also inside a
   transaction and inside `txID` itself, and returns the one version `txID`
@@ -663,13 +659,15 @@ MAINTAINING.md.
   begins with a **tombstone** left by a create and a delete committed in
   the same transaction. A backend that asks for "the first version" rather
   than "the first version that still carries an entity" finds no entity
-  there and restamps the creation date on every later update. The
-  tombstone shape asserts *stability* rather than a particular instant:
-  which instant a recreate establishes after a tombstone is a documented
-  per-backend difference, but no backend may move it afterwards.
+  there and restamps the creation date on every later update. In the
+  tombstone shape the entity was created by the transaction that also
+  deleted it, so a re-create keeps that transaction's commit instant (the
+  tombstone's timestamp), and no later update moves it.
 
-  Migration: derive the carried-forward creation date from the entity's
-  earliest still-recoverable snapshot, not from its first version row.
+  Migration: carry forward the creation date the entity got when its first
+  version committed — for a history that begins with a create-and-delete
+  tombstone, that tombstone's commit instant — never the instant of a
+  re-create or of a later write.
 
 ### Changed
 

@@ -74,20 +74,6 @@ MAINTAINING.md.
   and ignores any transaction on ctx. `ErrRetryExhausted` no longer
   documents schema extension.
 
-- **`ModelStore` refuses changes under live entities and over a locked
-  model**, each check atomic with the change it guards. `Unlock` of a model
-  with live entities changes nothing and returns a `*ModelHasEntitiesError`
-  (new; it carries `Ref` and `Count` and matches the new
-  `ErrModelHasEntities` under `errors.Is`). `Delete` of a `LOCKED` model and
-  `Save` over a stored `LOCKED` model change nothing and return the new
-  `ErrModelLocked`. `Delete` counts no entities: an `UNLOCKED` model has
-  none. `ErrModelNotLocked` now also covers an entity commit, and a
-  non-transactional entity save, into a model that does not exist or is not
-  `LOCKED`, so an entity commit and an `Unlock` of its model never both
-  succeed. New conformance cases `Model/Unlock/RefusesLiveEntities`,
-  `Model/Delete/RefusesLocked`, `Model/Save/RefusesOverLocked` and
-  `Model/Interleave/UnlockVsUncommittedWrite`.
-
 - **Unique keys are computed at commit from the store's own model.** A
   store reads a model's unique keys from its stored model
   (`ModelDescriptor.UniqueKeys`) when it enforces them; no caller passes
@@ -97,21 +83,18 @@ MAINTAINING.md.
   claim before the holder's free all commit when the final state is unique.
   A value two final entities claim, or one an entity outside the
   transaction's writes holds, fails the commit with `ErrUniqueViolation`; a
-  partial composite key fails it with `ErrPartialUniqueKey`. The commit
-  reads the model of every entity whose final write is a save and refuses
-  one that does not exist or is not `LOCKED` with `ErrModelNotLocked`; an
-  entity whose final write is a delete needs no model. A refused commit
-  stores nothing. A write outside a transaction does the same checks on its
-  own. A store whose transaction reads from a snapshot may answer the
-  retryable `ErrConflict` instead when a model changed after it. The
-  `UniqueKey` doc states the rule. New conformance cases `Unique/*`
-  (`KeysFromStoredModel/Tx`, `KeysFromStoredModel/NonTx`, `SwapInTx`,
-  `ChainInTx`, `FreeAfterClaimInTx`, `SameValueTwiceInTx`,
-  `PartialKeyAtCommit`, `SavepointRollbackRestoresClaim`,
-  `KeylessModelCommitsNoClaims`, `CommitRefusesModelNotLocked`,
-  `CommitRefusesIfAnyModelNotLocked`, `CommitRefusesMissingModel`,
-  `CreateThenDeleteCommitsOnUnlockedModel`,
-  `NonTxSaveRefusesModelNotLocked`) declare keys on the model only.
+  partial composite key fails it with `ErrPartialUniqueKey`. A refused
+  commit stores nothing. A write outside a transaction does the same checks
+  on its own. The store does not check the model's state: the caller saves
+  entities only into a `LOCKED` model, and unlocks or deletes only a model
+  without entities (the `ModelStore` doc). The `UniqueKey` doc states the
+  rule. New conformance cases `Unique/*` (`KeysFromStoredModel/Tx`,
+  `KeysFromStoredModel/NonTx`, `SwapInTx`, `ChainInTx`,
+  `FreeAfterClaimInTx`, `SameValueTwiceInTx`, `PartialKeyAtCommit`,
+  `SavepointRollbackRestoresClaim`, `KeylessModelCommitsNoClaims`,
+  `KeysReadAtCommit/ModelLockedAfterBegin`) declare
+  keys on the model only; the spitest fixture `EnsureLockedModel` saves and
+  locks a model before a case writes entities of it.
 
 ### Added
 

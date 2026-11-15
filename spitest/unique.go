@@ -1,7 +1,6 @@
 package spitest
 
 import (
-	"errors"
 	"testing"
 	"time"
 
@@ -10,8 +9,7 @@ import (
 	spi "github.com/cyoda-platform/cyoda-go-spi"
 )
 
-// The Unique cases pin the rule for unique keys and for the model an entity
-// write needs:
+// The Unique cases pin the rule for unique keys:
 //
 //   - A store reads a model's unique keys from its own stored model, at the
 //     moment it enforces them. No caller passes keys: every case here
@@ -24,10 +22,6 @@ import (
 //     ErrUniqueViolation; a partial composite key fails it with
 //     ErrPartialUniqueKey. A write outside a transaction does the same
 //     checks on its own.
-//   - The commit reads the model of every entity whose final write is a
-//     save; a model that does not exist or is not LOCKED fails the commit
-//     with ErrModelNotLocked, and nothing of the transaction is stored. An
-//     entity whose final write is a delete needs no model.
 
 const (
 	uniqueModel        = "m-unique"
@@ -44,11 +38,7 @@ func runUniqueSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "PartialKeyAtCommit", testUniquePartialKeyAtCommit)
 	runSubtest(t, h, tracker, "SavepointRollbackRestoresClaim", testUniqueSavepointRollbackRestoresClaim)
 	runSubtest(t, h, tracker, "KeylessModelCommitsNoClaims", testUniqueKeylessModelCommitsNoClaims)
-	runSubtest(t, h, tracker, "CommitRefusesModelNotLocked", testUniqueCommitRefusesModelNotLocked)
-	runSubtest(t, h, tracker, "CommitRefusesIfAnyModelNotLocked", testUniqueCommitRefusesIfAnyModelNotLocked)
-	runSubtest(t, h, tracker, "CommitRefusesMissingModel", testUniqueCommitRefusesMissingModel)
-	runSubtest(t, h, tracker, "CreateThenDeleteCommitsOnUnlockedModel", testUniqueCreateThenDeleteCommitsOnUnlockedModel)
-	runSubtest(t, h, tracker, "NonTxSaveRefusesModelNotLocked", testUniqueNonTxSaveRefusesModelNotLocked)
+	runSubtest(t, h, tracker, "KeysReadAtCommit/ModelLockedAfterBegin", testUniqueKeysReadAtCommitModelLockedAfterBegin)
 }
 
 // codeKey is the single-field unique key over $.code the cases declare.
@@ -80,13 +70,6 @@ func (f *uniqueFixture) store(t *testing.T) spi.EntityStore {
 	es, err := f.h.Factory.EntityStore(f.ctx)
 	require.NoError(t, err)
 	return es
-}
-
-func (f *uniqueFixture) models(t *testing.T) spi.ModelStore {
-	t.Helper()
-	ms, err := f.h.Factory.ModelStore(f.ctx)
-	require.NoError(t, err)
-	return ms
 }
 
 // saveNonTx saves an entity outside any transaction and returns the store's
@@ -172,14 +155,6 @@ func (f *uniqueFixture) requireFree(t *testing.T, value, why string) {
 	require.NoError(t, f.saveNonTx(t, uniqueModel, newID(), codeOf(value)), "%s: value %q must be free", why, value)
 }
 
-// lockedThenUnlocked creates model LOCKED and unlocks it, so it exists
-// UNLOCKED, as a model does that once held entities and was unlocked.
-func (f *uniqueFixture) lockedThenUnlocked(t *testing.T, model string) {
-	t.Helper()
-	EnsureLockedModel(t, f.h.Factory, f.ctx, uniqueRef(model))
-	require.NoError(t, f.models(t).Unlock(f.ctx, uniqueRef(model)))
-}
-
 // A transaction's commit enforces the keys of the stored model against an
 // entity committed earlier: the duplicate is refused and stores nothing.
 func testUniqueKeysFromStoredModelTx(t *testing.T, h Harness) {
@@ -193,6 +168,26 @@ func testUniqueKeysFromStoredModelTx(t *testing.T, h Harness) {
 	require.ErrorIs(t, err, spi.ErrUniqueViolation, "the commit must enforce the stored model's key")
 	f.requireAbsent(t, b, "a refused commit stores nothing")
 	f.requireCode(t, a, "x", "the holder is unchanged")
+}
+
+// The commit enforces the keys the model holds at commit, not as they were
+// when the transaction began: a model created and locked after the
+// transaction's first read, with an entity holding a value committed into it
+// elsewhere, refuses the transaction's duplicate of that value.
+func testUniqueKeysReadAtCommitModelLockedAfterBegin(t *testing.T, h Harness) {
+	f := newUniqueFixture(t, h)
+	const model = "m-unique-locked-after-begin"
+
+	e := newID()
+	err := f.tx(t, func(_ string, txCtx spiCtx, es spi.EntityStore) {
+		_, err := es.Get(txCtx, newID())
+		require.ErrorIs(t, err, spi.ErrNotFound, "a read in the transaction before the model exists")
+		EnsureLockedModel(t, h.Factory, f.ctx, uniqueRef(model), codeKey)
+		require.NoError(t, f.saveNonTx(t, model, newID(), codeOf("x")), "the holder, committed outside the transaction")
+		uniqueSave(t, txCtx, es, model, e, codeOf("x"))
+	})
+	require.ErrorIs(t, err, spi.ErrUniqueViolation, "the commit must enforce the keys the model holds at commit")
+	f.requireAbsent(t, e, "a refused commit stores nothing")
 }
 
 // A write outside a transaction enforces the keys of the stored model on its
@@ -378,9 +373,7 @@ func testUniqueSavepointRollbackRestoresClaim(t *testing.T, h Harness) {
 // A model with no unique keys has nothing to claim: entities with equal
 // values, with no value and with a non-scalar value at a path another model
 // keys all commit, in a transaction and outside one, beside an entity of a
-// keyed model that holds the same value. Having no keys does not exempt the
-// model from the commit's LOCKED check: a keyless model unlocked while a
-// transaction holds an entity of it refuses that commit.
+// keyed model that holds the same value.
 func testUniqueKeylessModelCommitsNoClaims(t *testing.T, h Harness) {
 	f := newUniqueFixture(t, h)
 	EnsureLockedModel(t, h.Factory, f.ctx, uniqueRef(uniqueKeylessModel))
@@ -404,164 +397,4 @@ func testUniqueKeylessModelCommitsNoClaims(t *testing.T, h Harness) {
 		"a save outside a transaction into a keyless model claims nothing")
 	f.requireClaimed(t, "x", "the keyed model's holder is unaffected by the keyless model")
 
-	t.Log("a keyless model is still checked for LOCKED at commit")
-	const unlocked = "m-unique-keyless-unlocked"
-	EnsureLockedModel(t, h.Factory, f.ctx, uniqueRef(unlocked))
-	e := newID()
-	err := f.tx(t, func(_ string, txCtx spiCtx, es spi.EntityStore) {
-		uniqueSave(t, txCtx, es, unlocked, e, codeOf("x"))
-		require.NoError(t, f.models(t).Unlock(f.ctx, uniqueRef(unlocked)),
-			"an uncommitted entity is not a live entity")
-	})
-	f.requireRefusedModelNotLocked(t, err, true, e)
-}
-
-// requireModelNotLockedAnswer asserts that a commit was refused for a model
-// that is not LOCKED.
-//
-// unlockedDuringTx is true when the model was unlocked while the transaction
-// was open, after its first statement. A store that reads the model's
-// current state at commit answers ErrModelNotLocked. A store whose
-// transaction reads from a snapshot taken at its start (postgres, REPEATABLE
-// READ) finds the model changed since its snapshot and answers the
-// retryable ErrConflict; its retry then gets ErrModelNotLocked. Both fail
-// closed, so that shape accepts exactly those two answers. A model that was
-// not LOCKED before the transaction began gets ErrModelNotLocked from every
-// store.
-func requireModelNotLockedAnswer(t *testing.T, err error, unlockedDuringTx bool) {
-	t.Helper()
-	require.Error(t, err, "a commit into a model that is not LOCKED must be refused")
-	if unlockedDuringTx {
-		require.Truef(t, errors.Is(err, spi.ErrModelNotLocked) || errors.Is(err, spi.ErrConflict),
-			"want ErrModelNotLocked or ErrConflict, got %v", err)
-		return
-	}
-	require.ErrorIs(t, err, spi.ErrModelNotLocked)
-}
-
-// requireRefusedModelNotLocked asserts requireModelNotLockedAnswer and that
-// none of ids is stored.
-func (f *uniqueFixture) requireRefusedModelNotLocked(t *testing.T, err error, unlockedDuringTx bool, ids ...string) {
-	t.Helper()
-	requireModelNotLockedAnswer(t, err, unlockedDuringTx)
-	for _, id := range ids {
-		f.requireAbsent(t, id, "a refused commit stores nothing")
-	}
-}
-
-// The commit refuses a save into a model that is not LOCKED, and stores
-// nothing.
-//
-//   - Unlocked before the transaction begins: every store answers
-//     ErrModelNotLocked.
-//   - Unlocked while the transaction is open, after its save (the uncommitted
-//     entity is not a live entity, so the Unlock succeeds): ErrModelNotLocked,
-//     or ErrConflict from a snapshot store (see requireModelNotLockedAnswer).
-func testUniqueCommitRefusesModelNotLocked(t *testing.T, h Harness) {
-	f := newUniqueFixture(t, h)
-
-	t.Log("unlocked before the transaction begins")
-	const before = "m-unique-unlocked-before"
-	f.lockedThenUnlocked(t, before)
-	e1 := newID()
-	err := f.tx(t, func(_ string, txCtx spiCtx, es spi.EntityStore) {
-		uniqueSave(t, txCtx, es, before, e1, codeOf("x"))
-	})
-	f.requireRefusedModelNotLocked(t, err, false, e1)
-
-	t.Log("unlocked while the transaction is open")
-	const during = "m-unique-unlocked-during"
-	EnsureLockedModel(t, h.Factory, f.ctx, uniqueRef(during))
-	e2 := newID()
-	err = f.tx(t, func(_ string, txCtx spiCtx, es spi.EntityStore) {
-		uniqueSave(t, txCtx, es, during, e2, codeOf("x"))
-		require.NoError(t, f.models(t).Unlock(f.ctx, uniqueRef(during)),
-			"an uncommitted entity is not a live entity")
-	})
-	f.requireRefusedModelNotLocked(t, err, true, e2)
-}
-
-// The commit checks the model of every entity it saves: one model that is
-// not LOCKED refuses the whole commit, whichever model sorts or is written
-// first, and neither entity is stored.
-func testUniqueCommitRefusesIfAnyModelNotLocked(t *testing.T, h Harness) {
-	f := newUniqueFixture(t, h)
-
-	t.Log("the unlocked model sorts last and is written first")
-	f.lockedThenUnlocked(t, "m-unique-z-unlocked")
-	EnsureLockedModel(t, h.Factory, f.ctx, uniqueRef("m-unique-a-locked"))
-	e1, e2 := newID(), newID()
-	err := f.tx(t, func(_ string, txCtx spiCtx, es spi.EntityStore) {
-		uniqueSave(t, txCtx, es, "m-unique-z-unlocked", e1, codeOf("x"))
-		uniqueSave(t, txCtx, es, "m-unique-a-locked", e2, codeOf("x"))
-	})
-	f.requireRefusedModelNotLocked(t, err, false, e1, e2)
-
-	t.Log("the unlocked model sorts first and is written last")
-	f.lockedThenUnlocked(t, "m-unique-a-unlocked")
-	EnsureLockedModel(t, h.Factory, f.ctx, uniqueRef("m-unique-z-locked"))
-	e3, e4 := newID(), newID()
-	err = f.tx(t, func(_ string, txCtx spiCtx, es spi.EntityStore) {
-		uniqueSave(t, txCtx, es, "m-unique-z-locked", e3, codeOf("x"))
-		uniqueSave(t, txCtx, es, "m-unique-a-unlocked", e4, codeOf("x"))
-	})
-	f.requireRefusedModelNotLocked(t, err, false, e3, e4)
-}
-
-// The commit refuses a save into a model that was never created, and stores
-// nothing.
-func testUniqueCommitRefusesMissingModel(t *testing.T, h Harness) {
-	f := newUniqueFixture(t, h)
-	e := newID()
-	err := f.tx(t, func(_ string, txCtx spiCtx, es spi.EntityStore) {
-		uniqueSave(t, txCtx, es, "m-unique-never-created", e, codeOf("x"))
-	})
-	f.requireRefusedModelNotLocked(t, err, false, e)
-}
-
-// A transaction that creates an entity and deletes it again commits only the
-// tombstone, which needs no model: the model is unlocked while the
-// transaction is open, and the commit still succeeds.
-func testUniqueCreateThenDeleteCommitsOnUnlockedModel(t *testing.T, h Harness) {
-	f := newUniqueFixture(t, h)
-	const model = "m-unique-create-delete"
-	EnsureLockedModel(t, h.Factory, f.ctx, uniqueRef(model))
-
-	e := newID()
-	var txID string
-	require.NoError(t, f.tx(t, func(id string, txCtx spiCtx, es spi.EntityStore) {
-		txID = id
-		uniqueSave(t, txCtx, es, model, e, codeOf("x"))
-		require.NoError(t, es.Delete(txCtx, e))
-		require.NoError(t, f.models(t).Unlock(f.ctx, uniqueRef(model)),
-			"an uncommitted entity is not a live entity")
-	}), "a transaction whose only final write is a delete commits whatever the model's state")
-
-	f.requireAbsent(t, e, "create, delete leaves no entity")
-	metas, err := f.store(t).GetVersionMetadata(f.ctx, e, spi.VersionMetadataOptions{})
-	require.NoError(t, err)
-	require.Len(t, metas, 1, "the entity's whole history is the tombstone")
-	require.Equal(t, "DELETED", metas[0].ChangeType)
-	require.Equal(t, txID, metas[0].TransactionID)
-	locked, err := f.models(t).IsLocked(f.ctx, uniqueRef(model))
-	require.NoError(t, err)
-	require.False(t, locked, "the model stays UNLOCKED")
-}
-
-// A save outside a transaction into a model that does not exist or is not
-// LOCKED is refused with ErrModelNotLocked and stores nothing.
-func testUniqueNonTxSaveRefusesModelNotLocked(t *testing.T, h Harness) {
-	f := newUniqueFixture(t, h)
-
-	e1 := newID()
-	require.ErrorIs(t, f.saveNonTx(t, "m-unique-never-created", e1, codeOf("x")), spi.ErrModelNotLocked,
-		"a model that does not exist")
-	f.requireAbsent(t, e1, "a refused save stores nothing")
-
-	const unlocked = "m-unique-unlocked"
-	f.lockedThenUnlocked(t, unlocked)
-	e2 := newID()
-	require.ErrorIs(t, f.saveNonTx(t, unlocked, e2, codeOf("x")), spi.ErrModelNotLocked,
-		"a model that is not LOCKED")
-	f.requireAbsent(t, e2, "a refused save stores nothing")
 }

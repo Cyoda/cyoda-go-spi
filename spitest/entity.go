@@ -221,9 +221,10 @@ func testEntitySaveIgnoresCallerCreationDate(t *testing.T, h Harness) {
 //     version that still carries an entity" finds no entity there, and
 //     silently restamps the creation date on every subsequent update.
 //
-// The second shape asserts STABILITY rather than a particular instant:
-// which instant a recreate establishes after a tombstone is a documented
-// per-backend difference, but no backend may move it afterwards.
+// In the second shape the entity was created by the transaction that also
+// deleted it, so its creation date is that transaction's commit instant —
+// the tombstone's timestamp — and the recreate and every later update keep
+// it.
 func testEntityUpdateDoesNotRestampCreationDate(t *testing.T, h Harness) {
 	ctx := tenantContext(h.NewTenant())
 	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "update-creation-date", ModelVersion: "1"})
@@ -270,6 +271,10 @@ func testEntityUpdateDoesNotRestampCreationDate(t *testing.T, h Harness) {
 		require.NoError(t, err)
 		require.NoError(t, txEs.Delete(txCtx, tombID))
 	})
+	tombstones, err := es.GetVersionMetadata(ctx, tombID, spi.VersionMetadataOptions{})
+	require.NoError(t, err)
+	require.Len(t, tombstones, 1, "a create and a delete in one transaction record one version")
+	firstCreatedAt := tombstones[0].Timestamp
 
 	h.AdvanceClock(1 * time.Millisecond)
 
@@ -282,7 +287,9 @@ func testEntityUpdateDoesNotRestampCreationDate(t *testing.T, h Harness) {
 	recreated, err := es.Get(ctx, tombID)
 	require.NoError(t, err)
 	recreatedAt := recreated.Meta.CreationDate
-	require.False(t, recreatedAt.IsZero(), "CreationDate must be populated after a recreate")
+	require.True(t, recreatedAt.Equal(firstCreatedAt),
+		"a recreate must keep the creation date of the transaction that created the entity: got %v, want %v",
+		recreatedAt, firstCreatedAt)
 
 	h.AdvanceClock(1 * time.Millisecond)
 
@@ -2898,7 +2905,31 @@ func testEntityPendingReadCarriesStoreMetadata(t *testing.T, h Harness) {
 	require.True(t, got.Meta.CreationDate.Equal(committed.Meta.CreationDate),
 		"first write a CompareAndSave: pending creation date %v, want the committed creation date %v", got.Meta.CreationDate, committed.Meta.CreationDate)
 	require.NoError(t, tm.Commit(txCtx, txID))
+	h.AdvanceClock(1 * time.Millisecond)
 	assertCommitted("existing entity, first write a CompareAndSave", newID1, "UPDATED", 3)
+
+	// A new entity saved, deleted and saved again in one transaction keeps
+	// the first save's pending creation date.
+	newID2 := newID()
+	txID, txCtx = beginGuarded(t, tm, ctx)
+	es, err = h.Factory.EntityStore(txCtx)
+	require.NoError(t, err)
+	_, err = es.Save(txCtx, withCallerMeta(newID2, map[string]any{"v": 1}))
+	require.NoError(t, err)
+	first, err := es.Get(txCtx, newID2)
+	require.NoError(t, err)
+	h.AdvanceClock(1 * time.Millisecond)
+	require.NoError(t, es.Delete(txCtx, newID2))
+	h.AdvanceClock(1 * time.Millisecond)
+	_, err = es.Save(txCtx, withCallerMeta(newID2, map[string]any{"v": 2}))
+	require.NoError(t, err)
+	got, err = es.Get(txCtx, newID2)
+	require.NoError(t, err)
+	assertPending("new entity saved, deleted, saved", got, txID, "CREATED", 1)
+	require.True(t, got.Meta.CreationDate.Equal(first.Meta.CreationDate),
+		"new entity saved, deleted, saved: pending creation date %v, want the first save's %v", got.Meta.CreationDate, first.Meta.CreationDate)
+	require.NoError(t, tm.Commit(txCtx, txID))
+	assertCommitted("new entity saved, deleted, saved", newID2, "CREATED", 1)
 }
 
 // mustEntityStore returns the factory's entity store for ctx.

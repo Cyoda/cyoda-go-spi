@@ -43,7 +43,13 @@ MAINTAINING.md.
   A read inside the transaction of its pending version returns the store's
   metadata too (transaction ID, tenant, derived change type, the version
   number the commit records, store dates), pinned by
-  `Entity/Save/PendingReadCarriesStoreMetadata`.
+  `Entity/Save/PendingReadCarriesStoreMetadata`, including that a new
+  entity saved, deleted and saved again in one transaction keeps the first
+  save's pending creation date. `Entity/Save/UpdateDoesNotRestampCreationDate`
+  now also requires that an entity re-created after a history beginning with
+  a same-transaction create and delete keeps that transaction's creation date
+  (the tombstone's timestamp); it previously asserted only that the date did
+  not move afterwards.
 
 - **`GetVersionByTransaction` reads committed versions only**, also inside a
   transaction and inside `txID` itself, and returns the one version `txID`

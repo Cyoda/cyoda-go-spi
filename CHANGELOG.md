@@ -14,6 +14,10 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **`WithUniqueKeys` and `UniqueKeysFromContext` are removed.** A storage
+  plugin reads the unique keys of the model it is writing from its own
+  stored model at commit; the caller no longer carries them on the context.
+
 - **One version per entity per transaction.** Within one transaction an
   entity has at most one pending version: a `Save`, `CompareAndSave` or
   `Delete` of an entity the transaction already wrote replaces it, and

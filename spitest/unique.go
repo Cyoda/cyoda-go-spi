@@ -378,7 +378,9 @@ func testUniqueSavepointRollbackRestoresClaim(t *testing.T, h Harness) {
 // A model with no unique keys has nothing to claim: entities with equal
 // values, with no value and with a non-scalar value at a path another model
 // keys all commit, in a transaction and outside one, beside an entity of a
-// keyed model that holds the same value.
+// keyed model that holds the same value. Having no keys does not exempt the
+// model from the commit's LOCKED check: a keyless model unlocked while a
+// transaction holds an entity of it refuses that commit.
 func testUniqueKeylessModelCommitsNoClaims(t *testing.T, h Harness) {
 	f := newUniqueFixture(t, h)
 	EnsureLockedModel(t, h.Factory, f.ctx, uniqueRef(uniqueKeylessModel))
@@ -401,20 +403,47 @@ func testUniqueKeylessModelCommitsNoClaims(t *testing.T, h Harness) {
 	require.NoError(t, f.saveNonTx(t, uniqueKeylessModel, newID(), codeOf("x")),
 		"a save outside a transaction into a keyless model claims nothing")
 	f.requireClaimed(t, "x", "the keyed model's holder is unaffected by the keyless model")
+
+	t.Log("a keyless model is still checked for LOCKED at commit")
+	const unlocked = "m-unique-keyless-unlocked"
+	EnsureLockedModel(t, h.Factory, f.ctx, uniqueRef(unlocked))
+	e := newID()
+	err := f.tx(t, func(_ string, txCtx spiCtx, es spi.EntityStore) {
+		uniqueSave(t, txCtx, es, unlocked, e, codeOf("x"))
+		require.NoError(t, f.models(t).Unlock(f.ctx, uniqueRef(unlocked)),
+			"an uncommitted entity is not a live entity")
+	})
+	f.requireRefusedModelNotLocked(t, err, true, e)
 }
 
-// requireRefusedModelNotLocked asserts that a commit was refused for a model
-// that is not LOCKED and that none of ids is stored. With conflictToo, the
-// store may instead answer ErrConflict (see the caller).
-func (f *uniqueFixture) requireRefusedModelNotLocked(t *testing.T, err error, conflictToo bool, ids ...string) {
+// requireModelNotLockedAnswer asserts that a commit was refused for a model
+// that is not LOCKED.
+//
+// unlockedDuringTx is true when the model was unlocked while the transaction
+// was open, after its first statement. A store that reads the model's
+// current state at commit answers ErrModelNotLocked. A store whose
+// transaction reads from a snapshot taken at its start (postgres, REPEATABLE
+// READ) finds the model changed since its snapshot and answers the
+// retryable ErrConflict; its retry then gets ErrModelNotLocked. Both fail
+// closed, so that shape accepts exactly those two answers. A model that was
+// not LOCKED before the transaction began gets ErrModelNotLocked from every
+// store.
+func requireModelNotLockedAnswer(t *testing.T, err error, unlockedDuringTx bool) {
 	t.Helper()
 	require.Error(t, err, "a commit into a model that is not LOCKED must be refused")
-	if conflictToo {
+	if unlockedDuringTx {
 		require.Truef(t, errors.Is(err, spi.ErrModelNotLocked) || errors.Is(err, spi.ErrConflict),
 			"want ErrModelNotLocked or ErrConflict, got %v", err)
-	} else {
-		require.ErrorIs(t, err, spi.ErrModelNotLocked)
+		return
 	}
+	require.ErrorIs(t, err, spi.ErrModelNotLocked)
+}
+
+// requireRefusedModelNotLocked asserts requireModelNotLockedAnswer and that
+// none of ids is stored.
+func (f *uniqueFixture) requireRefusedModelNotLocked(t *testing.T, err error, unlockedDuringTx bool, ids ...string) {
+	t.Helper()
+	requireModelNotLockedAnswer(t, err, unlockedDuringTx)
 	for _, id := range ids {
 		f.requireAbsent(t, id, "a refused commit stores nothing")
 	}
@@ -426,12 +455,8 @@ func (f *uniqueFixture) requireRefusedModelNotLocked(t *testing.T, err error, co
 //   - Unlocked before the transaction begins: every store answers
 //     ErrModelNotLocked.
 //   - Unlocked while the transaction is open, after its save (the uncommitted
-//     entity is not a live entity, so the Unlock succeeds): a store that reads
-//     the model's current state at commit answers ErrModelNotLocked. A store
-//     whose transaction reads from a snapshot taken at its start (postgres,
-//     REPEATABLE READ) finds the model changed since its snapshot and answers
-//     the retryable ErrConflict; its retry then gets ErrModelNotLocked. Both
-//     fail closed, so this shape accepts exactly those two answers.
+//     entity is not a live entity, so the Unlock succeeds): ErrModelNotLocked,
+//     or ErrConflict from a snapshot store (see requireModelNotLockedAnswer).
 func testUniqueCommitRefusesModelNotLocked(t *testing.T, h Harness) {
 	f := newUniqueFixture(t, h)
 

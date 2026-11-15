@@ -231,8 +231,10 @@ func testModelSaveRefusesOverLocked(t *testing.T, h Harness) {
 //
 //   - Unlock first: an entity written in an open transaction is not yet a
 //     live entity, so Unlock succeeds (it counts none). The transaction's
-//     commit then finds the model not LOCKED and fails ErrModelNotLocked,
-//     writing nothing.
+//     commit then finds the model not LOCKED and is refused, writing
+//     nothing: ErrModelNotLocked, or ErrConflict from a store whose
+//     transaction reads from a snapshot taken before the Unlock (see
+//     requireModelNotLockedAnswer).
 //   - Commit first: the entity is live, so Unlock refuses with a
 //     *ModelHasEntitiesError and the model stays LOCKED.
 func testModelInterleaveUnlockVsUncommittedWrite(t *testing.T, h Harness) {
@@ -252,8 +254,7 @@ func testModelInterleaveUnlockVsUncommittedWrite(t *testing.T, h Harness) {
 	_, err = esA.Save(txCtxA, newEntity(t, refA.EntityName, idA, map[string]any{"n": 1}))
 	require.NoError(t, err)
 	require.NoError(t, ms.Unlock(ctx, refA), "an uncommitted entity is not a live entity")
-	require.ErrorIs(t, tm.Commit(txCtxA, txA), spi.ErrModelNotLocked,
-		"a commit into a model unlocked since the write must fail")
+	requireModelNotLockedAnswer(t, tm.Commit(txCtxA, txA), true)
 	es, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
 	_, err = es.Get(ctx, idA)

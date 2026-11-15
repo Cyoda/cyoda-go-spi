@@ -33,10 +33,14 @@ package spi
 // write outside a transaction is its own transaction and does steps 1-4
 // atomically with the write.
 //
-// A store whose transaction reads from a snapshot taken when it began may
-// answer the retryable ErrConflict in step 1 instead, when an entity's model
-// was created or changed after that snapshot; the retry gets the answer
-// above.
+// Two transient answers fail closed the same way, with the retryable
+// ErrConflict in place of the answer above, which the retry then gets:
+//
+//   - in step 1, from a store whose transaction reads from a snapshot taken
+//     when it began, when an entity's model was created or changed after
+//     that snapshot;
+//   - in step 4, when two concurrent commits, each inserting a value the
+//     other has just inserted, deadlock; the retry gets ErrUniqueViolation.
 type UniqueKey struct {
 	ID     string
 	Fields []string

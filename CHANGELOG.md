@@ -69,37 +69,40 @@ MAINTAINING.md.
   joins a transaction on ctx, is visible to every later `Get` on return,
   treats an already-held delta as a no-op, never returns `ErrConflict` or
   `ErrRetryExhausted` for contention (it waits or retries until ctx ends),
-  is loss-free, and refuses a model that is not LOCKED with
-  `ErrModelNotLocked`. `ModelStore.Get` reads the latest committed model
+  and is loss-free. The caller extends only a LOCKED model; the store does
+  not check this. `ModelStore.Get` reads the latest committed model
   and ignores any transaction on ctx. `ErrRetryExhausted` no longer
   documents schema extension.
 
 - **Unique keys are computed at commit from the store's own model.** A
-  store reads a model's unique keys from its stored model
-  (`ModelDescriptor.UniqueKeys`) when it enforces them; no caller passes
-  keys. A save inside a transaction does no claim work: at commit the
-  claims are computed from the transaction's final entities, from the bytes
-  each final save was given, so a swap of values, a chain of moves and a
-  claim before the holder's free all commit when the final state is unique.
-  A value two final entities claim, or one an entity outside the
-  transaction's writes holds, fails the commit with `ErrUniqueViolation`; a
-  partial composite key fails it with `ErrPartialUniqueKey`. A refused
-  commit stores nothing. A write outside a transaction does the same checks
-  on its own. The store does not check the model's state: the caller saves
-  entities only into a `LOCKED` model, and unlocks or deletes only a model
-  without entities (the `ModelStore` doc). The `UniqueKey` doc states the
+  store reads a model's unique-key definitions from its stored model
+  (`ModelDescriptor.UniqueKeys`) at commit; no caller passes them. A save
+  inside a transaction does no claim work: at commit the claims are
+  computed from the transaction's final entities, from the bytes each final
+  save was given, so a swap of values, a chain of moves and a claim before
+  the holder's free all commit when the final state is unique. A value two
+  final entities claim, or one an entity outside the transaction's writes
+  holds, fails the commit with `ErrUniqueViolation`; a partial composite
+  key fails it with `ErrPartialUniqueKey`. A refused commit stores nothing.
+  A write outside a transaction does the same checks on its own. The store
+  does not check the model's state: the caller saves entities only into a
+  `LOCKED` model, and unlocks or deletes only a model without entities (the
+  `ModelStore` doc), and changes a model's state or its unique-key
+  definitions only while no transaction that will write entities of that
+  model is open: such a transaction's commit may check the unique-key
+  definitions as they were when it began. The `UniqueKey` doc states the
   rule. New conformance cases `Unique/*` (`KeysFromStoredModel/Tx`,
   `KeysFromStoredModel/NonTx`, `SwapInTx`, `ChainInTx`,
   `FreeAfterClaimInTx`, `SameValueTwiceInTx`, `PartialKeyAtCommit`,
-  `SavepointRollbackRestoresClaim`, `KeylessModelCommitsNoClaims`,
-  `KeysReadAtCommit/ModelLockedAfterBegin`) declare
-  keys on the model only; the spitest fixture `EnsureLockedModel` saves and
-  locks a model before a case writes entities of it.
+  `SavepointRollbackRestoresClaim`, `KeylessModelCommitsNoClaims`) declare
+  unique-key definitions on the model only; the spitest fixture
+  `EnsureLockedModel` saves and locks a model before a case writes entities
+  of it.
 
 ### Added
 
-- **`ErrModelNotLocked`** and the `ModelExtend/ExtendSchema/*` and
-  `Model/Lock/NotFound` conformance cases. The `ModelExtend` suite installs
+- **The `ModelExtend/ExtendSchema/*` and `Model/Lock/NotFound`
+  conformance cases.** The `ModelExtend` suite installs
   its apply function through
   `SetApplyFunc(func(base []byte, deltas []SchemaDelta) ([]byte, error))` on
   the harness factory: one call replays a list of deltas, in order, and an

@@ -3,17 +3,22 @@ package spi
 // UniqueKey is a model-level composite unique key over scalar leaf fields.
 // Fields are ordered dotted JSONPath leaves (same form as the schema's field paths).
 //
-// A store enforces the unique keys of an entity's model as its own model
-// store holds them (ModelDescriptor.UniqueKeys), read at the moment it
-// enforces them. No caller passes keys.
+// A store enforces the unique-key definitions of an entity's model as its
+// own model store holds them (ModelDescriptor.UniqueKeys), read at commit.
+// No caller passes unique-key definitions.
+//
+// The caller changes a model's state or its unique-key definitions (save,
+// lock, unlock) only while no transaction that will write entities of that
+// model is open. A store may read the unique-key definitions inside the
+// committing transaction, so if the caller breaks this, the commit of such a
+// transaction may check the unique-key definitions as they were when it
+// began.
 //
 // A transaction's claims are computed at commit, from its final entities:
 //
-//  1. The commit reads the unique keys of the model of every entity whose
-//     final write in the transaction is a save, one read per distinct
-//     model, as the model store holds them at commit: never from a snapshot
-//     taken when the transaction began, so a model locked or re-keyed after
-//     that is enforced with its current keys. The model's state is not
+//  1. The commit reads the unique-key definitions of the model of every
+//     entity whose final write in the transaction is a save, one read per
+//     distinct model, from its stored model. The model's state is not
 //     checked: the caller saves entities only into a LOCKED model (see
 //     ModelStore). An entity whose final write is a delete needs no model
 //     read.
@@ -21,8 +26,9 @@ package spi
 //     deleted.
 //  3. It computes the claims of every entity whose final write is a save
 //     (ComputeClaims), from the bytes that write was given, never from a
-//     re-read of stored data, with the model's keys as read in step 1. A
-//     partial composite key fails the commit with ErrPartialUniqueKey.
+//     re-read of stored data, with the model's unique-key definitions as
+//     read in step 1. A partial composite key fails the commit with
+//     ErrPartialUniqueKey.
 //  4. It inserts those claims. A value claimed twice inside the
 //     transaction, or held by an entity outside the transaction's writes
 //     (committed, or claimed by a concurrent transaction that commits

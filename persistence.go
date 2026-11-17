@@ -612,6 +612,7 @@ type ModelStore interface {
 	// ExtendSchema adds a schema delta to the model at ref. The delta is an
 	// opaque, plugin-agnostic blob that the plugin stores verbatim; folding
 	// it into the current schema is done by a plugin-injected ApplyFunc.
+	// The caller extends only a LOCKED model; the store does not check this.
 	//
 	//  1. It commits in its own transaction and never joins a transaction on
 	//     ctx. When it returns nil the delta is durably committed, whatever
@@ -628,9 +629,8 @@ type ModelStore interface {
 	//     unavailable error, as any store operation does.
 	//  5. It is loss-free: the folded schema includes every delta whose call
 	//     returned nil.
-	//  6. Errors are ErrNotFound (no such model), ErrModelNotLocked (the model
-	//     is not LOCKED), an error from the ApplyFunc refusing the delta,
-	//     storage unavailable, and a ctx error. A non-nil error means the
+	//  6. Errors are ErrNotFound (no such model), an error from the ApplyFunc
+	//     refusing the delta, storage unavailable, and a ctx error. A non-nil error means the
 	//     outcome is unknown: the delta may or may not have been applied.
 	//     Retrying is safe, because a delta already applied is a no-op (3).
 	ExtendSchema(ctx context.Context, ref ModelRef, delta SchemaDelta) error

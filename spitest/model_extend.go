@@ -95,7 +95,6 @@ func runModelExtendSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	run("ExtendSchema/NoOpWritesNothing", testExtendNoOp)
 	run("ExtendSchema/EmptyDeltaIsNoOp", testExtendEmptyDelta)
 	run("ExtendSchema/ConcurrentExtendersAllSucceed", testExtendConcurrent)
-	run("ExtendSchema/NotLockedRefused", testExtendNotLockedRefused)
 	run("ExtendSchema/MissingModel", testExtendMissingModel)
 }
 
@@ -186,19 +185,6 @@ func testExtendConcurrent(t *testing.T, h Harness) {
 	want, err := toyApply(nil, []spi.SchemaDelta{toyDelta(fields...)})
 	require.NoError(t, err)
 	require.Equal(t, string(want), schemaOf(t, ctx, ms, ref), "every extension that returned nil is in the schema")
-}
-
-func testExtendNotLockedRefused(t *testing.T, h Harness) {
-	ctx := tenantContext(h.NewTenant())
-	ms, err := h.Factory.ModelStore(ctx)
-	require.NoError(t, err)
-	md := newModelDescriptor("ext-unlocked", "1")
-	md.Schema = []byte(toySchema("a"))
-	require.NoError(t, ms.Save(ctx, md))
-
-	err = ms.ExtendSchema(ctx, md.Ref, toyDelta("b"))
-	require.ErrorIs(t, err, spi.ErrModelNotLocked)
-	require.Equal(t, toySchema("a"), schemaOf(t, ctx, ms, md.Ref))
 }
 
 func testExtendMissingModel(t *testing.T, h Harness) {

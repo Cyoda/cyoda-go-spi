@@ -11,9 +11,9 @@ import (
 
 // The Unique cases pin the rule for unique keys:
 //
-//   - A store reads a model's unique keys from its own stored model at
-//     commit. No caller passes keys: every case here
-//     declares the keys on the model only (EnsureLockedModel).
+//   - A store reads a model's unique-key definitions from its own stored
+//     model at commit. No caller passes them: every case here declares them
+//     on the model only (EnsureLockedModel).
 //   - Inside a transaction a save does no claim work. At commit the claims
 //     are computed from the transaction's final entities, so a swap, a chain
 //     of moves and a claim before a free all commit when the final state is

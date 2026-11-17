@@ -594,9 +594,10 @@ type SchemaDelta []byte
 //
 // The caller saves entities only into a LOCKED model, and unlocks or deletes
 // only a model that has no entities; the store does not check this. The
-// caller changes a model's state or unique keys only while no transaction
-// that will write entities of that model is open: a commit may enforce the
-// keys as they were when its transaction began (see UniqueKey).
+// caller changes a model's state or its unique-key definitions only while no
+// transaction that will write entities of that model is open: such a
+// transaction's commit may check the unique-key definitions as they were
+// when it began (see UniqueKey).
 type ModelStore interface {
 	Save(ctx context.Context, desc *ModelDescriptor) error
 	// Get reads the latest committed model, with every committed schema

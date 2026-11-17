@@ -75,8 +75,8 @@ MAINTAINING.md.
   documents schema extension.
 
 - **Unique keys are computed at commit from the store's own model.** A
-  store reads a model's unique keys from its stored model
-  (`ModelDescriptor.UniqueKeys`) at commit; no caller passes keys. A save
+  store reads a model's unique-key definitions from its stored model
+  (`ModelDescriptor.UniqueKeys`) at commit; no caller passes them. A save
   inside a transaction does no claim work: at commit the claims are
   computed from the transaction's final entities, from the bytes each final
   save was given, so a swap of values, a chain of moves and a claim before
@@ -87,16 +87,17 @@ MAINTAINING.md.
   A write outside a transaction does the same checks on its own. The store
   does not check the model's state: the caller saves entities only into a
   `LOCKED` model, and unlocks or deletes only a model without entities (the
-  `ModelStore` doc), and changes a model's state or unique keys only while
-  no transaction that will write entities of that model is open: a commit
-  may enforce the keys as they were when its transaction began. The
-  `UniqueKey` doc states the rule. New conformance cases `Unique/*`
-  (`KeysFromStoredModel/Tx`, `KeysFromStoredModel/NonTx`, `SwapInTx`,
-  `ChainInTx`, `FreeAfterClaimInTx`, `SameValueTwiceInTx`,
-  `PartialKeyAtCommit`, `SavepointRollbackRestoresClaim`,
-  `KeylessModelCommitsNoClaims`) declare keys on the model only; the
-  spitest fixture `EnsureLockedModel` saves and locks a model before a case
-  writes entities of it.
+  `ModelStore` doc), and changes a model's state or its unique-key
+  definitions only while no transaction that will write entities of that
+  model is open: such a transaction's commit may check the unique-key
+  definitions as they were when it began. The `UniqueKey` doc states the
+  rule. New conformance cases `Unique/*` (`KeysFromStoredModel/Tx`,
+  `KeysFromStoredModel/NonTx`, `SwapInTx`, `ChainInTx`,
+  `FreeAfterClaimInTx`, `SameValueTwiceInTx`, `PartialKeyAtCommit`,
+  `SavepointRollbackRestoresClaim`, `KeylessModelCommitsNoClaims`) declare
+  unique-key definitions on the model only; the spitest fixture
+  `EnsureLockedModel` saves and locks a model before a case writes entities
+  of it.
 
 ### Added
 

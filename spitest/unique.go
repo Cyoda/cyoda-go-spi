@@ -11,8 +11,8 @@ import (
 
 // The Unique cases pin the rule for unique keys:
 //
-//   - A store reads a model's unique keys from its own stored model, at the
-//     moment it enforces them. No caller passes keys: every case here
+//   - A store reads a model's unique keys from its own stored model at
+//     commit. No caller passes keys: every case here
 //     declares the keys on the model only (EnsureLockedModel).
 //   - Inside a transaction a save does no claim work. At commit the claims
 //     are computed from the transaction's final entities, so a swap, a chain
@@ -38,7 +38,6 @@ func runUniqueSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "PartialKeyAtCommit", testUniquePartialKeyAtCommit)
 	runSubtest(t, h, tracker, "SavepointRollbackRestoresClaim", testUniqueSavepointRollbackRestoresClaim)
 	runSubtest(t, h, tracker, "KeylessModelCommitsNoClaims", testUniqueKeylessModelCommitsNoClaims)
-	runSubtest(t, h, tracker, "KeysReadAtCommit/ModelLockedAfterBegin", testUniqueKeysReadAtCommitModelLockedAfterBegin)
 }
 
 // codeKey is the single-field unique key over $.code the cases declare.
@@ -168,26 +167,6 @@ func testUniqueKeysFromStoredModelTx(t *testing.T, h Harness) {
 	require.ErrorIs(t, err, spi.ErrUniqueViolation, "the commit must enforce the stored model's key")
 	f.requireAbsent(t, b, "a refused commit stores nothing")
 	f.requireCode(t, a, "x", "the holder is unchanged")
-}
-
-// The commit enforces the keys the model holds at commit, not as they were
-// when the transaction began: a model created and locked after the
-// transaction's first read, with an entity holding a value committed into it
-// elsewhere, refuses the transaction's duplicate of that value.
-func testUniqueKeysReadAtCommitModelLockedAfterBegin(t *testing.T, h Harness) {
-	f := newUniqueFixture(t, h)
-	const model = "m-unique-locked-after-begin"
-
-	e := newID()
-	err := f.tx(t, func(_ string, txCtx spiCtx, es spi.EntityStore) {
-		_, err := es.Get(txCtx, newID())
-		require.ErrorIs(t, err, spi.ErrNotFound, "a read in the transaction before the model exists")
-		EnsureLockedModel(t, h.Factory, f.ctx, uniqueRef(model), codeKey)
-		require.NoError(t, f.saveNonTx(t, model, newID(), codeOf("x")), "the holder, committed outside the transaction")
-		uniqueSave(t, txCtx, es, model, e, codeOf("x"))
-	})
-	require.ErrorIs(t, err, spi.ErrUniqueViolation, "the commit must enforce the keys the model holds at commit")
-	f.requireAbsent(t, e, "a refused commit stores nothing")
 }
 
 // A write outside a transaction enforces the keys of the stored model on its

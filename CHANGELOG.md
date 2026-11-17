@@ -76,25 +76,27 @@ MAINTAINING.md.
 
 - **Unique keys are computed at commit from the store's own model.** A
   store reads a model's unique keys from its stored model
-  (`ModelDescriptor.UniqueKeys`) when it enforces them; no caller passes
-  keys. A save inside a transaction does no claim work: at commit the
-  claims are computed from the transaction's final entities, from the bytes
-  each final save was given, so a swap of values, a chain of moves and a
-  claim before the holder's free all commit when the final state is unique.
-  A value two final entities claim, or one an entity outside the
-  transaction's writes holds, fails the commit with `ErrUniqueViolation`; a
-  partial composite key fails it with `ErrPartialUniqueKey`. A refused
-  commit stores nothing. A write outside a transaction does the same checks
-  on its own. The store does not check the model's state: the caller saves
-  entities only into a `LOCKED` model, and unlocks or deletes only a model
-  without entities (the `ModelStore` doc). The `UniqueKey` doc states the
-  rule. New conformance cases `Unique/*` (`KeysFromStoredModel/Tx`,
-  `KeysFromStoredModel/NonTx`, `SwapInTx`, `ChainInTx`,
-  `FreeAfterClaimInTx`, `SameValueTwiceInTx`, `PartialKeyAtCommit`,
-  `SavepointRollbackRestoresClaim`, `KeylessModelCommitsNoClaims`,
-  `KeysReadAtCommit/ModelLockedAfterBegin`) declare
-  keys on the model only; the spitest fixture `EnsureLockedModel` saves and
-  locks a model before a case writes entities of it.
+  (`ModelDescriptor.UniqueKeys`) at commit; no caller passes keys. A save
+  inside a transaction does no claim work: at commit the claims are
+  computed from the transaction's final entities, from the bytes each final
+  save was given, so a swap of values, a chain of moves and a claim before
+  the holder's free all commit when the final state is unique. A value two
+  final entities claim, or one an entity outside the transaction's writes
+  holds, fails the commit with `ErrUniqueViolation`; a partial composite
+  key fails it with `ErrPartialUniqueKey`. A refused commit stores nothing.
+  A write outside a transaction does the same checks on its own. The store
+  does not check the model's state: the caller saves entities only into a
+  `LOCKED` model, and unlocks or deletes only a model without entities (the
+  `ModelStore` doc), and changes a model's state or unique keys only while
+  no transaction that will write entities of that model is open: a commit
+  may enforce the keys as they were when its transaction began. The
+  `UniqueKey` doc states the rule. New conformance cases `Unique/*`
+  (`KeysFromStoredModel/Tx`, `KeysFromStoredModel/NonTx`, `SwapInTx`,
+  `ChainInTx`, `FreeAfterClaimInTx`, `SameValueTwiceInTx`,
+  `PartialKeyAtCommit`, `SavepointRollbackRestoresClaim`,
+  `KeylessModelCommitsNoClaims`) declare keys on the model only; the
+  spitest fixture `EnsureLockedModel` saves and locks a model before a case
+  writes entities of it.
 
 ### Added
 

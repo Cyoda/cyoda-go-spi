@@ -4,19 +4,22 @@ package spi
 // Fields are ordered dotted JSONPath leaves (same form as the schema's field paths).
 //
 // A store enforces the unique keys of an entity's model as its own model
-// store holds them (ModelDescriptor.UniqueKeys), read at the moment it
-// enforces them. No caller passes keys.
+// store holds them (ModelDescriptor.UniqueKeys), read at commit. No caller
+// passes keys.
+//
+// The caller changes a model's state or unique keys (save, lock, unlock)
+// only while no transaction that will write entities of that model is
+// open. A store may read the keys inside the committing transaction, so if
+// the caller breaks this, the commit of such a transaction may enforce the
+// keys as they were when it began.
 //
 // A transaction's claims are computed at commit, from its final entities:
 //
 //  1. The commit reads the unique keys of the model of every entity whose
 //     final write in the transaction is a save, one read per distinct
-//     model, as the model store holds them at commit: never from a snapshot
-//     taken when the transaction began, so a model locked or re-keyed after
-//     that is enforced with its current keys. The model's state is not
-//     checked: the caller saves entities only into a LOCKED model (see
-//     ModelStore). An entity whose final write is a delete needs no model
-//     read.
+//     model, from its stored model. The model's state is not checked: the
+//     caller saves entities only into a LOCKED model (see ModelStore). An
+//     entity whose final write is a delete needs no model read.
 //  2. It releases the claims of every entity the transaction wrote or
 //     deleted.
 //  3. It computes the claims of every entity whose final write is a save

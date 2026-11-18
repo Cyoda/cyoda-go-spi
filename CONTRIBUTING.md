@@ -10,7 +10,7 @@ cyoda-go-spi defines the stable storage-plugin contract that cyoda-go and third-
 
 ## Development workflow
 
-The development methodology (TDD, trunk-based development, verification gates) is documented in [cyoda-go/CONTRIBUTING.md](https://github.com/cyoda-platform/cyoda-go/blob/main/CONTRIBUTING.md). Follow the same process here — this is a sibling repo with the same conventions, not a separate project.
+The development methodology (TDD, trunk-based development, verification gates) is documented in [cyoda-go/CONTRIBUTING.md](https://github.com/cyoda/cyoda-go/blob/main/CONTRIBUTING.md). Follow the same process here — this is a sibling repo with the same conventions, not a separate project.
 
 Quick commands:
 

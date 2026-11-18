@@ -17,5 +17,5 @@ Maintainers will merge if the entry is well-formed.
 
 ## Current consumers
 
-- **cyoda-platform/cyoda-go** — in-tree storage plugins (memory, postgres, sqlite); claims compliance with v0.7.0+; contact @cyoda-platform maintainers via repo issues.
-- **cyoda-platform/cyoda-go-cassandra** — Cassandra storage plugin; claims compliance with v0.6.0+; contact @cyoda-platform maintainers via repo issues.
+- **cyoda/cyoda-go** — in-tree storage plugins (memory, postgres, sqlite); claims compliance with v0.7.0+; contact @cyoda maintainers via repo issues.
+- **cyoda/cyoda-go-cassandra** — Cassandra storage plugin; claims compliance with v0.6.0+; contact @cyoda maintainers via repo issues.

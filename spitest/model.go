@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	spi "github.com/cyoda-platform/cyoda-go-spi"
+	spi "github.com/cyoda/cyoda-go-spi"
 )
 
 func runModelSuite(t *testing.T, h Harness, tracker *skipTracker) {

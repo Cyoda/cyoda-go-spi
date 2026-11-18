@@ -84,7 +84,7 @@ jobs:
 ```
 
 If the nightly run goes red, please open an issue against
-[cyoda-go-spi](https://github.com/Cyoda-platform/cyoda-go-spi/issues)
+[cyoda-go-spi](https://github.com/cyoda/cyoda-go-spi/issues)
 referencing the failing commit and your plugin's import path.
 
 ## Registering your plugin

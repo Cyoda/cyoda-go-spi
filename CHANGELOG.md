@@ -14,6 +14,12 @@ MAINTAINING.md.
 
 ### Breaking
 
+- **The module path is `github.com/cyoda/cyoda-go-spi`.** It was
+  `github.com/cyoda-platform/cyoda-go-spi`, the GitHub organization's earlier
+  name, which GitHub no longer reserves: whoever registered it would serve new
+  versions of the old path. Change every import and `require` to the new
+  path. Versions published under the old path stay as they are.
+
 - **`WithUniqueKeys` and `UniqueKeysFromContext` are removed.** A storage
   plugin reads the unique keys of the model it is writing from its own
   stored model at commit; the caller no longer carries them on the context.

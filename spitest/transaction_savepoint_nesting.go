@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	spi "github.com/cyoda-platform/cyoda-go-spi"
+	spi "github.com/cyoda/cyoda-go-spi"
 )
 
 // savepointNesting is the fixture of the savepoint nesting cases: one open

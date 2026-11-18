@@ -6,7 +6,7 @@
 
 **Architecture:** `LIKE` stops being a regex. Its operand is parsed once at `Prepare` time into a token slice (literal / one-char / any-run) and matched by a greedy scan with a single backtrack point — no compile step, no failure mode except a trailing unpaired escape. `MATCHES_PATTERN` keeps `regexp`, but now requires the operand to compile **bare as well as anchored**, which closes an anchor-escape hole. Both hide behind one unexported `patternMatcher` interface so `compileLeafPattern` is the single derivation, exported for validators as `ValidateLeafPattern` / `ValidateConditionPatterns`.
 
-**Tech Stack:** Go 1.26.1, `github.com/cyoda-platform/cyoda-go-spi`, stdlib only (`regexp`, `regexp/syntax`, `unicode/utf8`), `testify/require` in tests.
+**Tech Stack:** Go 1.26.1, `github.com/cyoda/cyoda-go-spi`, stdlib only (`regexp`, `regexp/syntax`, `unicode/utf8`), `testify/require` in tests.
 
 **Spec:** `docs/superpowers/specs/2026-08-24-pattern-derivation-export-design.md` (commit `fdd8636`)
 
@@ -1072,7 +1072,7 @@ import (
 	"context"
 	"testing"
 
-	spi "github.com/cyoda-platform/cyoda-go-spi"
+	spi "github.com/cyoda/cyoda-go-spi"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1335,8 +1335,8 @@ Refs: Cyoda/cyoda-go-spi#38, #39, #40"
 
 Per `MAINTAINING.md:73-75`, both `KNOWN_CONSUMERS.md` entries get a pre-merge notification linked from the PR:
 
-- **cyoda-platform/cyoda-go** — already sequenced as steps 2 and 3 of Cyoda/cyoda-go#516. Link the PR on that issue.
-- **cyoda-platform/cyoda-go-cassandra** — already filed as Cyoda/cyoda-go-cassandra#94. Link the PR there.
+- **cyoda/cyoda-go** — already sequenced as steps 2 and 3 of Cyoda/cyoda-go#516. Link the PR on that issue.
+- **cyoda/cyoda-go-cassandra** — already filed as Cyoda/cyoda-go-cassandra#94. Link the PR there.
 
 Do not tag `v0.8.4`: per `MAINTAINING.md` it is cut once every milestone SPI change has merged, and spi#32 is still outstanding. cyoda-go stays on a pseudo-version pin.
 

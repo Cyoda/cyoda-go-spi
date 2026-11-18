@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	spi "github.com/cyoda-platform/cyoda-go-spi"
+	spi "github.com/cyoda/cyoda-go-spi"
 )
 
 // filter_not.go pins spi.FilterNot's universal-quantifier semantics and its

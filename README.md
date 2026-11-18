@@ -1,6 +1,6 @@
 # cyoda-go-spi
 
-Storage-plugin contract for [cyoda-go](https://github.com/cyoda-platform/cyoda-go).
+Storage-plugin contract for [cyoda-go](https://github.com/cyoda/cyoda-go).
 
 This module defines the interfaces and value types that any storage
 backend must implement. Plugin authors depend only on this module.
@@ -39,7 +39,7 @@ import (
     "testing"
     "time"
 
-    spitest "github.com/cyoda-platform/cyoda-go-spi/spitest"
+    spitest "github.com/cyoda/cyoda-go-spi/spitest"
     "github.com/your-org/myplugin"
 )
 

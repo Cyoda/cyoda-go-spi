@@ -1,4 +1,4 @@
-module github.com/cyoda-platform/cyoda-go-spi
+module github.com/cyoda/cyoda-go-spi
 
 go 1.27.2
 

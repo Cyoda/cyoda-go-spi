@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	spi "github.com/cyoda-platform/cyoda-go-spi"
+	spi "github.com/cyoda/cyoda-go-spi"
 )
 
 // TestPrepare_RejectsUnevaluableLeaf pins spec §4.3/§9: a leaf Prepare cannot

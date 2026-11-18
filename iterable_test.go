@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	spi "github.com/cyoda-platform/cyoda-go-spi"
+	spi "github.com/cyoda/cyoda-go-spi"
 )
 
 // TestIterableContract pins SPI field layout at SPI-consumer compile time.

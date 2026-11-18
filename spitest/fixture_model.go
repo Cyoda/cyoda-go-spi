@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	spi "github.com/cyoda-platform/cyoda-go-spi"
+	spi "github.com/cyoda/cyoda-go-spi"
 )
 
 // EnsureLockedModel makes sure the model at ref exists and is LOCKED in the

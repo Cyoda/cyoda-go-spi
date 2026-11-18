@@ -8,7 +8,7 @@ plugin to verify its compliance with a given SPI version.
 
 In your plugin's tests, import the relevant `spitest` subpackages and
 hand them a constructor that produces a fresh instance of your backend.
-See `cyoda-platform/cyoda-go/plugins/memory` for an idiomatic example.
+See `cyoda/cyoda-go/plugins/memory` for an idiomatic example.
 
 The harness covers the full SPI surface: entity persistence, audit,
 async search, scheduled tasks, transactions, workflow plugin contracts,
@@ -58,7 +58,7 @@ jobs:
 
       - uses: actions/checkout@v6.0.2
         with:
-          repository: cyoda-platform/cyoda-go-spi
+          repository: cyoda/cyoda-go-spi
           ref: main
           path: spi-head
 
@@ -69,7 +69,7 @@ jobs:
       - name: Replace SPI dep with HEAD
         working-directory: plugin
         run: |
-          go mod edit -replace github.com/cyoda-platform/cyoda-go-spi=../spi-head
+          go mod edit -replace github.com/cyoda/cyoda-go-spi=../spi-head
           go mod tidy
 
       - name: Run spitest against your backend
@@ -79,12 +79,12 @@ jobs:
       - name: Restore go.mod (in case the job continues)
         working-directory: plugin
         run: |
-          go mod edit -dropreplace github.com/cyoda-platform/cyoda-go-spi
+          go mod edit -dropreplace github.com/cyoda/cyoda-go-spi
           go mod tidy
 ```
 
 If the nightly run goes red, please open an issue against
-[cyoda-go-spi](https://github.com/Cyoda-platform/cyoda-go-spi/issues)
+[cyoda-go-spi](https://github.com/cyoda/cyoda-go-spi/issues)
 referencing the failing commit and your plugin's import path.
 
 ## Registering your plugin

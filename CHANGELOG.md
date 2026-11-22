@@ -10,9 +10,19 @@ For the rationale behind the absence of CHANGELOG entries before v0.7.1,
 see the [Fixing forward](MAINTAINING.md#fixing-forward) section of
 MAINTAINING.md.
 
-## [Unreleased]
+## [0.9.0] - 2026-11-22
 
 ### Breaking
+
+- **The state machine event id is the store's, and a version number is never
+  reused.** `StateMachineAuditStore.Record` assigns a new time-based UUID
+  (version 1) to every event and ignores any `TimeUUID` the caller set;
+  `GetEvents` and `GetEventsByTransaction` return that id, the same value on
+  every read. A store that cannot assign an id fails `Record` rather than
+  record the event without one. A save after a committed delete takes the
+  next version number after the tombstone's, so an entity id and a version
+  name exactly one history row. Conformance: `Audit/EventID` and
+  `Entity/GetVersionMetadata/RecreateAfterDelete`.
 
 - **The module path is `github.com/cyoda/cyoda-go-spi`.** It was
   `github.com/cyoda-platform/cyoda-go-spi`, the GitHub organization's earlier

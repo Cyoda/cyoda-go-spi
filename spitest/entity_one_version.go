@@ -36,6 +36,7 @@ func runOneVersionSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "OneVersionPerTx/SaveSaveDeleteSave", testOneVersionSaveSaveDeleteSave)
 	runSubtest(t, h, tracker, "OneVersionPerTx/VersionNumberIsPreviousPlusOne", testOneVersionVersionNumber)
 	runSubtest(t, h, tracker, "OneVersionPerTx/AttributionIsLastWrite", testOneVersionAttribution)
+	runSubtest(t, h, tracker, "OneVersionPerTx/TransitionIsLastWrite", testOneVersionTransitionIsLastWrite)
 	runSubtest(t, h, tracker, "OneVersionPerTx/SavepointRestoresReplacedPending", testOneVersionSavepointRestoresReplaced)
 	runSubtest(t, h, tracker, "OneVersionPerTx/SavepointRestoresPendingReplacedByDelete", testOneVersionSavepointRestoresReplacedByDelete)
 	runSubtest(t, h, tracker, "OneVersionPerTx/SavepointRestoresNoPending", testOneVersionSavepointRestoresNone)
@@ -320,6 +321,22 @@ func testOneVersionAttribution(t *testing.T, h Harness) {
 	require.Equal(t, lastAttr.ID, got.User, "the tombstone's user is the deleting caller's attribution")
 	require.Equal(t, lastAttr.Kind, got.AttributedKind, "the tombstone's attributed kind is the deleting caller's attribution")
 	require.Equal(t, lastExec, got.Executor, "the tombstone's executor is the deleting caller")
+}
+
+// The one version carries the last save's transition: two saves of one entity
+// in one transaction, "submit" then "loopback", commit one version stamped
+// "loopback".
+func testOneVersionTransitionIsLastWrite(t *testing.T, h Harness) {
+	o := newOneVersion(t, h)
+	id := newID()
+	txID := o.tx(t, func(_ string, txCtx spiCtx, es spi.EntityStore) {
+		for i, tr := range []string{"submit", "loopback"} {
+			_, err := es.Save(txCtx, newEntityWithTransition(t, oneVersionModel, id, tr, map[string]any{"v": i}))
+			require.NoError(t, err)
+		}
+	})
+	got := o.requireOneVersion(t, id, txID, "CREATED", "save with submit, save with loopback")
+	require.Equal(t, "loopback", got.Transition, "the version's transition is the last save's")
 }
 
 // save v1, savepoint, save v2, rollback to the savepoint: the commit records

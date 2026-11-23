@@ -57,6 +57,8 @@ func runEntitySuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "GetAsAt/BeforeAnyWrite", testEntityGetAsAtBefore)
 	runSubtest(t, h, tracker, "GetAsAt/CommittedOnlyInTx", testEntityGetAsAtCommittedOnlyInTx)
 	runSubtest(t, h, tracker, "GetVersionMetadata/Ordering", testEntityVersionMetadataOrdering)
+	runSubtest(t, h, tracker, "GetVersionMetadata/TransitionPerVersion", testEntityVersionMetadataTransitionPerVersion)
+	runSubtest(t, h, tracker, "GetVersionMetadata/TombstoneTransitionEmpty", testEntityVersionMetadataTombstoneTransitionEmpty)
 	runSubtest(t, h, tracker, "GetVersionMetadata/RecreateAfterDelete", testEntityVersionMetadataRecreateAfterDelete)
 	runSubtest(t, h, tracker, "GetVersionMetadata/EmptyWindowIsNotAnError", testEntityGetVersionMetadataEmptyWindowIsNotAnError)
 	runSubtest(t, h, tracker, "GetVersionMetadata/LimitCaps", testEntityGetVersionMetadataLimitCaps)
@@ -2938,4 +2940,139 @@ func mustEntityStore(t *testing.T, h Harness, ctx spiCtx) spi.EntityStore {
 	es, err := h.Factory.EntityStore(ctx)
 	require.NoError(t, err)
 	return es
+}
+
+// newEntityWithTransition is newEntity carrying the transition the save is
+// stamped with.
+func newEntityWithTransition(t *testing.T, modelName, id, transition string, payload map[string]any) *spi.Entity {
+	t.Helper()
+	e := newEntity(t, modelName, id, payload)
+	e.Meta.TransitionForLatestSave = transition
+	return e
+}
+
+// testEntityVersionMetadataTransitionPerVersion saves one entity in three
+// transactions with three different transitions and asserts each version
+// reports the transition it was saved with, newest first.
+func testEntityVersionMetadataTransitionPerVersion(t *testing.T, h Harness) {
+	ctx := tenantContext(h.NewTenant())
+	EnsureLockedModel(t, h.Factory, ctx, spi.ModelRef{EntityName: "m-hist-tr", ModelVersion: "1"})
+	id := newID()
+	for i, tr := range []string{"loopback", "submit", "approve"} {
+		withTx(t, h, ctx, func(txCtx context.Context) {
+			es, err := h.Factory.EntityStore(txCtx)
+			require.NoError(t, err)
+			_, err = es.Save(txCtx, newEntityWithTransition(t, "m-hist-tr", id, tr, map[string]any{"v": i}))
+			require.NoError(t, err)
+		})
+		h.AdvanceClock(1 * time.Millisecond)
+	}
+	es, err := h.Factory.EntityStore(ctx)
+	require.NoError(t, err)
+	metas, err := es.GetVersionMetadata(ctx, id, spi.VersionMetadataOptions{})
+	require.NoError(t, err)
+	require.Len(t, metas, 3)
+	require.Equal(t, "approve", metas[0].Transition, "the newest version carries the last save's transition")
+	require.Equal(t, "submit", metas[1].Transition)
+	require.Equal(t, "loopback", metas[2].Transition, "the oldest version carries the first save's transition")
+}
+
+// testEntityVersionMetadataTombstoneTransitionEmpty asserts a DELETED
+// tombstone reports an empty Transition however it was produced, and that
+// the version before it keeps the transition it was saved with.
+func testEntityVersionMetadataTombstoneTransitionEmpty(t *testing.T, h Harness) {
+	const model = "m-hist-tomb"
+	mref := spi.ModelRef{EntityName: model, ModelVersion: "1"}
+
+	// seed commits a first version saved with "submit" and returns its id.
+	seed := func(t *testing.T, ctx context.Context) string {
+		t.Helper()
+		id := newID()
+		withTx(t, h, ctx, func(txCtx context.Context) {
+			es, err := h.Factory.EntityStore(txCtx)
+			require.NoError(t, err)
+			_, err = es.Save(txCtx, newEntityWithTransition(t, model, id, "submit", map[string]any{"v": 1}))
+			require.NoError(t, err)
+		})
+		h.AdvanceClock(1 * time.Millisecond)
+		return id
+	}
+	// requireTombstoneEmpty asserts the newest version is the tombstone with
+	// an empty Transition and, when wantPrior, the one before it is "submit".
+	requireTombstoneEmpty := func(t *testing.T, ctx context.Context, id string, wantPrior bool) {
+		t.Helper()
+		es, err := h.Factory.EntityStore(ctx)
+		require.NoError(t, err)
+		metas, err := es.GetVersionMetadata(ctx, id, spi.VersionMetadataOptions{})
+		require.NoError(t, err)
+		require.NotEmpty(t, metas)
+		require.True(t, metas[0].Deleted, "the newest version is the tombstone")
+		for _, m := range metas {
+			if m.Deleted {
+				require.Empty(t, m.Transition, "a tombstone carries no transition")
+			}
+		}
+		if wantPrior {
+			require.Len(t, metas, 2)
+			require.Equal(t, "submit", metas[1].Transition, "the version before the tombstone keeps its transition")
+		}
+	}
+
+	t.Run("DeleteOutsideTransaction", func(t *testing.T) {
+		ctx := tenantContext(h.NewTenant())
+		EnsureLockedModel(t, h.Factory, ctx, mref)
+		id := seed(t, ctx)
+		es, err := h.Factory.EntityStore(ctx)
+		require.NoError(t, err)
+		require.NoError(t, es.Delete(ctx, id))
+		requireTombstoneEmpty(t, ctx, id, true)
+	})
+	t.Run("DeleteInOwnTransaction", func(t *testing.T) {
+		ctx := tenantContext(h.NewTenant())
+		EnsureLockedModel(t, h.Factory, ctx, mref)
+		id := seed(t, ctx)
+		withTx(t, h, ctx, func(txCtx context.Context) {
+			es, err := h.Factory.EntityStore(txCtx)
+			require.NoError(t, err)
+			require.NoError(t, es.Delete(txCtx, id))
+		})
+		requireTombstoneEmpty(t, ctx, id, true)
+	})
+	t.Run("SaveThenDeleteInOneTransaction", func(t *testing.T) {
+		ctx := tenantContext(h.NewTenant())
+		EnsureLockedModel(t, h.Factory, ctx, mref)
+		id := seed(t, ctx)
+		withTx(t, h, ctx, func(txCtx context.Context) {
+			es, err := h.Factory.EntityStore(txCtx)
+			require.NoError(t, err)
+			_, err = es.Save(txCtx, newEntityWithTransition(t, model, id, "submit", map[string]any{"v": 2}))
+			require.NoError(t, err)
+			require.NoError(t, es.Delete(txCtx, id))
+		})
+		requireTombstoneEmpty(t, ctx, id, true)
+	})
+	t.Run("CreateThenDeleteInOneTransaction", func(t *testing.T) {
+		ctx := tenantContext(h.NewTenant())
+		EnsureLockedModel(t, h.Factory, ctx, mref)
+		id := newID()
+		withTx(t, h, ctx, func(txCtx context.Context) {
+			es, err := h.Factory.EntityStore(txCtx)
+			require.NoError(t, err)
+			_, err = es.Save(txCtx, newEntityWithTransition(t, model, id, "submit", map[string]any{"v": 1}))
+			require.NoError(t, err)
+			require.NoError(t, es.Delete(txCtx, id))
+		})
+		requireTombstoneEmpty(t, ctx, id, false)
+	})
+	t.Run("DeleteAll", func(t *testing.T) {
+		ctx := tenantContext(h.NewTenant())
+		EnsureLockedModel(t, h.Factory, ctx, mref)
+		id := seed(t, ctx)
+		withTx(t, h, ctx, func(txCtx context.Context) {
+			es, err := h.Factory.EntityStore(txCtx)
+			require.NoError(t, err)
+			require.NoError(t, es.DeleteAll(txCtx, mref))
+		})
+		requireTombstoneEmpty(t, ctx, id, true)
+	})
 }

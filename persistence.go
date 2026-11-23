@@ -521,6 +521,9 @@ type EntityStore interface {
 	// Deleted is true only on the DELETED tombstone row, and Version is
 	// populated on every returned row, including the tombstone.
 	//
+	// Transition is the TransitionForLatestSave each version was saved
+	// with, and is empty on the DELETED tombstone row.
+	//
 	// It reads committed versions only, inside a transaction too: a
 	// transaction's own uncommitted versions are never listed.
 	GetVersionMetadata(ctx context.Context, entityID string, opts VersionMetadataOptions) ([]EntityVersionMeta, error)

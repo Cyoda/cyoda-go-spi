@@ -102,6 +102,9 @@ type EntityVersionMeta struct {
 	// Deleted is canonical: derived from ChangeType == "DELETED", not a
 	// separately-stamped flag. True only on the tombstone row.
 	Deleted bool
+	// Transition is the TransitionForLatestSave the version was saved with;
+	// empty for a DELETED tombstone.
+	Transition string
 }
 
 // ModelState represents the lifecycle state of an entity model.

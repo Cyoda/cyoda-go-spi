@@ -12,11 +12,16 @@ MAINTAINING.md.
 
 ## [Unreleased]
 
-### Added
+### Breaking
 
 - **`EntityVersionMeta.Transition`.** `EntityStore.GetVersionMetadata` returns
   the `TransitionForLatestSave` each version was saved with, and an empty
-  value on a DELETED tombstone. Conformance:
+  value on a DELETED tombstone. Migration: an implementor keeps the transition
+  name per version (not only for the latest), returns it from
+  `GetVersionMetadata`, and stores none on a tombstone; the last save of an
+  entity in a transaction gives the version's value. Breaking because the new
+  conformance cases fail on an implementor that does not return it (notified:
+  cyoda/cyoda-go-cassandra#124). Conformance:
   `Entity/GetVersionMetadata/TransitionPerVersion`,
   `Entity/GetVersionMetadata/TombstoneTransitionEmpty` and
   `Entity/OneVersionPerTx/TransitionIsLastWrite`.

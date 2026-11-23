@@ -64,8 +64,9 @@ evolves:
 
 - Both minor and patch releases may add to the public surface. New methods,
   types, or options can ship in either.
-- Breaking changes are permitted in **any** pre-1.0 release, minor or patch,
-  iff:
+- A breaking change ships in a **minor** release, never in a patch. A change
+  is breaking when it breaks an interface, or when it adds a conformance
+  (`spitest`) case that an existing implementor fails. It is permitted iff:
   - The change is called out in `CHANGELOG.md` under `### Breaking` with
     explicit migration notes.
   - Where feasible, deprecated symbols carry `// Deprecated: <reason>`
@@ -73,9 +74,9 @@ evolves:
   - Each consumer listed in `KNOWN_CONSUMERS.md` has been notified
     before the breaking PR is merged. The notification is linked from
     the PR description.
-- The version component is therefore not a breakage signal pre-1.0 — the
-  `### Breaking` changelog section is. Consumers must read it on every bump
-  rather than inferring safety from the number.
+- The minor component is therefore the breakage signal pre-1.0, and the
+  `### Breaking` changelog section says what broke. `v0.8.3` and `v0.8.4`
+  shipped breaking changes as patches, before this rule.
 
 **Post-1.0:**
 

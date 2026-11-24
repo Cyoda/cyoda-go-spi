@@ -10,6 +10,16 @@ For the rationale behind the absence of CHANGELOG entries before v0.7.1,
 see the [Fixing forward](MAINTAINING.md#fixing-forward) section of
 MAINTAINING.md.
 
+## [Unreleased]
+
+### Fixed
+
+- **`TransactionCoordinator` no longer marks scopes rollback-only.**
+  `DiscardScope(ctx)` drops `failedCode`; `ErrTxRollbackOnly` and
+  `RollbackOnlyError` are removed; the `Coordination/RollbackOnly*` cases are
+  gone. A coordinator must make `Seal` fail after any `DiscardScope` that
+  returned an error.
+
 ## [0.9.0] - 2026-11-22
 
 ### Breaking

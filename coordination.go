@@ -96,8 +96,9 @@ type TransactionCoordinator interface {
 	// Nested callouts on another node. Nothing cancels a nested callout
 	// running on another node when its enclosing scope is superseded. The
 	// owner's loop for that nested callout calls CheckScope on its enclosing
-	// scope before each try and each hand-over, and stops when it fails. A try already in progress runs until it is answered or
-	// reaches its time limit; its scope cannot complete either way.
+	// scope before each try and each hand-over, and stops when it fails. A
+	// try already in progress runs until it is answered or reaches its time
+	// limit; its scope cannot complete either way.
 	BeginCallout(ctx context.Context, txID, calloutID string, outer []CalloutPair) error
 
 	// AdvanceCallout raises the callout's major to major, with minor 0.

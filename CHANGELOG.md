@@ -20,6 +20,15 @@ MAINTAINING.md.
   gone. A coordinator must make `Seal` fail after any `DiscardScope` that
   returned an error.
 
+- **`DiscardScope` of a completed scope refuses, and `Seal` then fails.** A
+  caller that cannot tell whether its `CompleteScope` applied discards the
+  scope; a coordinator that accepted that discard as a no-op would commit
+  writes the caller reported as failed. Conformance:
+  `Coordination/DiscardAfterCompleteFailsSeal`, and
+  `Coordination/DiscardLeavesParentUsable` for a discard that succeeds (the
+  parent still completes, a later scope opens and completes, `Seal`
+  succeeds).
+
 ## [0.9.0] - 2026-11-22
 
 ### Breaking

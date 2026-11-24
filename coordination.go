@@ -83,6 +83,13 @@ type CalloutPair struct {
 // the transaction. For example, it keeps the scope unresolved so that Seal
 // fails, or Seal waits until the scope's lease expires and then fails.
 //
+// DiscardScope of a scope that completed is such a discard: it returns an
+// error, so the transaction cannot commit. A caller whose CompleteScope
+// returned an error other than ErrCalloutSuperseded or ErrScopeConflict
+// cannot tell whether the completion applied, and discards the scope. When
+// the completion did apply, the refused discard fails the transaction, so the
+// scope's writes never commit after the caller reported them as failed.
+//
 // # Concurrency
 //
 // Every method may be called concurrently, from any number of goroutines and
@@ -157,8 +164,10 @@ type TransactionCoordinator interface {
 	// obligation: Seal of the transaction must still fail (see "A discard that
 	// fails" on TransactionCoordinator).
 	//
-	// The caller does not call DiscardScope after a successful CompleteScope
-	// of the same scope; a coordinator may refuse such a call.
+	// DiscardScope of a scope that completed refuses with an error and
+	// removes nothing. Seal of the transaction then fails, as after every
+	// DiscardScope error (see "A discard that fails" on
+	// TransactionCoordinator).
 	DiscardScope(ctx context.Context) error
 
 	// Seal is the owner's cut-off before commit or rollback. It fails after a

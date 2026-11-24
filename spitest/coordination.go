@@ -43,6 +43,8 @@ func runCoordinationSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "DiscardAfterRefusedComplete", with(testCoordDiscardAfterRefusedComplete))
 	runSubtest(t, h, tracker, "SealCutsOff", with(testCoordSealCutsOff))
 	runSubtest(t, h, tracker, "ScopeConflict", with(testCoordScopeConflict))
+	runSubtest(t, h, tracker, "DiscardLeavesParentUsable", with(testCoordDiscardLeavesParentUsable))
+	runSubtest(t, h, tracker, "DiscardAfterCompleteFailsSeal", with(testCoordDiscardAfterCompleteFailsSeal))
 }
 
 const coordModel = "m-coord"
@@ -378,7 +380,7 @@ func testCoordDiscardAfterRefusedComplete(t *testing.T, h Harness, co spi.Transa
 	})
 }
 
-// Contract 8. After Seal, OpenScope and CompleteScope both refuse with
+// Contract 7. After Seal, OpenScope and CompleteScope both refuse with
 // ErrCalloutSuperseded, while the callout is still current. Commit then
 // commits the root and every scope completed before Seal.
 func testCoordSealCutsOff(t *testing.T, h Harness, co spi.TransactionCoordinator) {
@@ -427,6 +429,55 @@ func testCoordScopeConflict(t *testing.T, h Harness, co spi.TransactionCoordinat
 	require.NoError(t, err)
 	require.Equal(t, "s1", entityDataString(t, got, "by"),
 		"the completed scope's write must commit and the conflicting one must be discarded")
+}
+
+// Contract 8. A discarded scope leaves its parent usable: the parent still
+// completes, a later scope under the same callout opens and completes, and
+// Seal succeeds. Only the discarded scope's writes are lost.
+func testCoordDiscardLeavesParentUsable(t *testing.T, h Harness, co spi.TransactionCoordinator) {
+	f := newCoordFixture(t, h, co)
+	root := f.save(t, f.txCtx)
+	p, err := f.co.OpenChildScope(f.txCtx)
+	require.NoError(t, err)
+	c := f.callout(t, p)
+
+	s1 := f.open(t, pair(c, 1, 0))
+	w1 := f.save(t, s1)
+	require.NoError(t, f.co.DiscardScope(s1))
+
+	s2, err := f.tryOpen(t, pair(c, 1, 0))
+	require.NoError(t, err, "a scope must open under the parent of a discarded scope")
+	w2 := f.save(t, s2)
+	require.NoError(t, f.co.CompleteScope(s2),
+		"a scope must complete under the parent of a discarded scope")
+	require.NoError(t, f.co.EndCallout(p, f.txID, c))
+	require.NoError(t, f.co.CompleteScope(p),
+		"the parent of a discarded scope must still complete")
+
+	f.sealAndCommit(t)
+	f.requireExists(t, root, "the root's own write must commit")
+	f.requireAbsent(t, w1, "a discarded scope's write must not commit")
+	f.requireExists(t, w2, "a later completed scope's write must commit")
+}
+
+// Contract 8. DiscardScope of a scope that completed refuses with an error,
+// and Seal then fails, as after every DiscardScope error: the completed
+// scope's writes never commit once a caller has asked to discard them.
+func testCoordDiscardAfterCompleteFailsSeal(t *testing.T, h Harness, co spi.TransactionCoordinator) {
+	f := newCoordFixture(t, h, co)
+	c := f.callout(t, f.txCtx)
+
+	s := f.open(t, pair(c, 1, 0))
+	w := f.save(t, s)
+	require.NoError(t, f.co.CompleteScope(s))
+	require.Error(t, f.co.DiscardScope(s),
+		"DiscardScope of a scope that completed must refuse")
+	require.NoError(t, f.co.EndCallout(f.txCtx, f.txID, c))
+
+	require.Error(t, f.co.Seal(f.txCtx, f.txID),
+		"Seal must fail after a DiscardScope that returned an error")
+	require.NoError(t, f.tm.Rollback(f.txCtx, f.txID))
+	f.requireAbsent(t, w, "a completed scope whose discard was refused must not commit")
 }
 
 // seedCoordEntity commits an entity for the tenant on ctx in a transaction of

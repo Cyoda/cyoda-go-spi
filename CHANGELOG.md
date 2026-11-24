@@ -12,7 +12,14 @@ MAINTAINING.md.
 
 ## [Unreleased]
 
-### Fixed
+### Breaking
+
+Migration for a `TransactionCoordinator` implementation: drop the
+`failedCode` parameter of `DiscardScope` and every rollback-only mark; make
+`DiscardScope` of a completed scope return an error; make `Seal` fail after any
+`DiscardScope` of the transaction that returned an error. Notified:
+cyoda/cyoda-go (cyoda/cyoda-go#738) and cyoda/cyoda-go-cassandra
+(cyoda/cyoda-go-cassandra#121).
 
 - **`TransactionCoordinator` no longer marks scopes rollback-only.**
   `DiscardScope(ctx)` drops `failedCode`; `ErrTxRollbackOnly` and

@@ -22,13 +22,7 @@ go test -race ./...        # race detector
 
 ## Stability policy
 
-cyoda-go-spi follows semver.
-
-- **Patch** (`v0.2.1`): internal refactor, bug fix in a helper, documentation.
-- **Minor** (`v0.3.0`): new method on an interface with a default implementation, new optional interface, new exported constants or types. Backwards-compatible for existing plugins.
-- **Breaking** (`v1.0.0`, etc.): anything that existing plugins need to change to remain compliant. Requires a coordinated release — we notify known consumers (currently `cyoda-go/plugins/{memory,postgres}` and `cyoda-go-cassandra`) and bump them at the same time.
-
-Pre-1.0 (where we are now), minor versions can contain breaking changes, but we avoid them — the set of consumers is small enough that coordinated bumps are cheap.
+Pre-1.0, a breaking change ships in a minor, and additive changes ship in a minor or a patch. See [MAINTAINING.md](MAINTAINING.md#deprecation-policy).
 
 ## Reporting vulnerabilities
 

@@ -317,9 +317,14 @@ func (r *savepointRace) writeTarget(t *testing.T) {
 // and that nothing it wrote became visible.
 func (r *savepointRace) requireCommitConflict(t *testing.T, h Harness) {
 	t.Helper()
-	err := r.tm.Commit(r.txCtx, r.txID)
-	require.ErrorIs(t, err, spi.ErrConflict,
+	r.requireCommitConflictMsg(t, h,
 		"a write that lost a race stays lost when a savepoint rollback discards it: Commit must refuse the transaction")
+}
+
+func (r *savepointRace) requireCommitConflictMsg(t *testing.T, h Harness, msg string) {
+	t.Helper()
+	err := r.tm.Commit(r.txCtx, r.txID)
+	require.ErrorIs(t, err, spi.ErrConflict, msg)
 	out, err := h.Factory.EntityStore(r.ctx)
 	require.NoError(t, err)
 	_, err = out.Get(r.ctx, r.pre)
@@ -415,7 +420,8 @@ func testTxSavepointReadKeptWithoutRollback(t *testing.T, h Harness) {
 	_, err = r.es.Get(r.txCtx, r.target)
 	require.NoError(t, err)
 	r.rivalCommit(t, h)
-	r.requireCommitConflict(t, h)
+	r.requireCommitConflictMsg(t, h,
+		"a read made in the transaction and changed by a concurrent commit must make Commit fail with ErrConflict")
 }
 
 // The lost write sits in an inner savepoint. Rolling back the inner one and

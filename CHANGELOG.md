@@ -10,7 +10,7 @@ For the rationale behind the absence of CHANGELOG entries before v0.7.1,
 see the [Fixing forward](MAINTAINING.md#fixing-forward) section of
 MAINTAINING.md.
 
-## [Unreleased]
+## [0.9.1] - 2026-11-24
 
 ### Breaking
 

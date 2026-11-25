@@ -11,5 +11,5 @@ require (
 require (
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.12.1
-	github.com/tidwall/gjson v1.20.5
+	github.com/tidwall/gjson v1.20.6
 )

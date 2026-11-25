@@ -44,6 +44,8 @@ func runTransactionSuite(t *testing.T, h Harness, tracker *skipTracker) {
 	runSubtest(t, h, tracker, "Savepoint/RollbackKeepsLostWriteRace", testTxSavepointRollbackKeepsLostRace)
 	runSubtest(t, h, tracker, "Savepoint/RollbackDiscardedWriteNoRival", testTxSavepointRollbackDiscardedNoRival)
 	runSubtest(t, h, tracker, "Savepoint/RollbackDiscardedWriteRivalAfter", testTxSavepointRollbackDiscardedRivalAfter)
+	runSubtest(t, h, tracker, "Savepoint/RollbackDropsReads", testTxSavepointRollbackDropsReads)
+	runSubtest(t, h, tracker, "Savepoint/ReadKeptWithoutRollback", testTxSavepointReadKeptWithoutRollback)
 	runSubtest(t, h, tracker, "Savepoint/NestedRollbacksKeepLostWriteRace", testTxSavepointNestedRollbacksKeepLostRace)
 	runSubtest(t, h, tracker, "Savepoint/ReleasedThenRolledBackKeepsLostWriteRace", testTxSavepointReleasedThenRolledBackKeepsLostRace)
 	runSubtest(t, h, tracker, "Savepoint/RollbackDropsLaterSavepoints", testTxSavepointRollbackDropsLater)
@@ -315,9 +317,14 @@ func (r *savepointRace) writeTarget(t *testing.T) {
 // and that nothing it wrote became visible.
 func (r *savepointRace) requireCommitConflict(t *testing.T, h Harness) {
 	t.Helper()
-	err := r.tm.Commit(r.txCtx, r.txID)
-	require.ErrorIs(t, err, spi.ErrConflict,
+	r.requireCommitConflictMsg(t, h,
 		"a write that lost a race stays lost when a savepoint rollback discards it: Commit must refuse the transaction")
+}
+
+func (r *savepointRace) requireCommitConflictMsg(t *testing.T, h Harness, msg string) {
+	t.Helper()
+	err := r.tm.Commit(r.txCtx, r.txID)
+	require.ErrorIs(t, err, spi.ErrConflict, msg)
 	out, err := h.Factory.EntityStore(r.ctx)
 	require.NoError(t, err)
 	_, err = out.Get(r.ctx, r.pre)
@@ -379,6 +386,42 @@ func testTxSavepointRollbackDiscardedRivalAfter(t *testing.T, h Harness) {
 	require.NoError(t, r.tm.RollbackToSavepoint(r.txCtx, r.txID, sp))
 	r.rivalCommit(t, h)
 	r.requireCommitApplies(t, h, `{"v":"rival"}`)
+}
+
+// The transaction reads the target inside a savepoint and rolls the savepoint
+// back; a rival then commits the target. The rollback discarded the read, so
+// Commit does not validate it and applies the transaction.
+func testTxSavepointRollbackDropsReads(t *testing.T, h Harness) {
+	r := newSavepointRace(t, h)
+	sp, err := r.tm.Savepoint(r.txCtx, r.txID)
+	require.NoError(t, err)
+	_, err = r.es.Get(r.txCtx, r.target)
+	require.NoError(t, err)
+	require.NoError(t, r.tm.RollbackToSavepoint(r.txCtx, r.txID, sp))
+	r.rivalCommit(t, h)
+	require.NoError(t, r.tm.Commit(r.txCtx, r.txID),
+		"a read discarded by a savepoint rollback must not make Commit conflict")
+	out, err := h.Factory.EntityStore(r.ctx)
+	require.NoError(t, err)
+	_, err = out.Get(r.ctx, r.pre)
+	require.NoError(t, err, "the pre-savepoint write must commit")
+	got, err := out.Get(r.ctx, r.target)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"v":"rival"}`, string(got.Data), "the rival's committed write must stand")
+}
+
+// Control for RollbackDropsReads: the same read inside a savepoint that is not
+// rolled back stays in the read set, and Commit refuses the transaction with
+// ErrConflict.
+func testTxSavepointReadKeptWithoutRollback(t *testing.T, h Harness) {
+	r := newSavepointRace(t, h)
+	_, err := r.tm.Savepoint(r.txCtx, r.txID)
+	require.NoError(t, err)
+	_, err = r.es.Get(r.txCtx, r.target)
+	require.NoError(t, err)
+	r.rivalCommit(t, h)
+	r.requireCommitConflictMsg(t, h,
+		"a read made in the transaction and changed by a concurrent commit must make Commit fail with ErrConflict")
 }
 
 // The lost write sits in an inner savepoint. Rolling back the inner one and

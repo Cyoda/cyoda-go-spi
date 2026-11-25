@@ -36,6 +36,15 @@ cyoda/cyoda-go (cyoda/cyoda-go#738) and cyoda/cyoda-go-cassandra
   parent still completes, a later scope opens and completes, `Seal`
   succeeds).
 
+- **A scope's reads follow its writes** (doc only): `CompleteScope` makes
+  them part of the parent's read set; `DiscardScope` removes them, so the
+  commit does not validate them.
+
+- **`RollbackToSavepoint` drops the reads made since the savepoint**, so
+  `Commit` does not validate them. Conformance: `Savepoint/RollbackDropsReads`
+  fails a backend that keeps them; `Savepoint/ReadKeptWithoutRollback` is its
+  control.
+
 ## [0.9.0] - 2026-11-22
 
 ### Breaking

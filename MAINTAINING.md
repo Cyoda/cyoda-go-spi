@@ -77,6 +77,9 @@ evolves:
 - The minor component is therefore the breakage signal pre-1.0, and the
   `### Breaking` changelog section says what broke. `v0.8.3` and `v0.8.4`
   shipped breaking changes as patches, before this rule.
+- `v0.9.1` is a breaking patch, as an exception: it backs out the
+  rollback-only mark that `v0.9.0` added to `TransactionCoordinator` (a bug
+  fix) and adds the conformance cases its `### Breaking` section lists.
 
 **Post-1.0:**
 

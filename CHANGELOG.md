@@ -26,6 +26,10 @@ MAINTAINING.md.
   `Entity/GetVersionMetadata/TombstoneTransitionEmpty` and
   `Entity/OneVersionPerTx/TransitionIsLastWrite`.
 
+## [0.9.1] - 2026-11-24
+
+### Breaking
+
 Migration for a `TransactionCoordinator` implementation: drop the
 `failedCode` parameter of `DiscardScope` and every rollback-only mark; make
 `DiscardScope` of a completed scope return an error; make `Seal` fail after any

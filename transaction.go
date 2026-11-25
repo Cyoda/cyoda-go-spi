@@ -148,8 +148,8 @@ type TransactionManager interface {
 	// or task row after this transaction's snapshot and before the rollback
 	// — makes Commit refuse the transaction with ErrConflict. A commit to
 	// that entity or task row after the rollback does not, because the
-	// transaction no longer writes it. Read-set entries the rollback
-	// discards are dropped.
+	// transaction no longer writes it. Reads made since the savepoint are
+	// discarded with it: Commit does not validate them.
 	//
 	// Locking discipline, for such an implementation: write on tx state —
 	// exclusive against every other tx-path op. It must acquire

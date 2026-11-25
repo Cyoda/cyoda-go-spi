@@ -64,6 +64,11 @@ type CalloutPair struct {
 // discard of the parent, or of any ancestor, removes them. DiscardScope
 // removes the scope's writes and those of every scope under it.
 //
+// The same holds for the scope's reads. CompleteScope makes them part of its
+// parent's read set, so the commit validates them. DiscardScope removes them
+// from the transaction's read set with the scope's writes, so the commit does
+// not validate them.
+//
 // # Visibility
 //
 // A completed scope's writes are visible to later reads of its parent and of
@@ -141,8 +146,8 @@ type TransactionCoordinator interface {
 	// CompleteScope would, without completing it.
 	CheckScope(ctx context.Context) error
 
-	// CompleteScope makes the writes of the scope on ctx part of its parent.
-	// It refuses, in this order:
+	// CompleteScope makes the writes of the scope on ctx part of its parent,
+	// and its reads part of its parent's read set. It refuses, in this order:
 	//
 	//   - ErrCalloutSuperseded when a pair of the scope is not current, or
 	//     the transaction is sealed;
@@ -153,7 +158,8 @@ type TransactionCoordinator interface {
 	CompleteScope(ctx context.Context) error
 
 	// DiscardScope removes the writes of the scope on ctx and those of every
-	// scope under it.
+	// scope under it. It removes their reads from the transaction's read set
+	// too, so the commit does not validate them.
 	//
 	// DiscardScope of a scope whose completion was refused is allowed. The
 	// refused completion has already discarded the scope, so DiscardScope

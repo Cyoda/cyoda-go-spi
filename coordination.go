@@ -64,6 +64,11 @@ type CalloutPair struct {
 // discard of the parent, or of any ancestor, removes them. DiscardScope
 // removes the scope's writes and those of every scope under it.
 //
+// The same holds for the scope's reads. CompleteScope makes them part of its
+// parent's read set, so the commit validates them. DiscardScope removes them
+// from the transaction's read set with the scope's writes, so the commit does
+// not validate them.
+//
 // # Visibility
 //
 // A completed scope's writes are visible to later reads of its parent and of
@@ -76,28 +81,19 @@ type CalloutPair struct {
 // minor seen for the callout. A callout registered by BeginCallout has no
 // current pair until its first AdvanceCallout.
 //
-// # Rollback-only
+// # A discard that fails
 //
-// A scope is marked (rollback-only) by a DiscardScope of one of its children
-// with a non-empty failedCode, the code that names the failure: for a child
-// whose completion was refused for a mark, the refusal's FailedCode;
-// otherwise the code the child's failed request was answered with. The
-// coordinator records the code of a scope's first mark; a later mark of the
-// same scope keeps it. A marked scope cannot complete. The
-// transaction is rollback-only when the root is marked.
+// A coordinator must never let Seal succeed after a DiscardScope of the
+// transaction that returned an error: the scope's writes may still be part of
+// the transaction. For example, it keeps the scope unresolved so that Seal
+// fails, or Seal waits until the scope's lease expires and then fails.
 //
-// A coordinator must never let Seal succeed after a mark it failed to
-// record. If DiscardScope with a non-empty failedCode cannot record the mark,
-// the coordinator must make the transaction's Seal fail: for example by
-// keeping the scope unresolved so that Seal fails, or by having Seal wait
-// until the scope's lease expires and then treat it as rollback-only.
-//
-// Every refusal for a mark (by OpenScope, CheckScope, CompleteScope or Seal)
-// is a *RollbackOnlyError, which matches ErrTxRollbackOnly under errors.Is.
-// Its FailedCode is the code recorded for the nearest marked scope on the
-// chain the refusal checks: for CheckScope and CompleteScope the scope itself
-// or, when it is not marked, its nearest marked ancestor; for OpenScope the
-// parent or its nearest marked ancestor; for Seal the root.
+// DiscardScope of a scope that completed is such a discard: it returns an
+// error, so the transaction cannot commit. A caller whose CompleteScope
+// returned an error other than ErrCalloutSuperseded or ErrScopeConflict
+// cannot tell whether the completion applied, and discards the scope. When
+// the completion did apply, the refused discard fails the transaction, so the
+// scope's writes never commit after the caller reported them as failed.
 //
 // # Concurrency
 //
@@ -110,11 +106,11 @@ type TransactionCoordinator interface {
 	// outer pair is not current.
 	//
 	// Nested callouts on another node. Nothing cancels a nested callout
-	// running on another node when its enclosing scope is superseded or
-	// marked. The owner's loop for that nested callout calls CheckScope on
-	// its enclosing scope before each try and each hand-over, and stops when
-	// it fails. A try already in progress runs until it is answered or
-	// reaches its time limit; its scope cannot complete either way.
+	// running on another node when its enclosing scope is superseded. The
+	// owner's loop for that nested callout calls CheckScope on its enclosing
+	// scope before each try and each hand-over, and stops when it fails. A
+	// try already in progress runs until it is answered or reaches its time
+	// limit; its scope cannot complete either way.
 	BeginCallout(ctx context.Context, txID, calloutID string, outer []CalloutPair) error
 
 	// AdvanceCallout raises the callout's major to major, with minor 0.
@@ -137,9 +133,7 @@ type TransactionCoordinator interface {
 	// It refuses with ErrCalloutSuperseded unless every pair is current. In
 	// the same atomic step it raises a callout's highest seen minor to the
 	// pair's minor when that is higher, so a pass refused for any pair
-	// changes nothing. It refuses with a *RollbackOnlyError when the parent
-	// or an ancestor is marked. After Seal it refuses with
-	// ErrCalloutSuperseded.
+	// changes nothing. After Seal it refuses with ErrCalloutSuperseded.
 	OpenScope(ctx context.Context, txID string, pairs []CalloutPair) (context.Context, error)
 
 	// OpenChildScope opens a scope as a child of the scope on ctx, and
@@ -148,16 +142,15 @@ type TransactionCoordinator interface {
 	// BeginCallout on the returned context.
 	OpenChildScope(ctx context.Context) (context.Context, error)
 
-	// CheckScope reports ErrCalloutSuperseded and the *RollbackOnlyError for
-	// the scope on ctx as CompleteScope would, without completing it.
+	// CheckScope reports ErrCalloutSuperseded for the scope on ctx as
+	// CompleteScope would, without completing it.
 	CheckScope(ctx context.Context) error
 
-	// CompleteScope makes the writes of the scope on ctx part of its parent.
-	// It refuses, in this order:
+	// CompleteScope makes the writes of the scope on ctx part of its parent,
+	// and its reads part of its parent's read set. It refuses, in this order:
 	//
 	//   - ErrCalloutSuperseded when a pair of the scope is not current, or
 	//     the transaction is sealed;
-	//   - a *RollbackOnlyError when the scope or an ancestor is marked;
 	//   - ErrScopeConflict when a completed scope of the same transaction
 	//     wrote an entity this scope wrote, from the same version.
 	//
@@ -165,30 +158,26 @@ type TransactionCoordinator interface {
 	CompleteScope(ctx context.Context) error
 
 	// DiscardScope removes the writes of the scope on ctx and those of every
-	// scope under it. With failedCode "" it marks nothing. A non-empty
-	// failedCode is the code that names the failure: for a scope whose
-	// completion was refused for a mark, the refusal's FailedCode; otherwise
-	// the code the scope's failed request was answered with. With it,
-	// DiscardScope also marks the scope's parent and records the code for
-	// it, unless the parent is already marked: the first mark's code stands.
+	// scope under it. It removes their reads from the transaction's read set
+	// too, so the commit does not validate them.
 	//
 	// DiscardScope of a scope whose completion was refused is allowed. The
 	// refused completion has already discarded the scope, so DiscardScope
 	// removes nothing more: no write made since, by the transaction or by any
-	// other scope, is removed. With a non-empty failedCode it still marks the
-	// parent.
+	// other scope, is removed.
 	//
-	// A DiscardScope error does not release the coordinator from recording
-	// the mark: if it could not record it, Seal of the transaction must still
-	// fail (see "Rollback-only" on TransactionCoordinator).
+	// A DiscardScope error does not release the coordinator from its
+	// obligation: Seal of the transaction must still fail (see "A discard that
+	// fails" on TransactionCoordinator).
 	//
-	// The caller does not call DiscardScope after a successful CompleteScope
-	// of the same scope; a coordinator may refuse such a call.
-	DiscardScope(ctx context.Context, failedCode string) error
+	// DiscardScope of a scope that completed refuses with an error and
+	// removes nothing. Seal of the transaction then fails, as after every
+	// DiscardScope error (see "A discard that fails" on
+	// TransactionCoordinator).
+	DiscardScope(ctx context.Context) error
 
-	// Seal is the owner's cut-off before commit or rollback. It fails with a
-	// *RollbackOnlyError, carrying the root's code, when the root is marked,
-	// including a mark that DiscardScope failed to record.
+	// Seal is the owner's cut-off before commit or rollback. It fails after a
+	// DiscardScope of the transaction that returned an error.
 	// After it returns, OpenScope and CompleteScope both refuse with
 	// ErrCalloutSuperseded. Commit after a successful Seal commits the root
 	// and every completed scope.
@@ -199,29 +188,7 @@ var (
 	// ErrCalloutSuperseded: a pair is no longer current (its callout
 	// advanced past it or ended), or the transaction is sealed.
 	ErrCalloutSuperseded = errors.New("callout superseded")
-	// ErrTxRollbackOnly: the scope, an ancestor, or the transaction's root
-	// is marked rollback-only. A coordinator refuses with a
-	// *RollbackOnlyError, which matches it under errors.Is.
-	ErrTxRollbackOnly = errors.New("transaction is rollback-only")
 	// ErrScopeConflict: a completed scope of the same transaction wrote an
 	// entity this scope wrote, from the same version.
 	ErrScopeConflict = errors.New("scope conflicts with another scope of the transaction")
 )
-
-// RollbackOnlyError is a coordinator's refusal for a mark. FailedCode is the
-// code recorded for the nearest marked scope on the chain the refusal checks
-// (see "Rollback-only" on TransactionCoordinator). It matches
-// ErrTxRollbackOnly under errors.Is; find it with errors.As on a
-// *RollbackOnlyError.
-type RollbackOnlyError struct {
-	FailedCode string
-}
-
-func (e *RollbackOnlyError) Error() string {
-	return ErrTxRollbackOnly.Error() + " (failed with " + e.FailedCode + ")"
-}
-
-// Is reports whether target is ErrTxRollbackOnly.
-func (e *RollbackOnlyError) Is(target error) bool {
-	return target == ErrTxRollbackOnly
-}

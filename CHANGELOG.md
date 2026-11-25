@@ -26,6 +26,37 @@ MAINTAINING.md.
   `Entity/GetVersionMetadata/TombstoneTransitionEmpty` and
   `Entity/OneVersionPerTx/TransitionIsLastWrite`.
 
+Migration for a `TransactionCoordinator` implementation: drop the
+`failedCode` parameter of `DiscardScope` and every rollback-only mark; make
+`DiscardScope` of a completed scope return an error; make `Seal` fail after any
+`DiscardScope` of the transaction that returned an error. Notified:
+cyoda/cyoda-go (cyoda/cyoda-go#738) and cyoda/cyoda-go-cassandra
+(cyoda/cyoda-go-cassandra#121).
+
+- **`TransactionCoordinator` no longer marks scopes rollback-only.**
+  `DiscardScope(ctx)` drops `failedCode`; `ErrTxRollbackOnly` and
+  `RollbackOnlyError` are removed; the `Coordination/RollbackOnly*` cases are
+  gone. A coordinator must make `Seal` fail after any `DiscardScope` that
+  returned an error.
+
+- **`DiscardScope` of a completed scope refuses, and `Seal` then fails.** A
+  caller that cannot tell whether its `CompleteScope` applied discards the
+  scope; a coordinator that accepted that discard as a no-op would commit
+  writes the caller reported as failed. Conformance:
+  `Coordination/DiscardAfterCompleteFailsSeal`, and
+  `Coordination/DiscardLeavesParentUsable` for a discard that succeeds (the
+  parent still completes, a later scope opens and completes, `Seal`
+  succeeds).
+
+- **A scope's reads follow its writes** (doc only): `CompleteScope` makes
+  them part of the parent's read set; `DiscardScope` removes them, so the
+  commit does not validate them.
+
+- **`RollbackToSavepoint` drops the reads made since the savepoint**, so
+  `Commit` does not validate them. Conformance: `Savepoint/RollbackDropsReads`
+  fails a backend that keeps them; `Savepoint/ReadKeptWithoutRollback` is its
+  control.
+
 ## [0.9.0] - 2026-11-22
 
 ### Breaking

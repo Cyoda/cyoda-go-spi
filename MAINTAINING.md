@@ -69,9 +69,11 @@ When the milestone is complete, on the release's branch (`main` or
    ```
 5. Verify the tag is annotated + signed:
    ```bash
-   git verify-tag vX.Y.Z
+   git cat-file -p vX.Y.Z | grep -q "BEGIN SSH SIGNATURE" && echo signed
    ```
-   Expected: signature verifies. (Lightweight tags will print `cannot verify a non-tag object of type commit`.)
+   Expected: `signed`. A lightweight tag has no tag object and prints nothing.
+   `git verify-tag vX.Y.Z` also checks the signature, but needs the
+   allowed-signers file configured.
 6. Create the GitHub Release, only after the tag exists (`gh release create`
    on a missing tag creates a lightweight, unsigned one):
    ```bash
